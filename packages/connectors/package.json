@@ -2,14 +2,14 @@
   "name": "@picco-agent/connectors",
   "version": "0.1.0",
   "description": "Built-in service connectors for @picco-agent/identity.",
-  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/connectors",
+  "homepage": "https://github.com/picco-agent/picco/tree/main/packages/connectors",
   "bugs": {
-    "url": "https://github.com/anthonyshort/picco/issues"
+    "url": "https://github.com/picco-agent/picco/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthonyshort/picco.git",
+    "url": "https://github.com/picco-agent/picco.git",
     "directory": "packages/connectors"
   },
   "files": [

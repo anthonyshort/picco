@@ -2,14 +2,14 @@
   "name": "@picco-agent/runtime-local",
   "version": "0.1.0",
   "description": "Picco local runtime: no-isolation subprocess execution for development and testing.",
-  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/runtime-local",
+  "homepage": "https://github.com/picco-agent/picco/tree/main/packages/runtime-local",
   "bugs": {
-    "url": "https://github.com/anthonyshort/picco/issues"
+    "url": "https://github.com/picco-agent/picco/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthonyshort/picco.git",
+    "url": "https://github.com/picco-agent/picco.git",
     "directory": "packages/runtime-local"
   },
   "files": [
