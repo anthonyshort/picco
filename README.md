@@ -16,17 +16,44 @@ own hardware with local or hosted models, and add only the capabilities you need
 
 ## Install
 
-Picco requires Node.js 22.19 or later. Install Pi, Picco, the bubblewrap runtime, and the plugins
-used below:
+Picco requires Node.js 22.19 or later. Install Pi, Picco, and the local runtime:
 
 ```sh
-npm install @earendil-works/pi-coding-agent @picco-agent/core \
-  @picco-agent/plugin-cron @picco-agent/plugin-telegram @picco-agent/runtime-bwrap
+npm install @earendil-works/pi-coding-agent @picco-agent/core @picco-agent/runtime-local
+```
+
+## Usage
+
+```ts
+// assistant.mjs
+import { createAgent } from "@picco-agent/core";
+import { local } from "@picco-agent/runtime-local";
+
+const agent = createAgent({
+  name: "assistant",
+  runtime: local(),
+  pi: { model: "anthropic/claude-sonnet-4-5" },
+});
+
+await agent.start();
+const { text } = await agent.run("Plan three simple dinners for this week.");
+console.log(text);
+await agent.stop();
+```
+
+```sh
+ANTHROPIC_API_KEY=... node assistant.mjs
+```
+
+### Always-on Telegram assistant
+
+Add the Telegram and cron plugins and the bubblewrap runtime:
+
+```sh
+npm install @picco-agent/plugin-cron @picco-agent/plugin-telegram @picco-agent/runtime-bwrap
 ```
 
 The bubblewrap runtime requires Linux and bubblewrap 0.8 or later.
-
-## Usage
 
 ```ts
 // assistant.mjs
