@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install integration test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          sudo install "$(command -v node)" /usr/local/bin/node
+          sudo npm install --global --prefix /usr/local npm @earendil-works/pi-coding-agent@0.82.0
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Check generated files
+        run: git diff --exit-code
+
+      - name: Format check
+        run: pnpm fmt:check
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Unit test
+        run: pnpm test
+
+      - name: Integration test
+        run: pnpm test:integration
+        env:
+          PICCO_REQUIRE_BWRAP: "1"

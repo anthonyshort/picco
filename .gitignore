@@ -1,0 +1,21 @@
+.env
+.env.*
+!.env.example
+.pi
+sessions/
+node_modules/
+cron/
+# Ship only the sample job — hand-written jobs stay local (personal prompts/recipients).
+!example/personal-assistant/cron/
+example/personal-assistant/cron/*
+!example/personal-assistant/cron/weather.yaml
+workspace/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editor configs
+.claude
+.project
+dist/

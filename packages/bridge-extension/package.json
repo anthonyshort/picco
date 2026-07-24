@@ -1,0 +1,51 @@
+{
+  "name": "@picco-agent/bridge-extension",
+  "version": "0.1.0",
+  "description": "Pi extension that registers host-side tools via the tool bridge. Installed automatically by @picco-agent/core.",
+  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/bridge-extension",
+  "bugs": {
+    "url": "https://github.com/anthonyshort/picco/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthonyshort/picco.git",
+    "directory": "packages/bridge-extension"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.build.json && esbuild ./src/index.ts --bundle --outfile=./dist/index.js --platform=node --format=esm --external:@earendil-works/pi-coding-agent",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "typebox": "^1.1.38",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  }
+}

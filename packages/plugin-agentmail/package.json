@@ -1,0 +1,41 @@
+{
+  "name": "@picco-agent/plugin-agentmail",
+  "version": "0.1.0",
+  "description": "Picco plugin: the agent's own AgentMail mailbox — mail_* tools and an inbound listener.",
+  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/plugin-agentmail",
+  "bugs": {
+    "url": "https://github.com/anthonyshort/picco/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthonyshort/picco.git",
+    "directory": "packages/plugin-agentmail"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "@picco-agent/core": "workspace:*",
+    "agentmail": "^0.5.13",
+    "ws": "^8.21.0",
+    "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

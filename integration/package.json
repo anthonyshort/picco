@@ -1,0 +1,13 @@
+{
+  "name": "@picco-agent/integration",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@picco-agent/connectors": "workspace:*",
+    "@picco-agent/core": "workspace:*",
+    "@picco-agent/identity": "workspace:*",
+    "@picco-agent/runtime-bwrap": "workspace:*",
+    "@picco-agent/runtime-local": "workspace:*",
+    "zod": "^4.4.3"
+  }
+}

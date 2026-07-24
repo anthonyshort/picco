@@ -1,0 +1,38 @@
+{
+  "name": "@picco-agent/runtime-bwrap",
+  "version": "0.1.0",
+  "description": "Picco bubblewrap runtime: per-session Linux filesystem isolation for pi sessions.",
+  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/runtime-bwrap",
+  "bugs": {
+    "url": "https://github.com/anthonyshort/picco/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthonyshort/picco.git",
+    "directory": "packages/runtime-bwrap"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "@picco-agent/core": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

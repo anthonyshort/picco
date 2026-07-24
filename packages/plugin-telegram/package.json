@@ -1,0 +1,40 @@
+{
+  "name": "@picco-agent/plugin-telegram",
+  "version": "0.1.0",
+  "description": "Picco plugin: Telegram gateway — per-chat sessions, /new and /context commands.",
+  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/plugin-telegram",
+  "bugs": {
+    "url": "https://github.com/anthonyshort/picco/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthonyshort/picco.git",
+    "directory": "packages/plugin-telegram"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "@picco-agent/core": "workspace:*",
+    "grammy": "^1.44.0",
+    "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

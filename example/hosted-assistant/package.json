@@ -1,0 +1,17 @@
+{
+  "name": "hosted-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Example agent: the minimal hosted-provider setup — Telegram + Claude via the Anthropic API.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@picco-agent/core": "workspace:*",
+    "@picco-agent/plugin-telegram": "workspace:*",
+    "@picco-agent/runtime-bwrap": "workspace:*",
+    "dotenv": "^17.4.2"
+  }
+}

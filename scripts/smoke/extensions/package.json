@@ -1,0 +1,19 @@
+{
+  "name": "extensions-smoke",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Smoke tests for Pi extension delivery across local and bubblewrap runtimes.",
+  "type": "module",
+  "scripts": {
+    "smoke:local-file": "tsx src/local-file.ts",
+    "smoke:bwrap-bridge": "tsx src/bwrap-bridge.ts",
+    "smoke:bwrap-mount": "tsx src/bwrap-mount.ts"
+  },
+  "dependencies": {
+    "@picco-agent/core": "workspace:*",
+    "@picco-agent/runtime-bwrap": "workspace:*",
+    "@picco-agent/runtime-local": "workspace:*",
+    "@picco-agent/smoke-extension": "workspace:*",
+    "zod": "^4.4.3"
+  }
+}

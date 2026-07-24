@@ -1,0 +1,6 @@
+packages:
+  - "packages/*"
+  - "example/*"
+  - "integration"
+  - "scripts/smoke/extensions"
+  - "scripts/smoke/fixtures/*"

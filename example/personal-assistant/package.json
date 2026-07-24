@@ -1,0 +1,21 @@
+{
+  "name": "personal-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Example agent: Telegram + cron + AgentMail + identity connectors, composed from the workspace packages.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@picco-agent/connectors": "workspace:*",
+    "@picco-agent/core": "workspace:*",
+    "@picco-agent/identity": "workspace:*",
+    "@picco-agent/plugin-agentmail": "workspace:*",
+    "@picco-agent/plugin-cron": "workspace:*",
+    "@picco-agent/plugin-telegram": "workspace:*",
+    "@picco-agent/runtime-bwrap": "workspace:*",
+    "dotenv": "^17.4.2"
+  }
+}

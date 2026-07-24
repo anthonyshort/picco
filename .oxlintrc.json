@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "plugins": ["typescript", "import", "promise"],
+  "rules": {
+    "no-shadow": "error",
+    "import/no-unassigned-import": "error",
+    "no-await-in-loop": "allow",
+    "typescript/no-explicit-any": "error"
+  }
+}

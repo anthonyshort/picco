@@ -1,0 +1,44 @@
+{
+  "name": "@picco-agent/core",
+  "version": "0.1.0",
+  "description": "AI assistant framework core handling agent sessions, plugins, and tools.",
+  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/core",
+  "bugs": {
+    "url": "https://github.com/anthonyshort/picco/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthonyshort/picco.git",
+    "directory": "packages/core"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "@picco-agent/bridge-extension": "workspace:*",
+    "pi-mcp-adapter": "^2.11.0",
+    "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

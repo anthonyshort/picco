@@ -1,0 +1,42 @@
+{
+  "name": "@picco-agent/plugin-cron",
+  "version": "0.1.0",
+  "description": "Picco plugin: cron scheduler service + the cron_* toolkit over YAML job files.",
+  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/plugin-cron",
+  "bugs": {
+    "url": "https://github.com/anthonyshort/picco/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthonyshort/picco.git",
+    "directory": "packages/plugin-cron"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "@picco-agent/core": "workspace:*",
+    "croner": "^10.0.1",
+    "fast-deep-equal": "^3.1.3",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

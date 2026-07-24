@@ -1,0 +1,13 @@
+# A sample scheduled job. Set a real recipient and enabled: true to use it.
+# Schedules are 6-field cron expressions (seconds first): this one is daily at 07:00.
+id: weather
+type: agent
+description: Email a short San Francisco weather summary every morning
+schedule: 0 0 7 * * *
+prompt: >-
+  Fetch the current weather for San Francisco from
+  https://wttr.in/San+Francisco?format=j1 and send an email to you@example.com
+  with the subject "San Francisco weather". Include the temperature, what it
+  feels like, humidity, wind, and conditions, in Celsius. Keep it short and
+  readable.
+enabled: false

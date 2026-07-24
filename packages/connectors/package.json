@@ -1,0 +1,38 @@
+{
+  "name": "@picco-agent/connectors",
+  "version": "0.1.0",
+  "description": "Built-in service connectors for @picco-agent/identity.",
+  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/connectors",
+  "bugs": {
+    "url": "https://github.com/anthonyshort/picco/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthonyshort/picco.git",
+    "directory": "packages/connectors"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "@picco-agent/identity": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

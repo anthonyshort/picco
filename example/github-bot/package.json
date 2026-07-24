@@ -1,0 +1,17 @@
+{
+  "name": "github-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Example agent: a GitHub @mention bot, composed from the workspace packages.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@picco-agent/core": "workspace:*",
+    "@picco-agent/plugin-github": "workspace:*",
+    "@picco-agent/runtime-bwrap": "workspace:*",
+    "dotenv": "^17.4.2"
+  }
+}

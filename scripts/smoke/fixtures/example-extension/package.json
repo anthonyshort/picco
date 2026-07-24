@@ -1,0 +1,37 @@
+{
+  "name": "@picco-agent/smoke-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pi extension fixture used by the extension smoke tests.",
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./unbundled": "./src/unbundled.ts",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "esbuild ./src/index.ts --bundle --outfile=./dist/index.js --platform=node --format=esm --external:@earendil-works/pi-coding-agent",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "picocolors": "^1.1.1",
+    "typebox": "^1.1.38"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  }
+}

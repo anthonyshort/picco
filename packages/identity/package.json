@@ -1,0 +1,57 @@
+{
+  "name": "@picco-agent/identity",
+  "version": "0.1.0",
+  "description": "Per-user tools and MCP servers behind /connect, packaged as a Picco plugin.",
+  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/identity",
+  "bugs": {
+    "url": "https://github.com/anthonyshort/picco/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthonyshort/picco.git",
+    "directory": "packages/identity"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./store": {
+      "types": "./dist/store/index.d.ts",
+      "import": "./dist/store/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "@picco-agent/core": "workspace:*",
+    "jose": "^6.2.3",
+    "openid-client": "^6.8.4",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "vitest": "^4.1.9"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
