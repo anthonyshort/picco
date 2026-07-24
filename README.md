@@ -1,46 +1,89 @@
-# picco
+<div align="center">
+  <h1>Picco</h1>
+  <p>A small TypeScript framework for building self-hosted assistants and automations on top of Pi.</p>
+  <p>
+    <a href="docs/getting-started.md">Getting started</a>
+    ·
+    <a href="docs/index.md">Documentation</a>
+    ·
+    <a href="docs/guides/plugins.md">Plugins</a>
+  </p>
+</div>
 
-Picco is a small TypeScript framework for building self-hosted assistants and automations on top of
-[Pi](https://pi.dev).
-
-It adds long-lived sessions, plugins, scheduling, and isolated runtimes while leaving the model,
-tools, skills, and behaviour up to you. Run it on your own hardware with local or hosted models,
-and add only the capabilities you need.
+Picco adds long-lived sessions, plugins, scheduling, and isolated runtimes to
+[Pi](https://pi.dev) while leaving the model, tools, skills, and behaviour up to you. Run it on your
+own hardware with local or hosted models, and add only the capabilities you need.
 
 ## Install
 
-Picco requires Node.js 22.19 or later. Install Pi, Picco, and the local runtime:
+Picco requires Node.js 22.19 or later. Install Pi, Picco, the bubblewrap runtime, and the plugins
+used below:
 
 ```sh
-npm install @earendil-works/pi-coding-agent @picco-agent/core @picco-agent/runtime-local
+npm install @earendil-works/pi-coding-agent @picco-agent/core \
+  @picco-agent/plugin-cron @picco-agent/plugin-telegram @picco-agent/runtime-bwrap
 ```
 
-## Run an assistant
+The bubblewrap runtime requires Linux and bubblewrap 0.8 or later.
+
+## Usage
 
 ```ts
 // assistant.mjs
+import { mkdirSync } from "node:fs";
+import path from "node:path";
 import { createAgent } from "@picco-agent/core";
-import { local } from "@picco-agent/runtime-local";
+import { cron } from "@picco-agent/plugin-cron";
+import { telegram } from "@picco-agent/plugin-telegram";
+import { bwrap } from "@picco-agent/runtime-bwrap";
+
+const memoryDirectory = path.resolve("./data/pi-hermes-memory");
+mkdirSync(memoryDirectory, { recursive: true });
 
 const agent = createAgent({
   name: "assistant",
-  runtime: local(),
-  pi: { model: "anthropic/claude-sonnet-4-5" },
+  runtime: bwrap({
+    env: ["ANTHROPIC_API_KEY"],
+    mounts: [
+      {
+        source: memoryDirectory,
+        target: "~/.pi/agent/pi-hermes-memory",
+        mode: "rw",
+      },
+    ],
+  }),
+  pi: {
+    model: "anthropic/claude-sonnet-4-5",
+    skills: ["./skills"],
+    packages: [
+      "npm:context-mode@1.0.169",
+      "npm:pi-hermes-memory@0.8.2",
+      "npm:@tintinweb/pi-subagents@0.14.2",
+      "npm:@tintinweb/pi-tasks@0.7.1",
+    ],
+  },
+  plugins: [
+    telegram({
+      botToken: process.env.TELEGRAM_BOT_TOKEN,
+      allowlist: [Number(process.env.TELEGRAM_CHAT_ID)],
+    }),
+    cron({ jobDir: "./cron" }),
+  ],
 });
 
 await agent.start();
-const { text } = await agent.run("Plan three simple dinners for this week.");
-console.log(text);
-await agent.stop();
 ```
 
 ```sh
-ANTHROPIC_API_KEY=... node assistant.mjs
+ANTHROPIC_API_KEY=... \
+TELEGRAM_BOT_TOKEN=... \
+TELEGRAM_CHAT_ID=... \
+node assistant.mjs
 ```
 
-Plugins can turn the same agent into an always-on Telegram assistant, a GitHub bot, an email
-assistant, or a scheduled automation. See [Plugins](docs/guides/plugins.md) to add one, or browse
-the [documentation](docs/index.md) to build your own setup.
+This starts an always-on Telegram assistant that can create and run scheduled jobs. Each
+conversation runs in a bubblewrap sandbox with Pi extensions, local skills, and persistent Hermes
+memory.
 
 ## Features
 

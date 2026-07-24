@@ -29,6 +29,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo install "$(command -v node)" /usr/local/bin/node
           sudo npm install --global --prefix /usr/local npm @earendil-works/pi-coding-agent@0.82.0
 
