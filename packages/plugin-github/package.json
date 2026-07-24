@@ -2,14 +2,14 @@
   "name": "@picco-agent/plugin-github",
   "version": "0.1.0",
   "description": "Picco plugin: GitHub @mention gateway — relay listener, per-mention sessions, bot auth.",
-  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/plugin-github",
+  "homepage": "https://github.com/picco-agent/picco/tree/main/packages/plugin-github",
   "bugs": {
-    "url": "https://github.com/anthonyshort/picco/issues"
+    "url": "https://github.com/picco-agent/picco/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthonyshort/picco.git",
+    "url": "https://github.com/picco-agent/picco.git",
     "directory": "packages/plugin-github"
   },
   "files": [

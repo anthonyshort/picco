@@ -2,14 +2,14 @@
   "name": "@picco-agent/plugin-cron",
   "version": "0.1.0",
   "description": "Picco plugin: cron scheduler service + the cron_* toolkit over YAML job files.",
-  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/plugin-cron",
+  "homepage": "https://github.com/picco-agent/picco/tree/main/packages/plugin-cron",
   "bugs": {
-    "url": "https://github.com/anthonyshort/picco/issues"
+    "url": "https://github.com/picco-agent/picco/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthonyshort/picco.git",
+    "url": "https://github.com/picco-agent/picco.git",
     "directory": "packages/plugin-cron"
   },
   "files": [

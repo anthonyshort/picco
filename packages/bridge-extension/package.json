@@ -2,14 +2,14 @@
   "name": "@picco-agent/bridge-extension",
   "version": "0.1.0",
   "description": "Pi extension that registers host-side tools via the tool bridge. Installed automatically by @picco-agent/core.",
-  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/bridge-extension",
+  "homepage": "https://github.com/picco-agent/picco/tree/main/packages/bridge-extension",
   "bugs": {
-    "url": "https://github.com/anthonyshort/picco/issues"
+    "url": "https://github.com/picco-agent/picco/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthonyshort/picco.git",
+    "url": "https://github.com/picco-agent/picco.git",
     "directory": "packages/bridge-extension"
   },
   "files": [

@@ -2,14 +2,14 @@
   "name": "@picco-agent/core",
   "version": "0.1.0",
   "description": "AI assistant framework core handling agent sessions, plugins, and tools.",
-  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/core",
+  "homepage": "https://github.com/picco-agent/picco/tree/main/packages/core",
   "bugs": {
-    "url": "https://github.com/anthonyshort/picco/issues"
+    "url": "https://github.com/picco-agent/picco/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthonyshort/picco.git",
+    "url": "https://github.com/picco-agent/picco.git",
     "directory": "packages/core"
   },
   "files": [

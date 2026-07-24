@@ -2,14 +2,14 @@
   "name": "@picco-agent/plugin-agentmail",
   "version": "0.1.0",
   "description": "Picco plugin: the agent's own AgentMail mailbox — mail_* tools and an inbound listener.",
-  "homepage": "https://github.com/anthonyshort/picco/tree/main/packages/plugin-agentmail",
+  "homepage": "https://github.com/picco-agent/picco/tree/main/packages/plugin-agentmail",
   "bugs": {
-    "url": "https://github.com/anthonyshort/picco/issues"
+    "url": "https://github.com/picco-agent/picco/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthonyshort/picco.git",
+    "url": "https://github.com/picco-agent/picco.git",
     "directory": "packages/plugin-agentmail"
   },
   "files": [
