@@ -14,6 +14,22 @@ import { DEFAULT_CALLBACK_PORT, OAuthCallbackListener } from "./oauth/callback.j
 import { createOAuthRefresher } from "./oauth/refresh.js";
 import type { IdentityStore } from "./store/identity-store.js";
 
+/**
+ * Context passed to a lazy store factory so the caller can resolve paths relative to the agent's
+ * data directory without computing them manually.
+ */
+export interface StoreConfig {
+  /**
+   * The agent's root data directory (`{dataDir}/{name}`).
+   */
+  dataDir: string;
+
+  /**
+   * The agent's display name.
+   */
+  agentName: string;
+}
+
 const DEFAULT_REDIRECT_URI = `http://127.0.0.1:${DEFAULT_CALLBACK_PORT}/oauth/callback`;
 
 /**
@@ -27,10 +43,17 @@ export interface IdentityConfig {
   encryptionKey: string;
 
   /**
-   * Where sealed envelopes persist. `fileStore(dir)` ships here; `@picco-agent/identity-sqlite` has
-   * a SQLite backend; implement `IdentityStore` for anything else.
+   * Where sealed envelopes persist. Pass an `IdentityStore` instance, or a factory function
+   * receiving `{ dataDir, agentName }` so you can resolve paths lazily:
+   *
+   * ```ts
+   * store: ({ dataDir }) => fileStore(path.join(dataDir, "connections")),
+   * ```
+   *
+   * `fileStore(dir)` ships here; `@picco-agent/identity-sqlite` has a SQLite backend; implement
+   * `IdentityStore` for anything else.
    */
-  store: IdentityStore;
+  store: IdentityStore | ((config: StoreConfig) => IdentityStore);
 
   /**
    * Public URL OAuth providers redirect to. When set, a loopback listener serves its pathname and
@@ -67,30 +90,57 @@ export function connections(config: IdentityConfig): Plugin {
     if (connector.mcp) routes.set(connector.name, connector.mcp);
   }
 
+  const storeOrFactory = config.store;
+  const isLazy = typeof storeOrFactory === "function";
   let host: PluginContext | null = null;
   let proxy: McpProxy | null = null;
   let callback: OAuthCallbackListener | null = null;
+  let credentials: Credentials | null = null;
+  let connectionCommands: ReturnType<typeof createConnectionCommands> | null = null;
 
-  const credentials = new Credentials({
-    store: config.store,
-    cipher: createCredentialCipher(config.encryptionKey),
-    refresh: createOAuthRefresher(fetchImpl),
-    logger: () => host?.logger,
-  });
+  // Eager init when store is concrete (backward compatible). Lazy store defers to resolve().
+  if (!isLazy) {
+    credentials = new Credentials({
+      store: storeOrFactory,
+      cipher: createCredentialCipher(config.encryptionKey),
+      refresh: createOAuthRefresher(fetchImpl),
+      logger: () => host?.logger,
+    });
+    connectionCommands = createConnectionCommands({
+      catalog,
+      credentials,
+      callbackUrl: config.callbackUrl,
+      redirectUri,
+      client: () => ({ clientName: host?.agentName ?? "agent" }),
+      fetch: fetchImpl,
+    });
+  }
 
-  const connectionCommands = createConnectionCommands({
-    catalog,
-    credentials,
-    callbackUrl: config.callbackUrl,
-    redirectUri,
-    client: () => ({ clientName: host?.agentName ?? "agent" }),
-    fetch: fetchImpl,
-  });
-
-  return {
+  const plugin: Plugin = {
     name: "identity",
-    commands: connectionCommands.commands,
-    tools: createConnectorTools(catalog, credentials),
+    commands: connectionCommands?.commands,
+    tools: credentials ? createConnectorTools(catalog, credentials) : undefined,
+
+    resolve(info) {
+      if (!isLazy) return; // Already initialized eagerly
+      const store = storeOrFactory(info);
+      credentials = new Credentials({
+        store,
+        cipher: createCredentialCipher(config.encryptionKey),
+        refresh: createOAuthRefresher(fetchImpl),
+        logger: () => host?.logger,
+      });
+      connectionCommands = createConnectionCommands({
+        catalog,
+        credentials,
+        callbackUrl: config.callbackUrl,
+        redirectUri,
+        client: () => ({ clientName: host?.agentName ?? "agent" }),
+        fetch: fetchImpl,
+      });
+      plugin.commands = connectionCommands.commands;
+      plugin.tools = createConnectorTools(catalog, credentials);
+    },
 
     async start(ctx) {
       host = ctx;
@@ -104,7 +154,7 @@ export function connections(config: IdentityConfig): Plugin {
             if (user) {
               // A transient resolve throw propagates — the proxy turns it into its retry
               // message rather than this "not connected" one.
-              const token = await credentials.resolve(user, connector);
+              const token = await credentials!.resolve(user, connector);
               if (token) return { token };
             }
             const who = user?.display ?? (user ? userKey(user) : null);
@@ -121,7 +171,7 @@ export function connections(config: IdentityConfig): Plugin {
         callback = new OAuthCallbackListener({
           callbackUrl: config.callbackUrl,
           port: config.callbackPort,
-          complete: connectionCommands.completeOAuth,
+          complete: connectionCommands!.completeOAuth,
           logger: ctx.logger,
         });
         await callback.start();
@@ -158,6 +208,8 @@ export function connections(config: IdentityConfig): Plugin {
       proxy?.release(session);
     },
   };
+
+  return plugin;
 }
 
 /**

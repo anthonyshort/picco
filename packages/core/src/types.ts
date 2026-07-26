@@ -378,6 +378,13 @@ export interface Plugin {
   commands?: Command[];
 
   /**
+   * Called once at agent construction, before commands/tools are collected. Receives the agent's
+   * data directory and name — use to resolve lazy configuration that depends on paths (e.g. store
+   * factories). Throwing an error fails agent creation.
+   */
+  resolve?(info: { dataDir: string; agentName: string }): void;
+
+  /**
    * Called when the agent is started. You can use this to run additional processes or set up state.
    */
   start?(ctx: PluginContext): void | Promise<void>;

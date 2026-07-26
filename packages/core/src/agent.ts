@@ -89,6 +89,12 @@ export function createAgent(config: AgentConfig): AgentHandle {
   const runtime = config.runtime;
 
   validatePluginNames(plugins);
+
+  // Resolve lazy plugin configuration (e.g. store factories) before commands/tools are collected.
+  for (const plugin of plugins) {
+    plugin.resolve?.({ dataDir: paths.root, agentName: name });
+  }
+
   const commands = collectCommands(plugins);
 
   const tools = collectTools(config, plugins);
