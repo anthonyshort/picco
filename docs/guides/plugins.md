@@ -49,6 +49,25 @@ export function health(): Plugin {
 
 Names must be unique. A plugin's name scopes its logs, data directory, and sessions.
 
+## Resolve lazy configuration
+
+Use `resolve` when a plugin needs the agent's data directory or name before it can initialise:
+
+```ts
+export function storePlugin(storeFactory: (dataDir: string) => Store): Plugin {
+  return {
+    name: "store",
+    resolve({ dataDir, agentName }) {
+      this.store = storeFactory(dataDir);
+    },
+  };
+}
+```
+
+The `resolve` hook runs at agent construction, before commands and tools are collected. Use it
+when configuration depends on paths the agent owns — for example, a store that must be created
+before the plugin's commands and tools are available.
+
 ## Add tools
 
 Set `tools` on the plugin to make host-side tools available to every session:
