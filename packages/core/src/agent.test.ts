@@ -597,9 +597,7 @@ describe("createAgent", () => {
       expect(pi.model).toBe("llama/q");
       expect(pi.settings).toEqual({ quietStartup: true });
       expect(pi.models).toEqual(models);
-      // The user's source string and the always-bundled MCP adapter both travel.
-      expect(pi.packages).toContain("npm:my-extension@1.0.0");
-      expect(pi.packages!.some((p) => p.includes("pi-mcp-adapter"))).toBe(true);
+      expect(pi.packages).toEqual(["npm:my-extension@1.0.0"]);
     });
 
     test("declared skills/prompts dirs travel on the spec", async () => {
@@ -635,12 +633,12 @@ describe("createAgent", () => {
       const { agent, runtime } = agentWith({ pi: { model: "base/model", thinking: "low" } });
       await agent.start({ handleSignals: false });
 
-      await agent.run("with override", { pi: { model: "override/model", thinking: "high" } });
+      await agent.run("with override", { pi: { model: "override/model", thinking: "max" } });
       await agent.run("no override");
 
       const first = runtime.spawns[0]!.spec.pi;
       expect(first.model).toBe("override/model");
-      expect(first.thinking).toBe("high");
+      expect(first.thinking).toBe("max");
 
       const second = runtime.spawns[1]!.spec.pi;
       expect(second.model).toBe("base/model");
@@ -659,11 +657,10 @@ describe("createAgent", () => {
 
       const pi = runtime.spawns[0]!.spec.pi;
       // The override's skills are resolved and carried; packages replace the base
-      // (merge contract), while the always-bundled adapter still rides.
+      // (merge contract).
       expect(pi.skills).toEqual([sessionSkills]);
       expect(pi.packages).toContain("npm:extra@1.0.0");
       expect(pi.packages).not.toContain("npm:base@1.0.0");
-      expect(pi.packages!.some((p) => p.includes("pi-mcp-adapter"))).toBe(true);
     });
 
     test("a per-session env var reaches the spawn; the bridge token rides bridge.token, not env", async () => {
@@ -682,44 +679,7 @@ describe("createAgent", () => {
     });
   });
 
-  describe("bundled MCP adapter", () => {
-    const MCP_ADAPTER_SOURCE = "npm:pi-mcp-adapter@2.11.0";
-
-    /**
-     * The session's resolved packages list from a recorded spawn.
-     */
-    function packagesOf(spawn: FakeSpawn): string[] | undefined {
-      return spawn.spec.pi.packages;
-    }
-
-    function isAdapter(p: string): boolean {
-      return p === MCP_ADAPTER_SOURCE;
-    }
-
-    test("sessions with mcpServers get the bundled adapter appended", async () => {
-      const { agent, runtime } = agentWith({
-        pi: { mcpServers: { deepwiki: { url: "https://mcp.deepwiki.com/mcp" } } },
-      });
-      await agent.start({ handleSignals: false });
-
-      await agent.sessions.run("k", "hi");
-
-      const packages = packagesOf(runtime.spawns[0]!)!;
-      expect(packages.filter(isAdapter)).toHaveLength(1);
-      // Delivered as a pi npm source string — pi installs it at session start.
-      expect(packages).toContain(MCP_ADAPTER_SOURCE);
-    });
-
-    test("the mcp adapter is always bundled", async () => {
-      const { agent, runtime } = agentWith({});
-      await agent.start({ handleSignals: false });
-
-      await agent.sessions.run("k", "hi");
-
-      const packages = packagesOf(runtime.spawns[0]!)!;
-      expect(packages.filter(isAdapter)).toHaveLength(1);
-    });
-
+  describe("bundled extensions", () => {
     test("the bridge extension is injected as a bundled file-path extension", async () => {
       const { agent, runtime } = agentWith({});
       await agent.start({ handleSignals: false });
@@ -735,69 +695,8 @@ describe("createAgent", () => {
       expect(existsSync(bridge!)).toBe(true);
       // …and it is NOT in packages.
       expect(
-        (packagesOf(runtime.spawns[0]!) ?? []).some((p) => p.includes("bridge-extension")),
+        (runtime.spawns[0]!.spec.pi.packages ?? []).some((p) => p.includes("bridge-extension")),
       ).toBe(false);
-    });
-
-    test("a user pi.packages source string rides alongside the bundled adapter", async () => {
-      const { agent, runtime } = agentWith({
-        pi: {
-          packages: ["npm:context-mode@1.0.0"],
-          mcpServers: { deepwiki: { url: "https://mcp.deepwiki.com/mcp" } },
-        },
-      });
-      await agent.start({ handleSignals: false });
-
-      await agent.sessions.run("k", "hi");
-
-      const packages = packagesOf(runtime.spawns[0]!)!;
-      expect(packages).toContain("npm:context-mode@1.0.0");
-      expect(packages).toContain(MCP_ADAPTER_SOURCE);
-    });
-
-    test("a session whose only MCP servers come from a configureSession hook gets the adapter", async () => {
-      let ctx!: PluginContext;
-      const p: Plugin = {
-        name: "telegram",
-        start: (c) => {
-          ctx = c;
-        },
-        configureSession: (_session, pi) => ({
-          ...pi,
-          mcpServers: { ...pi.mcpServers, deepwiki: { url: "https://mcp.deepwiki.com/mcp" } },
-        }),
-      };
-      const { agent, runtime } = agentWith({ plugins: [p] });
-      await agent.start({ handleSignals: false });
-
-      await ctx.sessions.run("k", "hi");
-
-      expect(packagesOf(runtime.spawns[0]!)!.filter(isAdapter)).toHaveLength(1);
-    });
-
-    test("with a global session plugin, the mcp adapter is always bundled", async () => {
-      const global: Plugin = {
-        name: "global",
-        configureAllSessions: ({ key }, pi) =>
-          key === "with"
-            ? {
-                ...pi,
-                mcpServers: {
-                  ...pi.mcpServers,
-                  linear: { url: "http://127.0.0.1:9999/mcp/linear" },
-                },
-              }
-            : pi,
-      };
-      const { agent, runtime } = agentWith({ plugins: [global] });
-      await agent.start({ handleSignals: false });
-
-      await agent.sessions.run("with", "hi");
-      await agent.sessions.run("without", "hi");
-
-      // The MCP adapter is always bundled in every session
-      expect(packagesOf(runtime.spawns[0]!)!.filter(isAdapter)).toHaveLength(1);
-      expect(packagesOf(runtime.spawns[1]!)!.filter(isAdapter)).toHaveLength(1);
     });
   });
 

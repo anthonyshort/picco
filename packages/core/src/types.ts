@@ -1,3 +1,4 @@
+import type { McpServerConfig } from "@earendil-works/pi-coding-agent";
 import type { Tool } from "./tools/tool.js";
 import type { Turn, TurnEvent, TurnResult } from "./session/turn.js";
 
@@ -8,7 +9,7 @@ export type { Turn, TurnEvent, TurnResult };
  * The valid thinking levels, in ascending order of effort. The single source of truth: the
  * {@link ThinkingLevel} type is derived from this array.
  */
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /**
  * One of the valid thinking levels. Derived from {@link THINKING_LEVELS}.
@@ -571,16 +572,9 @@ export interface PiOptions {
   excludedTools?: string[];
 
   /**
-   * The MCP extension is installed by default. These are the settings to allow external MCP servers
-   * to be used.
+   * Native Pi MCP servers, including HTTP and stdio transports and tool exposure.
    */
-  mcpServers?: Record<
-    string,
-    {
-      url: string;
-      headers?: Record<string, string>;
-    }
-  >;
+  mcpServers?: Record<string, McpServerConfig>;
 
   /**
    * Escape hatch: raw pi settings.

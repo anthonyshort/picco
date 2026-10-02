@@ -254,7 +254,7 @@ describe("worker integration", () => {
     await expect(h.prompt("This will hang.", 2000)).rejects.toThrow("timed out");
 
     expect(h.rpc.isAlive()).toBe(true);
-    // Let the abort's own agent_end land before the next prompt registers
+    // Let the abort's own agent_settled land before the next prompt registers
     // its waiter (the host runtime never reuses a timed-out session without
     // a reset; this test is about the worker process surviving the abort).
     await new Promise((resolve) => setTimeout(resolve, 500));

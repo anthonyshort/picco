@@ -37,7 +37,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.82.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
     "@changesets/cli": "^2.29.0",
     "@types/node": "^22.20.0",
     "@types/ws": "^8.18.1",

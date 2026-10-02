@@ -16,7 +16,7 @@ own hardware with local or hosted models, and add only the capabilities you need
 
 ## Install
 
-Picco requires Node.js 22.19 or later. Install Pi, Picco, and the local runtime:
+Picco requires Node.js 22.19 or later and Pi v1. Install Pi, Picco, and the local runtime:
 
 ```sh
 npm install @earendil-works/pi-coding-agent @picco-agent/core @picco-agent/runtime-local

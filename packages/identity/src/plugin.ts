@@ -150,7 +150,7 @@ export function connections(config: IdentityConfig): Plugin {
       if (names.length === 0) return pi;
       const refreshNote =
         `Connector MCP servers (${names.join(", ")}) can't connect until their user runs ` +
-        `/connect <name>. After a user connects, call mcp({ connect: "<name>" }) to connect ` +
+        `/connect <name>. After a user connects, run /mcp reconnect <name> to connect ` +
         `and load that server's tools.`;
       return {
         ...pi,

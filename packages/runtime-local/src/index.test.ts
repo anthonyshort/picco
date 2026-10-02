@@ -160,7 +160,18 @@ describe("writeSessionConfig", () => {
   it("passes mcpServers through verbatim, and omits mcp.json when empty", () => {
     const withMcp = tmp();
     const mcpServers = {
-      custom: { url: "http://localhost:4000/mcp", headers: { "X-Key": "secret" } },
+      custom: {
+        url: "http://localhost:4000/mcp",
+        headers: { "X-Key": "secret" },
+        exposure: "direct" as const,
+      },
+      filesystem: {
+        command: "npx",
+        args: ["server", "."],
+        exposure: "deferred" as const,
+        env: { MODE: "test" },
+        cwd: ".",
+      },
     };
     writeSessionConfig(makeSpec({ pi: { mcpServers } }), withMcp);
     expect(readJson(withMcp, "mcp.json")).toEqual({ mcpServers });

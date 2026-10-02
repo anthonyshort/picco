@@ -5,7 +5,7 @@ directly on the host without isolation.
 
 ## Install
 
-Picco requires Node.js 22.19 or later. Install the Pi CLI, core, and the local runtime:
+Picco requires Node.js 22.19 or later and Pi v1. Install the Pi CLI, core, and the local runtime:
 
 ```sh
 npm install @earendil-works/pi-coding-agent @picco-agent/core @picco-agent/runtime-local

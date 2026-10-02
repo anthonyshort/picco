@@ -1,3 +1,4 @@
+import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
 import { parseJsonl, JsonlWriter, type JsonObject } from "./jsonl.js";
 import { silentLogger } from "../utils/logger.js";
 import type { Logger, RuntimeProcess } from "../types.js";
@@ -45,12 +46,8 @@ export class RpcSession {
   private requestId = 0;
   private dead = false;
   private promptInFlight = false;
-  private agentEnd: { resolve: () => void; reject: (err: Error) => void } | null = null;
+  private agentSettled: { resolve: () => void; reject: (err: Error) => void } | null = null;
   private onEvent: ((event: TurnEvent) => void) | null = null;
-  /**
-   * Resolved display names for in-flight tool calls (see resolveToolName).
-   */
-  private readonly toolNames = new Map<string, string>();
 
   constructor(key: string, proc: RuntimeProcess, opts: RpcSessionOptions = {}) {
     this.key = key;
@@ -85,8 +82,8 @@ export class RpcSession {
   /**
    * Send a prompt to the agent and await the reply.
    *
-   * Flow: prompt → preflight response → agent runs (events forwarded via opts.onEvent) → agent_end
-   * event → get_last_assistant_text → data.text
+   * Flow: prompt → preflight response → agent runs (events forwarded via opts.onEvent) →
+   * agent_settled event → get_last_assistant_text → data.text
    */
   async prompt(text: string, opts: PromptOptions = {}): Promise<string> {
     if (this.promptInFlight) {
@@ -96,7 +93,7 @@ export class RpcSession {
     this.onEvent = opts.onEvent ?? null;
 
     try {
-      // Register the agent_end waiter before sending, so a fast completion
+      // Register the agent_settled waiter before sending, so a fast completion
       // can't slip past between the preflight response and the await.
       const { promise: done, resolve, reject } = Promise.withResolvers<void>();
       // If the preflight fails, `done` is never awaited — register a handler
@@ -105,28 +102,35 @@ export class RpcSession {
       const timer = opts.timeoutMs
         ? setTimeout(() => {
             // The turn is still running inside pi — abort it, or the next
-            // prompt would overlap it and be resolved by its agent_end.
-            this.request("abort").catch(() => {});
+            // prompt would overlap it and be resolved by its agent_settled.
+            this.request({ type: "abort" }).catch(() => {});
             reject(new Error(`Prompt timed out after ${opts.timeoutMs! / 1000}s`));
           }, opts.timeoutMs)
         : null;
-      this.agentEnd = { resolve, reject };
+      this.agentSettled = { resolve, reject };
 
       try {
-        await this.request("prompt", { message: text }, opts.timeoutMs);
-        await done;
+        const response = await this.request({ type: "prompt", message: text }, opts.timeoutMs);
+        switch (response.data.disposition) {
+          case "handled":
+            return "";
+          case "started":
+          case "queued":
+            await done;
+            break;
+          default:
+            throw new Error(`Unknown prompt disposition: ${response.data.disposition}`);
+        }
       } finally {
         if (timer) clearTimeout(timer);
-        this.agentEnd = null;
+        this.agentSettled = null;
       }
 
-      const resp = await this.request("get_last_assistant_text");
-      const data = resp.data as { text?: string | null } | undefined;
-      return data?.text || "(no text response)";
+      const resp = await this.request({ type: "get_last_assistant_text" });
+      return resp.data.text || "(no text response)";
     } finally {
       this.promptInFlight = false;
       this.onEvent = null;
-      this.toolNames.clear(); // aborted calls may never see tool_execution_end
     }
   }
 
@@ -134,7 +138,7 @@ export class RpcSession {
    * Ask pi to abort the in-flight turn (fire-and-forget).
    */
   abortTurn(): void {
-    this.request("abort").catch(() => {});
+    this.request({ type: "abort" }).catch(() => {});
   }
 
   /**
@@ -144,9 +148,8 @@ export class RpcSession {
    */
   async stats(): Promise<number | null> {
     try {
-      const resp = await this.request("get_session_stats", {}, 5000);
-      const data = resp.data as { tokens?: { total?: number } } | undefined;
-      return data?.tokens?.total ?? null;
+      const resp = await this.request({ type: "get_session_stats" }, 5000);
+      return resp.data.tokens.total ?? null;
     } catch {
       return null;
     }
@@ -162,11 +165,10 @@ export class RpcSession {
   /**
    * Send a request and await its correlated response.
    */
-  private request(
-    type: string,
-    params: JsonObject = {},
+  private request<Type extends RpcCommand["type"]>(
+    command: Extract<RpcCommand, { type: Type }>,
     timeoutMs = this.requestTimeoutMs,
-  ): Promise<JsonObject> {
+  ): Promise<Extract<RpcResponse, { command: Type; success: true }>> {
     if (this.dead) {
       return Promise.reject(new Error(`Session ${this.key} is dead`));
     }
@@ -175,11 +177,11 @@ export class RpcSession {
     return new Promise<JsonObject>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`${type} timed out after ${timeoutMs / 1000}s`));
+        reject(new Error(`${command.type} timed out after ${timeoutMs / 1000}s`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.writer.write({ type, id, ...params });
-    });
+      this.writer.write({ ...command, id });
+    }).then((response) => response as Extract<RpcResponse, { command: Type; success: true }>);
   }
 
   /**
@@ -223,19 +225,7 @@ export class RpcSession {
   }
 
   /**
-   * Bridge tools called through pi-mcp-adapter's proxy tool are reported as toolName "mcp" with the
-   * real tool name in args.tool — surface that name so Turn.events consumers (live chat status)
-   * don't show "⚙️ mcp…". (Direct-registered adapter tools already carry a useful prefixed name.)
-   */
-  private resolveToolName(msg: JsonObject): string {
-    const name = String(msg.toolName ?? "?");
-    if (name !== "mcp") return name;
-    const args = msg.args as { tool?: unknown } | undefined;
-    return typeof args?.tool === "string" && args.tool ? args.tool : name;
-  }
-
-  /**
-   * Dispatch one stdout message: responses, agent_end, live progress events.
+   * Dispatch one stdout message: responses, agent_settled, live progress events.
    */
   private handleMessage(msg: JsonObject): void {
     // Responses correlate to a pending request by id
@@ -252,10 +242,25 @@ export class RpcSession {
       return;
     }
 
-    // agent_end signals a running prompt has finished
-    if (msg.type === "agent_end") {
-      this.agentEnd?.resolve();
-      this.agentEnd = null;
+    // agent_settled signals a running prompt has finished
+    if (msg.type === "agent_settled") {
+      this.agentSettled?.resolve();
+      this.agentSettled = null;
+      return;
+    }
+
+    if (msg.type === "extension_ui_request") {
+      switch (msg.method) {
+        case "select":
+        case "confirm":
+        case "input":
+        case "editor":
+          this.writer.write({ type: "extension_ui_response", id: msg.id, cancelled: true });
+          break;
+        case "notify":
+          this.logger.log("extension notification", { key: this.key, message: msg.message });
+          break;
+      }
       return;
     }
 
@@ -268,8 +273,7 @@ export class RpcSession {
     // stay observable in the server logs).
     if (msg.type === "tool_execution_start") {
       const toolCallId = String(msg.toolCallId ?? "");
-      const tool = this.resolveToolName(msg);
-      if (toolCallId) this.toolNames.set(toolCallId, tool);
+      const tool = String(msg.toolName ?? "?");
       this.logger.log("tool start", { key: this.key, tool, toolCallId });
       this.emit({ type: "tool_start", tool, toolCallId });
       return;
@@ -277,8 +281,7 @@ export class RpcSession {
 
     if (msg.type === "tool_execution_end") {
       const toolCallId = String(msg.toolCallId ?? "");
-      const tool = this.toolNames.get(toolCallId) ?? String(msg.toolName ?? "?");
-      this.toolNames.delete(toolCallId);
+      const tool = String(msg.toolName ?? "?");
       const isError = Boolean(msg.isError);
       this.logger.log("tool done", { key: this.key, tool, error: isError ? "yes" : "no" });
       this.emit({ type: "tool_end", tool, toolCallId, isError });
@@ -297,8 +300,7 @@ export class RpcSession {
     // pi's turn_start/turn_end fire per agent-loop iteration (several per
     // prompt when tools run); the framework Turn brackets the whole prompt, so
     // the session runtime emits those. Log for observability only. All
-    // other streaming events (auto_retry_*, compaction_*,
-    // extension_ui_request, …) are ignored.
+    // other streaming events (auto_retry_*, compaction_*, …) are ignored.
     if (msg.type === "turn_start" || msg.type === "turn_end") {
       this.logger.log(msg.type === "turn_start" ? "turn start" : "turn end", {
         key: this.key,
@@ -329,7 +331,7 @@ export class RpcSession {
     }
     this.pending.clear();
 
-    this.agentEnd?.reject(err);
-    this.agentEnd = null;
+    this.agentSettled?.reject(err);
+    this.agentSettled = null;
   }
 }

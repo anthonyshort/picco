@@ -1,8 +1,11 @@
 # MCP servers
 
-Use `pi.mcpServers` to make a static external MCP service available to sessions.
+Use `pi.mcpServers` to make an external MCP service available through Pi v1's native MCP support.
 
 ```ts
+import { createAgent } from "@picco-agent/core";
+import { local } from "@picco-agent/runtime-local";
+
 const agent = createAgent({
   name: "assistant",
   runtime: local(),
@@ -14,8 +17,27 @@ const agent = createAgent({
 });
 ```
 
-Picco writes the configured map to the bundled `pi-mcp-adapter`. The adapter is included in every
-session; an empty map simply gives it no servers to connect.
+Picco writes the server map to each session's native Pi configuration. Pi owns discovery, transport,
+and tool execution. Servers use codemode by default. Set `exposure: "direct"` for a small tool set
+that should always appear in the model request, or `exposure: "deferred"` to load tools through
+Pi's tool search.
+
+## Run a stdio server
+
+Use a command available inside the runtime:
+
+```ts
+mcpServers: {
+  filesystem: {
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
+    exposure: "deferred",
+  },
+}
+```
+
+The server runs inside the same runtime as Pi. With bubblewrap, its executable and files must be
+mounted into the sandbox. Relative working directories resolve against the session directory.
 
 ## Add static headers
 
@@ -35,5 +57,14 @@ For credentials owned by individual users, use an identity
 [connector](./identity.md). The identity plugin adds a host-side proxy entry for each configured
 service without putting the user's token into the session.
 
-The adapter owns MCP transport behaviour. Picco deliberately exposes only the server shape in its
-exported `PiOptions` type rather than duplicating the adapter's complete configuration surface.
+After a user connects, send `/mcp reconnect <name>` through the same session to reconnect the
+server and load its tools:
+
+```ts
+await ctx.sessions.run(channelId, "/mcp reconnect linear", { user });
+```
+
+Pi handles this command without a model turn; the result has empty text. Status notifications go to
+Picco's logger. Interactive extension dialogs are cancelled in headless sessions.
+
+`PiOptions.mcpServers` uses Pi's exported `McpServerConfig` type.
