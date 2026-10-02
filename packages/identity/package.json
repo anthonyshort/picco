@@ -1,6 +1,6 @@
 {
   "name": "@picco-agent/identity",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Per-user tools and MCP servers behind /connect, packaged as a Picco plugin.",
   "homepage": "https://github.com/picco-agent/picco/tree/main/packages/identity",
   "bugs": {

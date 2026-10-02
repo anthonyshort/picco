@@ -1,6 +1,6 @@
 {
   "name": "@picco-agent/runtime-local",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Picco local runtime: no-isolation subprocess execution for development and testing.",
   "homepage": "https://github.com/picco-agent/picco/tree/main/packages/runtime-local",
   "bugs": {

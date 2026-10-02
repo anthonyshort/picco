@@ -1,6 +1,6 @@
 {
   "name": "@picco-agent/plugin-cron",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Picco plugin: cron scheduler service + the cron_* toolkit over YAML job files.",
   "homepage": "https://github.com/picco-agent/picco/tree/main/packages/plugin-cron",
   "bugs": {
