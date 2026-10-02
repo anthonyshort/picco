@@ -1,4 +1,4 @@
-import type { Plugin, PluginContext } from "@picco-agent/core";
+import type { Plugin, PluginContext, PluginResolveContext } from "@picco-agent/core";
 import { createConnectionCommands } from "./connector/commands.js";
 import {
   type Connector,
@@ -14,7 +14,15 @@ import { DEFAULT_CALLBACK_PORT, OAuthCallbackListener } from "./oauth/callback.j
 import { createOAuthRefresher } from "./oauth/refresh.js";
 import type { IdentityStore } from "./store/identity-store.js";
 
+/**
+ * Loopback callback used for paste-back OAuth flows.
+ */
 const DEFAULT_REDIRECT_URI = `http://127.0.0.1:${DEFAULT_CALLBACK_PORT}/oauth/callback`;
+
+/**
+ * Agent configuration passed to a lazy identity store factory.
+ */
+export type StoreConfig = PluginResolveContext;
 
 /**
  * Connections plugin configuration.
@@ -27,10 +35,17 @@ export interface IdentityConfig {
   encryptionKey: string;
 
   /**
-   * Where sealed envelopes persist. `fileStore(dir)` ships here; `@picco-agent/identity-sqlite` has
-   * a SQLite backend; implement `IdentityStore` for anything else.
+   * Where sealed envelopes persist. Pass an `IdentityStore` instance, or a factory function
+   * receiving `{ dataDir, agentName }` so you can resolve paths lazily:
+   *
+   * ```ts
+   * store: ({ dataDir }) => fileStore(path.join(dataDir, "connections")),
+   * ```
+   *
+   * `fileStore(dir)` ships here; `@picco-agent/identity-sqlite` has a SQLite backend; implement
+   * `IdentityStore` for anything else.
    */
-  store: IdentityStore;
+  store: IdentityStore | ((config: StoreConfig) => IdentityStore);
 
   /**
    * Public URL OAuth providers redirect to. When set, a loopback listener serves its pathname and
@@ -67,30 +82,20 @@ export function connections(config: IdentityConfig): Plugin {
     if (connector.mcp) routes.set(connector.name, connector.mcp);
   }
 
+  const storeOrFactory = config.store;
+  const cipher = createCredentialCipher(config.encryptionKey);
   let host: PluginContext | null = null;
   let proxy: McpProxy | null = null;
   let callback: OAuthCallbackListener | null = null;
+  let credentials: Credentials;
+  let connectionCommands: ReturnType<typeof createConnectionCommands>;
 
-  const credentials = new Credentials({
-    store: config.store,
-    cipher: createCredentialCipher(config.encryptionKey),
-    refresh: createOAuthRefresher(fetchImpl),
-    logger: () => host?.logger,
-  });
-
-  const connectionCommands = createConnectionCommands({
-    catalog,
-    credentials,
-    callbackUrl: config.callbackUrl,
-    redirectUri,
-    client: () => ({ clientName: host?.agentName ?? "agent" }),
-    fetch: fetchImpl,
-  });
-
-  return {
+  const plugin: Plugin = {
     name: "identity",
-    commands: connectionCommands.commands,
-    tools: createConnectorTools(catalog, credentials),
+
+    resolve(ctx) {
+      if (typeof storeOrFactory === "function") initialiseStore(storeOrFactory(ctx));
+    },
 
     async start(ctx) {
       host = ctx;
@@ -158,6 +163,31 @@ export function connections(config: IdentityConfig): Plugin {
       proxy?.release(session);
     },
   };
+
+  if (typeof storeOrFactory !== "function") initialiseStore(storeOrFactory);
+  return plugin;
+
+  /**
+   * Create the credential services and publish commands and tools for the resolved store.
+   */
+  function initialiseStore(store: IdentityStore): void {
+    credentials = new Credentials({
+      store,
+      cipher,
+      refresh: createOAuthRefresher(fetchImpl),
+      logger: () => host?.logger,
+    });
+    connectionCommands = createConnectionCommands({
+      catalog,
+      credentials,
+      callbackUrl: config.callbackUrl,
+      redirectUri,
+      client: () => ({ clientName: host?.agentName ?? "agent" }),
+      fetch: fetchImpl,
+    });
+    plugin.commands = connectionCommands.commands;
+    plugin.tools = createConnectorTools(catalog, credentials);
+  }
 }
 
 /**

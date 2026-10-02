@@ -12,6 +12,7 @@ npm install @picco-agent/connectors @picco-agent/core @picco-agent/identity @pic
 ```
 
 ```ts
+import path from "node:path";
 import { linear } from "@picco-agent/connectors";
 import { createAgent } from "@picco-agent/core";
 import { connections } from "@picco-agent/identity";
@@ -20,7 +21,7 @@ import { local } from "@picco-agent/runtime-local";
 
 const identity = connections({
   encryptionKey: process.env.CONNECTIONS_KEY!,
-  store: fileStore("./data/connections"),
+  store: ({ dataDir }) => fileStore(path.join(dataDir, "connections")),
   connectors: [linear()],
 });
 
@@ -30,6 +31,9 @@ const agent = createAgent({
   plugins: [identity],
 });
 ```
+
+The store factory runs synchronously during `createAgent()`. Its `dataDir` includes the agent
+name, so each agent keeps its connections separately. You can also pass an existing store instance.
 
 Generate the encryption key with `openssl rand -hex 32`. Losing it makes existing connections
 unreadable.

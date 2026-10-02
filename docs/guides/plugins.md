@@ -49,6 +49,25 @@ export function health(): Plugin {
 
 Names must be unique. A plugin's name scopes its logs, data directory, and sessions.
 
+## Resolve lazy configuration
+
+Use `resolve` when a plugin needs the agent's data directory or name before it can initialise.
+The identity plugin uses this hook to support a store factory:
+
+```ts
+const identity = connections({
+  encryptionKey: process.env.CONNECTIONS_KEY!,
+  store: ({ dataDir }) => fileStore(path.join(dataDir, "connections")),
+  connectors: [linear()],
+});
+```
+
+See [Identity](./identity.md) for the complete configuration.
+
+The synchronous `resolve` hook runs once during `createAgent()`, before commands and tools are
+collected. Its `dataDir` is the agent root, including the agent name. A thrown error fails agent
+construction. Use `start()` for asynchronous setup and long-lived services.
+
 ## Add tools
 
 Set `tools` on the plugin to make host-side tools available to every session:

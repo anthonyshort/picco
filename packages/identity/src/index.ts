@@ -1,5 +1,5 @@
 export { connections } from "./plugin.js";
-export type { IdentityConfig } from "./plugin.js";
+export type { IdentityConfig, StoreConfig } from "./plugin.js";
 export type {
   Connector,
   ConnectorAuth,

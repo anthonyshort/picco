@@ -6,7 +6,13 @@ import * as z from "zod";
 import { FakeRuntime, type FakeSpawn } from "./testing/index.js";
 import { createAgent } from "./agent.js";
 import { tool } from "./tools/tool.js";
-import type { AgentConfig, AgentHandle, Plugin, PluginContext } from "./types.js";
+import type {
+  AgentConfig,
+  AgentHandle,
+  Plugin,
+  PluginContext,
+  PluginResolveContext,
+} from "./types.js";
 
 let workspace: string;
 let agents: AgentHandle[];
@@ -128,6 +134,67 @@ describe("createAgent", () => {
   });
 
   describe("plugin lifecycle", () => {
+    test("resolves configuration once before collecting commands", async () => {
+      const contexts: PluginResolveContext[] = [];
+      const plugin: Plugin = {
+        name: "lazy",
+        resolve(ctx) {
+          contexts.push(ctx);
+          plugin.commands = [{ name: "status", description: "Status", handler: async () => {} }];
+        },
+        start(ctx) {
+          expect(ctx.commands.list()).toEqual([{ name: "status", description: "Status" }]);
+        },
+      };
+      const { agent } = agentWith({ name: "assistant", plugins: [plugin] });
+      expect(contexts).toEqual([
+        { dataDir: path.join(workspace, "assistant"), agentName: "assistant" },
+      ]);
+
+      await agent.start({ handleSignals: false });
+      await agent.stop();
+      await agent.start({ handleSignals: false });
+      expect(contexts).toHaveLength(1);
+    });
+
+    test("validates tools contributed during resolution", () => {
+      const contributed = tool({
+        name: "x",
+        description: "d",
+        input: z.object({}),
+        execute: () => "",
+      });
+      const plugin: Plugin = {
+        name: "lazy",
+        resolve() {
+          plugin.tools = [contributed];
+        },
+      };
+      expect(() => agentWith({ tools: [contributed], plugins: [plugin] })).toThrow(
+        'Duplicate tool name "x"',
+      );
+    });
+
+    test("resolution failures fail construction before starting plugins", () => {
+      let started = false;
+      expect(() =>
+        agentWith({
+          plugins: [
+            {
+              name: "lazy",
+              resolve() {
+                throw new Error("store unavailable");
+              },
+              start() {
+                started = true;
+              },
+            },
+          ],
+        }),
+      ).toThrow("store unavailable");
+      expect(started).toBe(false);
+    });
+
     test("every plugin context can list and dispatch contributed commands", async () => {
       let gatewayContext: PluginContext | undefined;
       const replies: string[] = [];
