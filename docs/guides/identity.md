@@ -32,8 +32,8 @@ const agent = createAgent({
 });
 ```
 
-The `store` option accepts a factory function receiving the agent's data directory and name, so
-you can resolve paths lazily without importing the default data directory.
+The store factory runs synchronously during `createAgent()`. Its `dataDir` includes the agent
+name, so each agent keeps its connections separately. You can also pass an existing store instance.
 
 Generate the encryption key with `openssl rand -hex 32`. Losing it makes existing connections
 unreadable.

@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, test } from "vitest";
 import * as z from "zod";
 import {
+  createAgent,
   silentLogger,
   type Plugin,
   type PluginContext,
+  type PluginResolveContext,
   type SessionIdentity,
 } from "@picco-agent/core";
-import { createFakePluginContext } from "@picco-agent/core/testing";
+import { FakeRuntime, createFakePluginContext } from "@picco-agent/core/testing";
 import type { Connector, FetchLike } from "./connector/connector.js";
 import { connections, type IdentityConfig } from "./plugin.js";
 import { createCredentialCipher } from "./credential/cipher.js";
@@ -36,6 +38,71 @@ afterEach(async () => {
 
 describe("connections", () => {
   describe("construction", () => {
+    test("lazy stores resolve at agent construction and back commands and tools", async () => {
+      const store = createMemoryStore();
+      const contexts: PluginResolveContext[] = [];
+      const plugin = connections({
+        encryptionKey: KEY,
+        store: (ctx) => {
+          contexts.push(ctx);
+          return store;
+        },
+        connectors: [withProbe(token({ name: "sourcegraph" }))],
+      });
+      expect(contexts).toEqual([]);
+      expect(plugin.commands).toBeUndefined();
+      expect(plugin.tools).toBeUndefined();
+
+      const agent = createAgent({
+        name: "assistant",
+        dataDir: "/tmp/identity-lazy-test",
+        runtime: new FakeRuntime(),
+        plugins: [plugin],
+      });
+      expect(contexts).toEqual([
+        { dataDir: "/tmp/identity-lazy-test/assistant", agentName: "assistant" },
+      ]);
+      expect(plugin.commands?.map((command) => command.name)).toEqual([
+        "connect",
+        "disconnect",
+        "connections",
+      ]);
+
+      const runner = createConnectRunner(plugin);
+      await runner.connect("sourcegraph sgp_secret");
+      expect(await store.get(userKey(anthony), "sourcegraph")).not.toBeNull();
+      expect(await resolveProbeToken(plugin, "sourcegraph")).toBe("sgp_secret");
+      await agent.stop();
+    });
+
+    test("a store factory failure propagates from agent construction", () => {
+      const plugin = connections({
+        encryptionKey: KEY,
+        store: () => {
+          throw new Error("store unavailable");
+        },
+        connectors: [],
+      });
+      expect(() =>
+        createAgent({ name: "assistant", runtime: new FakeRuntime(), plugins: [plugin] }),
+      ).toThrow("store unavailable");
+    });
+
+    test("invalid encryption keys fail before invoking a lazy store factory", () => {
+      let called = false;
+      expect(() =>
+        connections({
+          encryptionKey: "invalid",
+          store: () => {
+            called = true;
+            return createMemoryStore();
+          },
+          connectors: [],
+        }),
+      ).toThrow();
+      expect(called).toBe(false);
+    });
+
     test("duplicate connector names throw", () => {
       expect(() =>
         connections({

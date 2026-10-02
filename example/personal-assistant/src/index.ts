@@ -30,7 +30,7 @@ const googleOAuthCredentials = {
 
 const connectionsPlugin = connections({
   encryptionKey: readRequiredEnvironmentVariable("CONNECTIONS_KEY"),
-  store: fileStore(path.join(agentDataDirectory, "connections")),
+  store: ({ dataDir }) => fileStore(path.join(dataDir, "connections")),
   callbackUrl: process.env.CONNECTIONS_CALLBACK_URL,
   connectors: [
     linear(),

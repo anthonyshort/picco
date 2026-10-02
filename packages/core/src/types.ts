@@ -359,6 +359,21 @@ export interface PrepareSessionInfo {
 }
 
 /**
+ * Agent configuration available before plugin commands and tools are collected.
+ */
+export interface PluginResolveContext {
+  /**
+   * The agent's root data directory (`{AgentConfig.dataDir}/{AgentConfig.name}`).
+   */
+  dataDir: string;
+
+  /**
+   * The agent's display name.
+   */
+  agentName: string;
+}
+
+/**
  * This is what your plugin factory function needs to return.
  */
 export interface Plugin {
@@ -382,7 +397,7 @@ export interface Plugin {
    * data directory and name — use to resolve lazy configuration that depends on paths (e.g. store
    * factories). Throwing an error fails agent creation.
    */
-  resolve?(info: { dataDir: string; agentName: string }): void;
+  resolve?(ctx: PluginResolveContext): void;
 
   /**
    * Called when the agent is started. You can use this to run additional processes or set up state.

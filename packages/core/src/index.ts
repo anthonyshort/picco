@@ -20,6 +20,7 @@ export type {
   PiOptions,
   Plugin,
   PluginContext,
+  PluginResolveContext,
   PrepareSessionInfo,
   RunOptions,
   Session,

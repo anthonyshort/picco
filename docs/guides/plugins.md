@@ -51,22 +51,22 @@ Names must be unique. A plugin's name scopes its logs, data directory, and sessi
 
 ## Resolve lazy configuration
 
-Use `resolve` when a plugin needs the agent's data directory or name before it can initialise:
+Use `resolve` when a plugin needs the agent's data directory or name before it can initialise.
+The identity plugin uses this hook to support a store factory:
 
 ```ts
-export function storePlugin(storeFactory: (dataDir: string) => Store): Plugin {
-  return {
-    name: "store",
-    resolve({ dataDir, agentName }) {
-      this.store = storeFactory(dataDir);
-    },
-  };
-}
+const identity = connections({
+  encryptionKey: process.env.CONNECTIONS_KEY!,
+  store: ({ dataDir }) => fileStore(path.join(dataDir, "connections")),
+  connectors: [linear()],
+});
 ```
 
-The `resolve` hook runs at agent construction, before commands and tools are collected. Use it
-when configuration depends on paths the agent owns — for example, a store that must be created
-before the plugin's commands and tools are available.
+See [Identity](./identity.md) for the complete configuration.
+
+The synchronous `resolve` hook runs once during `createAgent()`, before commands and tools are
+collected. Its `dataDir` is the agent root, including the agent name. A thrown error fails agent
+construction. Use `start()` for asynchronous setup and long-lived services.
 
 ## Add tools
 

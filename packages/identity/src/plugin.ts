@@ -1,4 +1,4 @@
-import type { Plugin, PluginContext } from "@picco-agent/core";
+import type { Plugin, PluginContext, PluginResolveContext } from "@picco-agent/core";
 import { createConnectionCommands } from "./connector/commands.js";
 import {
   type Connector,
@@ -15,22 +15,14 @@ import { createOAuthRefresher } from "./oauth/refresh.js";
 import type { IdentityStore } from "./store/identity-store.js";
 
 /**
- * Context passed to a lazy store factory so the caller can resolve paths relative to the agent's
- * data directory without computing them manually.
+ * Loopback callback used for paste-back OAuth flows.
  */
-export interface StoreConfig {
-  /**
-   * The agent's root data directory (`{dataDir}/{name}`).
-   */
-  dataDir: string;
-
-  /**
-   * The agent's display name.
-   */
-  agentName: string;
-}
-
 const DEFAULT_REDIRECT_URI = `http://127.0.0.1:${DEFAULT_CALLBACK_PORT}/oauth/callback`;
+
+/**
+ * Agent configuration passed to a lazy identity store factory.
+ */
+export type StoreConfig = PluginResolveContext;
 
 /**
  * Connections plugin configuration.
@@ -91,55 +83,18 @@ export function connections(config: IdentityConfig): Plugin {
   }
 
   const storeOrFactory = config.store;
-  const isLazy = typeof storeOrFactory === "function";
+  const cipher = createCredentialCipher(config.encryptionKey);
   let host: PluginContext | null = null;
   let proxy: McpProxy | null = null;
   let callback: OAuthCallbackListener | null = null;
-  let credentials: Credentials | null = null;
-  let connectionCommands: ReturnType<typeof createConnectionCommands> | null = null;
-
-  // Eager init when store is concrete (backward compatible). Lazy store defers to resolve().
-  if (!isLazy) {
-    credentials = new Credentials({
-      store: storeOrFactory,
-      cipher: createCredentialCipher(config.encryptionKey),
-      refresh: createOAuthRefresher(fetchImpl),
-      logger: () => host?.logger,
-    });
-    connectionCommands = createConnectionCommands({
-      catalog,
-      credentials,
-      callbackUrl: config.callbackUrl,
-      redirectUri,
-      client: () => ({ clientName: host?.agentName ?? "agent" }),
-      fetch: fetchImpl,
-    });
-  }
+  let credentials: Credentials;
+  let connectionCommands: ReturnType<typeof createConnectionCommands>;
 
   const plugin: Plugin = {
     name: "identity",
-    commands: connectionCommands?.commands,
-    tools: credentials ? createConnectorTools(catalog, credentials) : undefined,
 
-    resolve(info) {
-      if (!isLazy) return; // Already initialized eagerly
-      const store = storeOrFactory(info);
-      credentials = new Credentials({
-        store,
-        cipher: createCredentialCipher(config.encryptionKey),
-        refresh: createOAuthRefresher(fetchImpl),
-        logger: () => host?.logger,
-      });
-      connectionCommands = createConnectionCommands({
-        catalog,
-        credentials,
-        callbackUrl: config.callbackUrl,
-        redirectUri,
-        client: () => ({ clientName: host?.agentName ?? "agent" }),
-        fetch: fetchImpl,
-      });
-      plugin.commands = connectionCommands.commands;
-      plugin.tools = createConnectorTools(catalog, credentials);
+    resolve(ctx) {
+      if (typeof storeOrFactory === "function") initialiseStore(storeOrFactory(ctx));
     },
 
     async start(ctx) {
@@ -154,7 +109,7 @@ export function connections(config: IdentityConfig): Plugin {
             if (user) {
               // A transient resolve throw propagates — the proxy turns it into its retry
               // message rather than this "not connected" one.
-              const token = await credentials!.resolve(user, connector);
+              const token = await credentials.resolve(user, connector);
               if (token) return { token };
             }
             const who = user?.display ?? (user ? userKey(user) : null);
@@ -171,7 +126,7 @@ export function connections(config: IdentityConfig): Plugin {
         callback = new OAuthCallbackListener({
           callbackUrl: config.callbackUrl,
           port: config.callbackPort,
-          complete: connectionCommands!.completeOAuth,
+          complete: connectionCommands.completeOAuth,
           logger: ctx.logger,
         });
         await callback.start();
@@ -209,7 +164,30 @@ export function connections(config: IdentityConfig): Plugin {
     },
   };
 
+  if (typeof storeOrFactory !== "function") initialiseStore(storeOrFactory);
   return plugin;
+
+  /**
+   * Create the credential services and publish commands and tools for the resolved store.
+   */
+  function initialiseStore(store: IdentityStore): void {
+    credentials = new Credentials({
+      store,
+      cipher,
+      refresh: createOAuthRefresher(fetchImpl),
+      logger: () => host?.logger,
+    });
+    connectionCommands = createConnectionCommands({
+      catalog,
+      credentials,
+      callbackUrl: config.callbackUrl,
+      redirectUri,
+      client: () => ({ clientName: host?.agentName ?? "agent" }),
+      fetch: fetchImpl,
+    });
+    plugin.commands = connectionCommands.commands;
+    plugin.tools = createConnectorTools(catalog, credentials);
+  }
 }
 
 /**
