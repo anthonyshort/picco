@@ -7,7 +7,7 @@ under `scripts/smoke/`.
 ## Run the suite
 
 The suite requires Linux, bubblewrap, Pi, and a local OpenAI-compatible model serving
-`qwen-27b-q6-turbo` at `http://127.0.0.1:8080/v1`.
+`qwen38-27b-nvfp4` at `http://127.0.0.1:8080/v1`.
 
 ```bash
 pnpm test:smoke
