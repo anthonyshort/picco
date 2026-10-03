@@ -1,3 +1,4 @@
+import { startFakeMcp } from "./fake-mcp.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
@@ -147,56 +148,49 @@ describe.skipIf(!sandboxAvailable)("bwrap() session lifecycle (real bwrap)", () 
   }, 90_000);
 });
 
-describe.skipIf(!sandboxAvailable)(
-  "bwrap() + MCP (real bwrap, real pi-mcp-adapter over npm:)",
-  () => {
-    test("installs npm:pi-mcp-adapter inside the sandbox and lists a configured MCP server", async () => {
-      const workspace = makeWorkspaceRoot();
-      // First turn: call the adapter's `mcp` tool. Second turn (a tool result is
-      // present): echo its text so we can assert on it.
-      const model = await startFakeModel((params) =>
-        params.messages.some((m) => m.role === "tool")
-          ? [{ text: `STATUS >>> ${lastToolText(params)}` }]
-          : [{ toolCall: { name: "mcp", args: {} } }],
-      );
-      const agent = createAgent({
-        name: "bwrap-mcp-int",
-        dataDir: workspace,
-        runtime: bwrap(),
-        pi: {
-          model: "fake/fake-1",
-          models: {
-            providers: {
-              fake: {
-                baseUrl: model.url,
-                api: "openai-completions",
-                apiKey: "test-key",
-                models: [{ id: "fake-1" }],
-              },
+describe.skipIf(!sandboxAvailable)("bwrap() + native MCP (real bwrap)", () => {
+  test("calls a native MCP tool inside the sandbox", async () => {
+    const workspace = makeWorkspaceRoot();
+    const mcp = await startFakeMcp();
+    const model = await startFakeModel((params) =>
+      params.messages.some((m) => m.role === "tool")
+        ? [{ text: `STATUS >>> ${lastToolText(params)}` }]
+        : [{ toolCall: { name: "mcp__probe__echo", args: { text: "sandbox" } } }],
+    );
+    const agent = createAgent({
+      name: "bwrap-mcp-int",
+      dataDir: workspace,
+      runtime: bwrap(),
+      pi: {
+        model: "fake/fake-1",
+        models: {
+          providers: {
+            fake: {
+              baseUrl: model.url,
+              api: "openai-completions",
+              apiKey: "test-key",
+              models: [{ id: "fake-1" }],
             },
           },
-          // A configured server the adapter must register; the `mcp` tool lists it.
-          mcpServers: { probe: { url: "http://127.0.0.1:1/never" } },
         },
+        mcpServers: { probe: { url: mcp.url, exposure: "direct" } },
+      },
+    });
+    await agent.start({ handleSignals: false });
+    try {
+      const result = await agent.sessions.run("chat", "What MCP servers do you see?", {
+        timeoutMs: 240_000,
       });
-      await agent.start({ handleSignals: false });
-      try {
-        const result = await agent.sessions.run("chat", "What MCP servers do you see?", {
-          timeoutMs: 240_000,
-        });
-        // The `mcp` tool exists only if pi installed and loaded the npm: adapter
-        // inside the jail (network is shared, so the install can reach npm); its
-        // output lists the configured server by name.
-        expect(result.text).toContain("STATUS >>> ");
-        expect(result.text).toContain("probe");
-      } finally {
-        await agent.stop();
-        await model.close();
-        rmSync(workspace, { recursive: true, force: true });
-      }
-    }, 240_000);
-  },
-);
+      expect(result.text).toContain("MCP echo: sandbox");
+      expect(mcp.requests.some((request) => request.method === "tools/call")).toBe(true);
+    } finally {
+      await agent.stop();
+      await model.close();
+      await mcp.close();
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  }, 240_000);
+});
 
 describe.skipIf(!sandboxAvailable)("bwrap() session resume (real bwrap)", () => {
   test("resumes the conversation across a sandbox respawn — the transcript persists via the rw mount", async () => {

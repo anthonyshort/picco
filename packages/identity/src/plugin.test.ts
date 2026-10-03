@@ -259,7 +259,7 @@ describe("connections", () => {
         pins.set("telegram/channel", anthony);
         const server = plugin.configureAllSessions!({ source: "telegram", key: "channel" }, {})
           .mcpServers?.linear;
-        if (!server) throw new Error("linear proxy route was not configured");
+        if (!server || !("url" in server)) throw new Error("linear proxy route was not configured");
 
         await fetch(server.url, { method: "POST", headers: server.headers, body: "{}" });
 

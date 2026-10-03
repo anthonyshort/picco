@@ -39,14 +39,6 @@ export const DEFAULT_DATA_DIR = path.join(os.homedir(), ".picco");
 const DEFAULT_SCRIPT_TIMEOUT_MS = 300_000;
 
 /**
- * Packages core bundles into every session, delivered as pi npm source strings on the packages list
- * — pi installs each (and its deps) at session start. Currently the MCP adapter, which powers
- * pi.mcpServers and connectors. Versions are pinned; keep them in sync with core's own
- * dependencies.
- */
-const BUNDLED_PACKAGES = ["npm:pi-mcp-adapter@2.11.0"];
-
-/**
  * Core-owned extensions bundled with core, injected into every session as file-path extensions.
  * Each is a self-contained bundle (dependencies inlined) resolved from core's own dependencies, so
  * it loads in every runtime with no node_modules. To add another, publish a bundled package whose
@@ -247,10 +239,9 @@ export function createAgent(config: AgentConfig): AgentHandle {
           inputSchema: z.toJSONSchema(t.input) as Record<string, unknown>,
         }));
 
-        // Append core's always-bundled packages + extensions after the fold.
+        // Append core's bundled extensions after the fold.
         pi = {
           ...pi,
-          packages: [...(pi.packages ?? []), ...BUNDLED_PACKAGES],
           extensions: [...(pi.extensions ?? []), ...bundledExtensionFiles],
         };
 

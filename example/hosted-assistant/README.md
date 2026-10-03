@@ -5,7 +5,7 @@ forwarded into its bubblewrap sessions.
 
 ## Prerequisites
 
-- Linux with Node.js 22 or newer, pnpm, bubblewrap 0.8 or newer, and `pi` 0.80 or newer on `PATH`.
+- Linux with Node.js 22.19 or newer, pnpm, bubblewrap 0.8 or newer, and `pi` 1.0 or newer on `PATH`.
 - A Telegram bot token and Anthropic API key.
 
 ## Configure
