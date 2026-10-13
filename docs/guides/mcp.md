@@ -57,8 +57,9 @@ For credentials owned by individual users, use an identity
 [connector](./identity.md). The identity plugin adds a host-side proxy entry for each configured
 service without putting the user's token into the session.
 
-After a user connects, send `/mcp reconnect <name>` through the same session to reconnect the
-server and load its tools:
+After a user connects, they can send `/mcp reconnect <name>` through a gateway that exposes
+identity's [connection commands](./identity.md#expose-connection-commands). Host code can also
+send the command through the session:
 
 ```ts
 await ctx.sessions.run(channelId, "/mcp reconnect linear", { user });

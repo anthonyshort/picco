@@ -66,6 +66,7 @@ describe("connections", () => {
         "connect",
         "disconnect",
         "connections",
+        "mcp",
       ]);
 
       const runner = createConnectRunner(plugin);

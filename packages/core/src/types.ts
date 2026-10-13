@@ -310,6 +310,12 @@ export interface Sessions {
  */
 export interface CommandContext {
   /**
+   * The gateway conversation's live session, when one exists. Commands can run Pi operations
+   * through its queue; pass the authenticated user on each run.
+   */
+  session?: Session;
+
+  /**
    * The current unique user.
    */
   user?: SessionIdentity;

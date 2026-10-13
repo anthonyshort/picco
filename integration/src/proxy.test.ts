@@ -2,13 +2,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { createAgent, type Commands } from "@picco-agent/core";
+import { createAgent, type PluginContext } from "@picco-agent/core";
 import { local } from "@picco-agent/runtime-local";
 import { connections } from "@picco-agent/identity";
 import { token } from "@picco-agent/connectors";
 import { fileStore } from "@picco-agent/identity/store";
 import { startFakeMcp } from "./fake-mcp.js";
 import { startFakeModel, lastToolText } from "./fake-model.js";
+import { createMessageHandler } from "../../packages/plugin-telegram/src/index.js";
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -25,7 +26,7 @@ describe("MCP credential proxy against native Pi MCP", () => {
     const model = await startFakeModel(() => [{ text: "worker survived" }]);
     cleanups.push(() => model.close());
 
-    let commands!: Commands;
+    let gateway!: PluginContext;
     const agent = createAgent({
       name: "identity-int",
       dataDir: workspace,
@@ -51,9 +52,9 @@ describe("MCP credential proxy against native Pi MCP", () => {
           connectors: [token({ name: "linear", mcp: { url: mcp.url } })],
         }),
         {
-          name: "gateway",
+          name: "telegram",
           start: (ctx) => {
-            commands = ctx.commands;
+            gateway = ctx;
           },
         },
       ],
@@ -61,7 +62,7 @@ describe("MCP credential proxy against native Pi MCP", () => {
     await agent.start({ handleSignals: false });
     cleanups.push(() => agent.stop());
 
-    const result = await agent.sessions.run("chat", "What MCP servers do you see?", {
+    const result = await gateway.sessions.run("1-general", "What MCP servers do you see?", {
       timeoutMs: 90_000,
       user: { source: "telegram", id: "123", display: "anthony" },
     });
@@ -70,14 +71,25 @@ describe("MCP credential proxy against native Pi MCP", () => {
     expect(mcp.requests).toEqual([]);
 
     const anthony = { source: "telegram", id: "123", display: "anthony" };
-    await commands.dispatch("connect", {
-      args: "linear anthony-token",
-      user: anthony,
-      reply: async () => {},
-      dm: async () => {},
-    });
-    const reconnect = await agent.sessions.run("chat", "/mcp reconnect linear", { user: anthony });
-    expect(reconnect.text).toBe("");
+    const handleMessage = createMessageHandler(gateway, { allowlist: [1] });
+    const connectionReplies: string[] = [];
+    const reconnectReplies: string[] = [];
+    for (const text of ["/connect linear anthony-token", "/mcp reconnect linear"]) {
+      await handleMessage({
+        chatId: 1,
+        text,
+        from: { id: 123, username: "anthony" },
+        reply: async (response) => void reconnectReplies.push(response),
+        dm: async (response) => void connectionReplies.push(response),
+        sendTyping: async () => {},
+      });
+    }
+    expect(connectionReplies).toEqual([
+      "✅ linear connected. Send /mcp reconnect linear in each existing conversation where you want to use it.",
+    ]);
+    expect(reconnectReplies).toEqual([
+      "Reconnect request for linear completed. Ask me to use the service again.",
+    ]);
 
     model.setScript((params) =>
       params.messages.at(-1)?.role === "tool"
@@ -91,26 +103,26 @@ describe("MCP credential proxy against native Pi MCP", () => {
             },
           ],
     );
-    const connected = await agent.sessions.run("chat", "Echo hello", { user: anthony });
+    const connected = await gateway.sessions.run("1-general", "Echo hello", { user: anthony });
     expect(connected.text).toContain("MCP echo: hello");
     expect(
       mcp.requests.filter((request) => request.method === "tools/call").at(-1)?.authorization,
     ).toBe("Bearer anthony-token");
 
     const alex = { source: "telegram", id: "456", display: "alex" };
-    await commands.dispatch("connect", {
+    await gateway.commands.dispatch("connect", {
       args: "linear alex-token",
       user: alex,
       reply: async () => {},
       dm: async () => {},
     });
-    const switched = await agent.sessions.run("chat", "Echo hello again", { user: alex });
+    const switched = await gateway.sessions.run("1-general", "Echo hello again", { user: alex });
     expect(switched.text).toContain("MCP echo: hello");
     expect(
       mcp.requests.filter((request) => request.method === "tools/call").at(-1)?.authorization,
     ).toBe("Bearer alex-token");
     const calls = mcp.requests.length;
-    const refused = await agent.sessions.run("chat", "Echo as a third user", {
+    const refused = await gateway.sessions.run("1-general", "Echo as a third user", {
       user: { source: "telegram", id: "789", display: "unconnected" },
     });
     expect(refused.text).toContain("/connect linear");

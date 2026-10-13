@@ -266,6 +266,7 @@ async function handleCommand(
 
   try {
     const handled = await ctx.commands.dispatch(command, {
+      session: ctx.sessions.get(key),
       user: telegramIdentity(message.from),
       args,
       reply: async (text) => void (await message.reply(text)),

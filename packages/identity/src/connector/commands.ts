@@ -57,7 +57,7 @@ export function createConnectionCommands(opts: ConnectionCommandsOptions): Conne
         await failConnection(connection, "failed").catch(() => {});
         throw err;
       }
-      await connection.deliver(`✅ ${connection.connector} connected.`);
+      await connection.deliver(connectionMessage(connection.connector, opts.catalog));
     },
     async fail(connection, reason) {
       await failConnection(connection, reason);
@@ -80,6 +80,11 @@ export function createConnectionCommands(opts: ConnectionCommandsOptions): Conne
         name: "connections",
         description: "List what you've connected",
         handler: (ctx) => list(ctx, opts.catalog, opts.credentials),
+      },
+      {
+        name: "mcp",
+        description: "Reconnect a connected service in this conversation",
+        handler: (ctx) => reconnect(ctx, opts.catalog, opts.credentials),
       },
     ],
     completeOAuth: oauth.complete,
@@ -137,7 +142,7 @@ async function connect(
   switch (connector.auth.kind) {
     case "token":
       try {
-        await connectToken(connector.auth, connection, args, opts.credentials);
+        await connectToken(connector.auth, connection, args, opts.credentials, opts.catalog);
       } catch (err) {
         await failConnection(connection, errorReason(err)).catch(() => {});
       }
@@ -174,6 +179,7 @@ async function connectToken(
   connection: ConnectionAttempt,
   args: string,
   credentials: Credentials,
+  catalog: ConnectorCatalog,
 ): Promise<void> {
   const tokenRequest = TokenRequestSchema.parse(request);
   const token = args.trim();
@@ -194,7 +200,53 @@ async function connectToken(
     await failConnection(connection, "failed").catch(() => {});
     return;
   }
-  await connection.deliver(`✅ ${connection.connector} connected.`).catch(() => {});
+  await connection.deliver(connectionMessage(connection.connector, catalog)).catch(() => {});
+}
+
+/**
+ * Reconnect a configured MCP connector through the gateway's authenticated session queue.
+ */
+async function reconnect(
+  ctx: CommandContext,
+  catalog: ConnectorCatalog,
+  credentials: Credentials,
+): Promise<void> {
+  const user = await resolveCommandUser(ctx);
+  if (!user) return;
+  const [action, name, ...extra] = ctx.args.trim().split(/\s+/);
+  if (action !== "reconnect" || !name || extra.length > 0) {
+    await ctx.reply("Usage: /mcp reconnect <name>.");
+    return;
+  }
+  if (!catalog.get(name)?.mcp) {
+    await ctx.reply(`No MCP connector named "${name}".`);
+    return;
+  }
+  if (!ctx.session) {
+    await ctx.reply("Send a message in this conversation first, then retry the reconnect.");
+    return;
+  }
+  try {
+    if (!(await credentials.resolve(user, name))) {
+      await ctx.reply(`Send /connect ${name} first.`);
+      return;
+    }
+    await ctx.session.run(`/mcp reconnect ${name}`, { user });
+  } catch {
+    await ctx.reply(`Reconnecting ${name} failed. Try again.`);
+    return;
+  }
+  await ctx.reply(`Reconnect request for ${name} completed. Ask me to use the service again.`);
+}
+
+/**
+ * Confirm credential storage and explain how to load MCP tools in an existing conversation.
+ */
+function connectionMessage(name: string, catalog: ConnectorCatalog): string {
+  const message = `✅ ${name} connected.`;
+  return catalog.get(name)?.mcp
+    ? `${message} Send /mcp reconnect ${name} in each existing conversation where you want to use it.`
+    : message;
 }
 
 /**
