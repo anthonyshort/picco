@@ -25,6 +25,9 @@ for OpenRouter setup. CI runs the complete smoke suite on main and same-reposito
 scripts/smoke/
 ├── real-model.ts
 ├── model.ts
+├── resources.ts
+├── mcp.ts
+├── cron.ts
 ├── extensions/
 │   ├── run.ts
 │   ├── src/
@@ -33,6 +36,7 @@ scripts/smoke/
 │   │   └── bwrap-mount.ts
 │   └── package.json
 └── fixtures/
+    ├── stdio-mcp.mjs
     └── example-extension/
         ├── src/index.ts
         ├── src/unbundled.ts
@@ -54,6 +58,7 @@ The fixture build produces the bundled entry used by `local-file`; its unbundled
 - killing that process causes the next turn to spawn another process;
 - the new process resumes the conversation and recalls a random first-turn value;
 - the runtime writes `models.json` for custom providers and Pi writes a transcript.
+- stopping the agent reaps every spawned Pi worker.
 
 The test records spawned runtime processes only for lifecycle assertions. It uses a stable
 `host/lifecycle` session key and a temporary data directory under the user's home directory. Do not
@@ -73,6 +78,20 @@ The unbundled case needs the fixture's `node_modules` directory for dependency s
 workspace-level `node_modules` directory for their pnpm package-store targets. Removing either mount
 must make the fixture unloadable. Extension cases currently keep their named session data under
 `~/.picco/ext-*`.
+
+## Resource and plugin contracts
+
+- `resources.ts`: Pi discovers a mounted skill, follows its instructions with built-in file and
+  shell tools, and expands a mounted prompt template with positional arguments. Random markers
+  exist only in the fixture files; assert actual output files and successful tool events.
+- `mcp.ts`: Pi discovers a deferred MCP tool and invokes a local stdio server inside bubblewrap.
+  Assert protocol requests, relative cwd, interpolated environment, the fixture-only secret and
+  subprocess shutdown.
+- `cron.ts`: Pi creates and triggers a persisted job; a separate background worker calls a host
+  tool and reports its result. Restart the agent, trigger the loaded job and reap all workers.
+
+These cases use temporary data directories under the user's home directory and remove them after
+stopping the agent. The private smoke workspace owns their package dependencies.
 
 ## Add coverage
 

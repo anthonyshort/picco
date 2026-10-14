@@ -120,6 +120,9 @@ importers:
       '@picco-agent/identity':
         specifier: workspace:*
         version: link:../packages/identity
+      '@picco-agent/plugin-cron':
+        specifier: workspace:*
+        version: link:../packages/plugin-cron
       '@picco-agent/runtime-bwrap':
         specifier: workspace:*
         version: link:../packages/runtime-bwrap
@@ -256,6 +259,21 @@ importers:
       '@picco-agent/core':
         specifier: workspace:*
         version: link:../core
+
+  scripts/smoke:
+    dependencies:
+      '@picco-agent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@picco-agent/plugin-cron':
+        specifier: workspace:*
+        version: link:../../packages/plugin-cron
+      '@picco-agent/runtime-bwrap':
+        specifier: workspace:*
+        version: link:../../packages/runtime-bwrap
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
   scripts/smoke/extensions:
     dependencies:

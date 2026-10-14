@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
@@ -126,6 +127,12 @@ async function runSmokeTest(): Promise<void> {
     process.exitCode = checks.every(([, passed]) => passed) ? 0 : 1;
   } finally {
     await agent.stop();
+    await Promise.all(spawnedProcesses.map((worker) => worker.exited));
     rmSync(smokeDataDirectory, { recursive: true, force: true });
+    assert.ok(
+      spawnedProcesses.every((worker) => !worker.alive),
+      "shutdown left a Pi worker alive",
+    );
+    console.log("[real-model] PASS: shutdown reaped every Pi worker");
   }
 }

@@ -21,11 +21,19 @@ Configure `OPENROUTER_API_KEY` as a repository Actions secret. The key is forwar
 Pi workers through their environment. Smoke tests run on main and same-repository PRs; fork PRs
 run deterministic checks without the secret.
 
-| Script                  | Coverage                                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------ |
-| `test:smoke`            | Real model, Pi RPC, multiple turns, process respawn, resume, sandboxing, and session files |
-| `test:smoke:extensions` | Bundled and unbundled extension loading across local and bubblewrap runtimes               |
+| Script                  | Coverage                                                                                                  |
+| ----------------------- | --------------------------------------------------------------------------------------------------------- |
+| `test:smoke`            | Pi RPC, multiple turns, process respawn, conversation resume, sandboxing, transcripts and worker shutdown |
+| `test:smoke:resources`  | Mounted skill discovery, prompt template expansion and built-in read, write, edit and bash tools          |
+| `test:smoke:mcp`        | Deferred native discovery, sandboxed stdio MCP, working directory, environment and subprocess shutdown    |
+| `test:smoke:cron`       | Job creation, a background Pi worker, persisted jobs after restart and worker shutdown                    |
+| `test:smoke:extensions` | Bundled and unbundled extension loading across local and bubblewrap runtimes                              |
+
+Run an individual script to investigate a failure. The resource, MCP and cron cases use temporary
+local fixtures and check file contents, protocol requests or job outcomes. They require no service
+accounts beyond the configured model provider.
 
 Smoke tests are separate from `pnpm validate` because they depend on local services and system
 packages or hosted model credentials. Deterministic worker, runtime, bridge, and persistence
-behaviour remains in `integration/`.
+behaviour remains in `integration/`. That suite also checks a worker dying during a turn, cron
+recovery after a failed background worker, and shutdown while workers are active and idle.

@@ -1,5 +1,7 @@
 import { startFakeMcp } from "./fake-mcp.js";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -149,6 +151,42 @@ describe.skipIf(!sandboxAvailable)("bwrap() session lifecycle (real bwrap)", () 
 });
 
 describe.skipIf(!sandboxAvailable)("bwrap() + native MCP (real bwrap)", () => {
+  test("discovers a stdio MCP tool and stops its subprocess through the smoke entry point", async () => {
+    const model = await startFakeModel((params) => {
+      const completedTools = params.messages.filter((message) => message.role === "tool").length;
+      if (completedTools === 0)
+        return [{ toolCall: { name: "tool_search", args: { query: "probe reveal" } } }];
+      if (completedTools === 1)
+        return [{ toolCall: { name: "mcp__probe__reveal", args: { prefix: "smoke-" } } }];
+      return [{ text: lastToolText(params) }];
+    });
+    try {
+      const { stdout } = await promisify(execFile)(
+        fileURLToPath(new URL("../../node_modules/.bin/tsx", import.meta.url)),
+        [fileURLToPath(new URL("../../scripts/smoke/mcp.ts", import.meta.url))],
+        {
+          env: { ...process.env, DEFAULT_MODEL: "llama/fake-1", LLAMA_URL: model.url },
+          timeout: 60_000,
+        },
+      );
+      expect(stdout).not.toContain("FAIL:");
+      expect(stdout).toContain("PASS: native MCP tool completed successfully");
+      expect(stdout).toContain("PASS: stdio subprocess exited after agent shutdown");
+      expect(
+        model.requests[0]?.params.tools?.some(
+          (tool) => tool.function.name === "mcp__probe__reveal",
+        ),
+      ).toBe(false);
+      expect(
+        model.requests[1]?.params.tools?.some(
+          (tool) => tool.function.name === "mcp__probe__reveal",
+        ),
+      ).toBe(true);
+    } finally {
+      await model.close();
+    }
+  }, 90_000);
+
   test("calls a native MCP tool inside the sandbox", async () => {
     const workspace = makeWorkspaceRoot();
     const mcp = await startFakeMcp();
