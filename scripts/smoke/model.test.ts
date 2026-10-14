@@ -36,9 +36,9 @@ describe("createSmokeModel", () => {
   test("uses native OpenRouter auth without serialising the API key into model config", () => {
     expect(
       createSmokeModel({
-        DEFAULT_MODEL: "openrouter/google/gemini-2.5-flash-lite",
+        DEFAULT_MODEL: "openrouter/deepseek/deepseek-v4.1-flash",
         OPENROUTER_API_KEY: "fixture-key",
       }),
-    ).toEqual({ model: "openrouter/google/gemini-2.5-flash-lite", thinking: "off" });
+    ).toEqual({ model: "openrouter/deepseek/deepseek-v4.1-flash", thinking: "off" });
   });
 });

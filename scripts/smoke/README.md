@@ -13,7 +13,7 @@ Set `LLAMA_URL` and `DEFAULT_MODEL` to use another server or model.
 To use OpenRouter, set `OPENROUTER_API_KEY` and select a registered Pi model:
 
 ```bash
-DEFAULT_MODEL=openrouter/google/gemini-2.5-flash-lite pnpm test:smoke:all
+DEFAULT_MODEL=openrouter/deepseek/deepseek-v4.1-flash pnpm test:smoke:all
 ```
 
 CI runs the full unit and integration suites, then this complete smoke suite against OpenRouter.
