@@ -52,6 +52,9 @@ jobs:
       - name: Unit test
         run: pnpm test
 
+      - name: Create host Pi config fixture
+        run: mkdir -p "$HOME/.pi/agent"
+
       - name: Integration test
         run: pnpm test:integration
         env:
