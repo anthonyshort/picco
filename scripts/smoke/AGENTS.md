@@ -49,7 +49,7 @@ The fixture build produces the bundled entry used by `local-file`; its unbundled
 
 - the repository is invisible inside bubblewrap;
 - a real Pi RPC worker reaches the configured model;
-- a host tool executes through the bridge and emits its real tool events;
+- a host tool receives a string input through the bridge and emits its real tool events;
 - a second turn reuses the live Pi process;
 - killing that process causes the next turn to spawn another process;
 - the new process resumes the conversation and recalls a random first-turn value;
@@ -62,8 +62,8 @@ and remove the temporary directory in `finally`.
 
 ## Extension contract
 
-Each extension case runs in a separate child process and verifies both the tool event and its
-sentinel response from the real model:
+Each extension case runs in a separate child process and verifies the tool event, the input prefix,
+and its sentinel response from the real model:
 
 - `local-file`: bundled file-path extension with the local runtime;
 - `bwrap-bridge`: bundled host-tool bridge inside bubblewrap;

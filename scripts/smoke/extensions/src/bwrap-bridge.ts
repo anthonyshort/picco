@@ -18,9 +18,9 @@ const SENTINEL = "bridge-host-tool-pong";
 
 const ping = tool({
   name: "host_ping",
-  description: "Returns a fixed sentinel string, executed on the host over the bridge.",
-  input: z.object({}),
-  execute: () => SENTINEL,
+  description: "Returns a sentinel with the supplied prefix, executed on the host over the bridge.",
+  input: z.object({ prefix: z.string() }),
+  execute: ({ prefix }) => `${prefix}${SENTINEL}`,
 });
 
 const agent = createAgent({

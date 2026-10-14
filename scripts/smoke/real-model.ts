@@ -22,12 +22,12 @@ async function runSmokeTest(): Promise<void> {
 
   const magicWord = tool({
     name: "magic_word",
-    description: "Returns today's magic word. Call this when asked for the magic word.",
-    input: z.object({}),
-    execute() {
+    description: "Returns today's magic word with the supplied prefix.",
+    input: z.object({ prefix: z.string() }),
+    execute({ prefix }) {
       toolCalls++;
       console.log(`[real-model] magic_word executed on the host (call ${toolCalls})`);
-      return secret;
+      return `${prefix}${secret}`;
     },
   });
 
@@ -63,7 +63,7 @@ async function runSmokeTest(): Promise<void> {
 
     const firstTurn = agent.sessions.run(
       "lifecycle",
-      "Call the magic_word tool, then reply with exactly the word it returned and nothing else.",
+      'Call the magic_word tool with prefix "smoke-", then reply with exactly the word it returned and nothing else.',
       { timeoutMs: 240_000 },
     );
     const firstResult = await firstTurn;
@@ -103,6 +103,7 @@ async function runSmokeTest(): Promise<void> {
       ["sandbox cannot read the repository", sandboxResult === "isolated"],
       ["host tool executed over /call", toolCalls > 0],
       ["secret round-tripped into the reply", firstResult.text.includes(secret)],
+      ["tool input reached the host", firstResult.text.startsWith("smoke-")],
       ["real tool name in events (not mcp)", events.includes("tool_start:magic_word")],
       ["second turn reused the live Pi process", reusedFirstProcess],
       ["second turn completed", secondResult.text.includes("second-turn-ok")],

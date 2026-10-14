@@ -20,7 +20,7 @@ export async function runCheck(opts: {
     console.log(`[${label}] agent started — driving one turn…`);
 
     const turn = agent.run(
-      `Call the ${toolName} tool, then reply with exactly the text it returned and nothing else.`,
+      `Call the ${toolName} tool with prefix "smoke-", then reply with its text content and nothing else.`,
       { timeoutMs: 240_000 },
     );
     const { text } = await turn;
@@ -35,6 +35,7 @@ export async function runCheck(opts: {
     const checks: [string, boolean][] = [
       [`extension tool ${toolName} fired`, tools.includes(toolName)],
       ["sentinel round-tripped into the reply", text.includes(sentinel)],
+      ["tool input round-tripped into the reply", text.startsWith("smoke-")],
     ];
     for (const [name, ok] of checks) console.log(`[${label}] ${ok ? "PASS" : "FAIL"}: ${name}`);
     process.exitCode = checks.every(([, ok]) => ok) ? 0 : 1;
