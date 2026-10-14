@@ -5,7 +5,7 @@ Each mention runs in an isolated bubblewrap session against a local llama.cpp mo
 
 ## Prerequisites
 
-- Linux with Node.js 22 or newer, pnpm, bubblewrap 0.8 or newer, and `pi` 0.80 or newer on `PATH`.
+- Linux with Node.js 22.19 or newer, pnpm, bubblewrap 0.8 or newer, and `pi` 1.0 or newer on `PATH`.
 - An OpenAI-compatible model server at `http://127.0.0.1:8080/v1` serving
   `qwen-27b-q6-turbo`.
 - A GitHub App private key and a compatible WebSocket relay.

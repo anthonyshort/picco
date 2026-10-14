@@ -161,7 +161,7 @@ export function writeSessionConfig(spec: SpawnRequest, dir: string): void {
     writeFileSync(path.join(dir, "settings.json"), JSON.stringify(settings, null, 2));
   }
 
-  // mcp.json is the pi-mcp-adapter's config; passed through verbatim.
+  // Native Pi MCP configuration is passed through verbatim.
   if (spec.pi.mcpServers && Object.keys(spec.pi.mcpServers).length > 0) {
     writeFileSync(
       path.join(dir, "mcp.json"),

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { Command, SessionIdentity } from "@picco-agent/core";
+import { createFakePluginContext, type FakePluginContextOptions } from "@picco-agent/core/testing";
 import { createCredentialCipher } from "../credential/cipher.js";
 import { Credentials } from "../credential/credentials.js";
 import type { IdentityStore, StoredEnvelope } from "../store/identity-store.js";
@@ -97,7 +98,156 @@ describe("createConnectionCommands", () => {
     expect(anonymous.replies[0]).toContain("identifiable sender");
     expect(publicOnly.replies[0]).toContain("open a DM");
   });
+
+  test("reconnects an MCP connector in the current session as the command user", async () => {
+    const { ctx, credentials } = createReconnectFixture();
+    await credentials.save(user, "acme", { accessToken: "secret" });
+    const session = await ctx.sessions.open("conversation");
+    const replies: string[] = [];
+
+    await ctx.commands.dispatch("mcp", {
+      args: "reconnect acme",
+      user,
+      session,
+      reply: async (message) => void replies.push(message),
+    });
+
+    expect(ctx.turns).toEqual([
+      {
+        source: "test",
+        key: "conversation",
+        prompt: "/mcp reconnect acme",
+        user,
+        session: undefined,
+      },
+    ]);
+    expect(replies).toEqual([
+      "Reconnect request for acme completed. Ask me to use the service again.",
+    ]);
+  });
+
+  test.each([
+    { args: "login acme", identity: user, hasSession: true, connected: true, reply: "Usage:" },
+    {
+      args: "reconnect acme extra",
+      identity: user,
+      hasSession: true,
+      connected: true,
+      reply: "Usage:",
+    },
+    {
+      args: "reconnect missing",
+      identity: user,
+      hasSession: true,
+      connected: true,
+      reply: "No MCP connector",
+    },
+    {
+      args: "reconnect local",
+      identity: user,
+      hasSession: true,
+      connected: true,
+      reply: "No MCP connector",
+    },
+    {
+      args: "reconnect acme",
+      identity: undefined,
+      hasSession: true,
+      connected: true,
+      reply: "identifiable sender",
+    },
+    {
+      args: "reconnect acme",
+      identity: user,
+      hasSession: false,
+      connected: true,
+      reply: "Send a message",
+    },
+    {
+      args: "reconnect acme",
+      identity: user,
+      hasSession: true,
+      connected: false,
+      reply: "/connect acme first",
+    },
+  ])(
+    "refuses reconnect with $args, user $identity, session $hasSession, credential $connected",
+    async (opts) => {
+      const { ctx, credentials } = createReconnectFixture();
+      if (opts.connected) await credentials.save(user, "acme", { accessToken: "secret" });
+      const session = opts.hasSession ? await ctx.sessions.open("conversation") : undefined;
+      const replies: string[] = [];
+
+      await ctx.commands.dispatch("mcp", {
+        args: opts.args,
+        user: opts.identity,
+        session,
+        reply: async (message) => void replies.push(message),
+      });
+
+      expect(ctx.turns).toEqual([]);
+      expect(replies).toHaveLength(1);
+      expect(replies[0]).toContain(opts.reply);
+    },
+  );
+
+  test("reports worker reconnect failure while retaining the connected account", async () => {
+    const { ctx, credentials } = createReconnectFixture({
+      reply: () => {
+        throw new Error("worker died");
+      },
+    });
+    await credentials.save(user, "acme", { accessToken: "secret" });
+    const session = await ctx.sessions.open("conversation");
+    const replies: string[] = [];
+
+    await ctx.commands.dispatch("mcp", {
+      args: "reconnect acme",
+      user,
+      session,
+      reply: async (message) => void replies.push(message),
+    });
+
+    expect(replies).toEqual(["Reconnecting acme failed. Try again."]);
+    expect(await credentials.resolve(user, "acme")).toBe("secret");
+  });
+
+  test("MCP connection confirmation explains reconnect while token-only services need no extra step", async () => {
+    const { ctx } = createReconnectFixture();
+    const messages: string[] = [];
+    for (const name of ["acme", "local"]) {
+      await ctx.commands.dispatch("connect", {
+        args: `${name} secret`,
+        user,
+        reply: async () => {},
+        dm: async (message) => void messages.push(message),
+      });
+    }
+    expect(messages).toEqual([
+      "✅ acme connected. Send /mcp reconnect acme in each existing conversation where you want to use it.",
+      "✅ local connected.",
+    ]);
+  });
 });
+
+/**
+ * Exercise connection commands through a gateway context with a real credential store.
+ */
+function createReconnectFixture(opts: FakePluginContextOptions = {}) {
+  const credentials = createCredentials();
+  const connectors: Connector[] = [
+    { name: "acme", auth: { kind: "token" }, mcp: { url: "https://mcp.acme.test" } },
+    { name: "local", auth: { kind: "token" } },
+  ];
+  const { commands } = createConnectionCommands({
+    catalog: new Map(connectors.map((connector) => [connector.name, connector])),
+    credentials,
+    redirectUri: "http://127.0.0.1:8976/oauth/callback",
+    client: () => ({ clientName: "test-agent" }),
+    fetch: async () => new Response("not used", { status: 500 }),
+  });
+  return { ctx: createFakePluginContext({ ...opts, source: "test", commands }), credentials };
+}
 
 /**
  * Run connection commands while recording their public and private replies.

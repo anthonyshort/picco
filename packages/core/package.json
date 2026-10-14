@@ -34,8 +34,8 @@
     "prepare": "pnpm build"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.0",
     "@picco-agent/bridge-extension": "workspace:*",
-    "pi-mcp-adapter": "^2.11.0",
     "zod": "^4.4.3"
   },
   "engines": {

@@ -1,0 +1,13 @@
+{
+  "name": "smoke-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Real-model smoke tests for Pi resources, tools and plugin boundaries.",
+  "type": "module",
+  "dependencies": {
+    "@picco-agent/core": "workspace:*",
+    "@picco-agent/plugin-cron": "workspace:*",
+    "@picco-agent/runtime-bwrap": "workspace:*",
+    "zod": "^4.4.3"
+  }
+}

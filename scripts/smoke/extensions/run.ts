@@ -1,7 +1,7 @@
 /**
  * Run every runtime and extension-delivery smoke case in its own process.
  *
- * Requires the configured local model. Run one case from this directory with `pnpm smoke:<case>`.
+ * Requires the configured model. Run one case from this directory with `pnpm smoke:<case>`.
  */
 import { spawn } from "node:child_process";
 

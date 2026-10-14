@@ -267,6 +267,26 @@ describe("telegram plugin commands", () => {
     expect(replies).toEqual(["Started a fresh session.", "Unknown command"]);
   });
 
+  test("passes the current conversation session so plugin commands can run Pi operations", async () => {
+    const { dispatch, message, ctx } = commandSetup(async (command) => {
+      if (!command.session) throw new Error("Missing session");
+      await command.session.run("/mcp reconnect linear", { user: command.user });
+    });
+    await ctx.sessions.open("1-42");
+
+    await dispatch(message({ threadId: 42 }));
+
+    expect(ctx.turns).toEqual([
+      {
+        source: "telegram",
+        key: "1-42",
+        prompt: "/mcp reconnect linear",
+        user: { source: "telegram", id: "123", display: "anthony" },
+        session: undefined,
+      },
+    ]);
+  });
+
   test("passes an absent sender to commands that decide whether identity is required", async () => {
     const { dispatch, message, calls } = commandSetup();
 

@@ -27,12 +27,13 @@ export default function UnbundledExampleExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: UNBUNDLED_TOOL,
     label: UNBUNDLED_TOOL,
-    description: "Returns a fixed sentinel string, proving the un-bundled extension loaded.",
-    parameters: Type.Object({}),
-    async execute(): Promise<AgentToolResult<undefined>> {
+    description:
+      "Returns a sentinel with the supplied prefix, proving the un-bundled extension loaded.",
+    parameters: Type.Object({ prefix: Type.String() }),
+    async execute(...[, params]): Promise<AgentToolResult<undefined>> {
       // Use picocolors so the dependency is genuinely load-bearing (not erased).
       return {
-        content: [{ type: "text", text: pc.reset(UNBUNDLED_SENTINEL) }],
+        content: [{ type: "text", text: pc.reset(`${params.prefix}${UNBUNDLED_SENTINEL}`) }],
         details: undefined,
       };
     },

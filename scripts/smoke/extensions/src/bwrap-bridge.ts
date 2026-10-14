@@ -12,21 +12,21 @@
 import * as z from "zod";
 import { createAgent, tool } from "@picco-agent/core";
 import { bwrap } from "@picco-agent/runtime-bwrap";
-import { model, models, runCheck } from "./shared.js";
+import { createSmokeModel, runCheck } from "./shared.js";
 
 const SENTINEL = "bridge-host-tool-pong";
 
 const ping = tool({
   name: "host_ping",
-  description: "Returns a fixed sentinel string, executed on the host over the bridge.",
-  input: z.object({}),
-  execute: () => SENTINEL,
+  description: "Returns a sentinel with the supplied prefix, executed on the host over the bridge.",
+  input: z.object({ prefix: z.string() }),
+  execute: ({ prefix }) => `${prefix}${SENTINEL}`,
 });
 
 const agent = createAgent({
   name: "ext-bwrap-bridge",
-  pi: { model, models },
-  runtime: bwrap(),
+  pi: createSmokeModel(),
+  runtime: bwrap({ env: ["OPENROUTER_API_KEY"] }),
   tools: [ping],
 });
 

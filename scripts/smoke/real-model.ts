@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
@@ -6,7 +7,7 @@ import * as z from "zod";
 import { createAgent, tool } from "@picco-agent/core";
 import { bwrap } from "@picco-agent/runtime-bwrap";
 import type { Runtime, RuntimeProcess } from "@picco-agent/core";
-import { model, models } from "./local-model.js";
+import { createSmokeModel } from "./model.js";
 
 await runSmokeTest();
 
@@ -22,16 +23,16 @@ async function runSmokeTest(): Promise<void> {
 
   const magicWord = tool({
     name: "magic_word",
-    description: "Returns today's magic word. Call this when asked for the magic word.",
-    input: z.object({}),
-    execute() {
+    description: "Returns today's magic word with the supplied prefix.",
+    input: z.object({ prefix: z.string() }),
+    execute({ prefix }) {
       toolCalls++;
       console.log(`[real-model] magic_word executed on the host (call ${toolCalls})`);
-      return secret;
+      return `${prefix}${secret}`;
     },
   });
 
-  const baseRuntime = bwrap();
+  const baseRuntime = bwrap({ env: ["OPENROUTER_API_KEY"] });
   const runtime: Runtime = {
     ...baseRuntime,
     async spawn(spec) {
@@ -40,10 +41,11 @@ async function runSmokeTest(): Promise<void> {
       return spawned;
     },
   };
+  const pi = createSmokeModel();
   const agent = createAgent({
     name: agentName,
     dataDir: smokeDataDirectory,
-    pi: { model, models },
+    pi,
     runtime,
     tools: [magicWord],
   });
@@ -62,7 +64,7 @@ async function runSmokeTest(): Promise<void> {
 
     const firstTurn = agent.sessions.run(
       "lifecycle",
-      "Call the magic_word tool, then reply with exactly the word it returned and nothing else.",
+      'Call the magic_word tool with prefix "smoke-", then reply with exactly the word it returned and nothing else.',
       { timeoutMs: 240_000 },
     );
     const firstResult = await firstTurn;
@@ -102,6 +104,7 @@ async function runSmokeTest(): Promise<void> {
       ["sandbox cannot read the repository", sandboxResult === "isolated"],
       ["host tool executed over /call", toolCalls > 0],
       ["secret round-tripped into the reply", firstResult.text.includes(secret)],
+      ["tool input reached the host", firstResult.text.startsWith("smoke-")],
       ["real tool name in events (not mcp)", events.includes("tool_start:magic_word")],
       ["second turn reused the live Pi process", reusedFirstProcess],
       ["second turn completed", secondResult.text.includes("second-turn-ok")],
@@ -111,8 +114,8 @@ async function runSmokeTest(): Promise<void> {
       ],
       ["conversation resumed after respawn", resumedResult.text.includes(secret)],
       [
-        "runtime wrote models.json",
-        existsSync(path.join(sessionDirectory, ".pi/agent/models.json")),
+        "runtime wrote custom model configuration when required",
+        !pi.models || existsSync(path.join(sessionDirectory, ".pi/agent/models.json")),
       ],
       [
         "Pi wrote a session transcript",
@@ -124,6 +127,12 @@ async function runSmokeTest(): Promise<void> {
     process.exitCode = checks.every(([, passed]) => passed) ? 0 : 1;
   } finally {
     await agent.stop();
+    await Promise.all(spawnedProcesses.map((worker) => worker.exited));
     rmSync(smokeDataDirectory, { recursive: true, force: true });
+    assert.ok(
+      spawnedProcesses.every((worker) => !worker.alive),
+      "shutdown left a Pi worker alive",
+    );
+    console.log("[real-model] PASS: shutdown reaped every Pi worker");
   }
 }

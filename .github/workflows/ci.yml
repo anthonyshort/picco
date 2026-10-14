@@ -9,6 +9,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +32,7 @@ jobs:
           sudo apt-get install --yes bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo install "$(command -v node)" /usr/local/bin/node
-          sudo npm install --global --prefix /usr/local npm @earendil-works/pi-coding-agent@0.82.0
+          sudo npm install --global --prefix /usr/local npm @earendil-works/pi-coding-agent@1.0.0
 
       - name: Build packages
         run: pnpm build
@@ -51,7 +52,22 @@ jobs:
       - name: Unit test
         run: pnpm test
 
+      - name: Create host Pi config fixture
+        run: mkdir -p "$HOME/.pi/agent"
+
       - name: Integration test
         run: pnpm test:integration
         env:
           PICCO_REQUIRE_BWRAP: "1"
+
+      - name: Smoke tests
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          DEFAULT_MODEL: openrouter/deepseek/deepseek-v4.1-flash
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::Configure the OPENROUTER_API_KEY repository secret to run smoke tests."
+            exit 1
+          fi
+          pnpm test:smoke:all

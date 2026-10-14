@@ -2,5 +2,6 @@ packages:
   - "packages/*"
   - "example/*"
   - "integration"
+  - "scripts/smoke"
   - "scripts/smoke/extensions"
   - "scripts/smoke/fixtures/*"

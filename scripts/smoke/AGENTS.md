@@ -6,8 +6,8 @@ under `scripts/smoke/`.
 
 ## Run the suite
 
-The suite requires Linux, bubblewrap, Pi, and a local OpenAI-compatible model serving
-`qwen-27b-q6-turbo` at `http://127.0.0.1:8080/v1`.
+The suite requires Linux, bubblewrap, Pi, and a model with tool calling. The local default serves
+`qwen38-27b-nvfp4` at `http://127.0.0.1:8080/v1`; CI uses OpenRouter with its repository secret.
 
 ```bash
 pnpm test:smoke
@@ -16,14 +16,18 @@ pnpm test:smoke:all
 ```
 
 Set `LLAMA_URL` and `DEFAULT_MODEL` to test another server or model. Smoke tests stay outside
-`pnpm validate` because they require local services and system packages.
+`pnpm validate` because they require model services and system packages. See [README.md](./README.md)
+for OpenRouter setup. CI runs the complete smoke suite on main and same-repository PRs.
 
 ## Structure
 
 ```text
 scripts/smoke/
 ├── real-model.ts
-├── local-model.ts
+├── model.ts
+├── resources.ts
+├── mcp.ts
+├── cron.ts
 ├── extensions/
 │   ├── run.ts
 │   ├── src/
@@ -32,6 +36,7 @@ scripts/smoke/
 │   │   └── bwrap-mount.ts
 │   └── package.json
 └── fixtures/
+    ├── stdio-mcp.mjs
     └── example-extension/
         ├── src/index.ts
         ├── src/unbundled.ts
@@ -48,11 +53,12 @@ The fixture build produces the bundled entry used by `local-file`; its unbundled
 
 - the repository is invisible inside bubblewrap;
 - a real Pi RPC worker reaches the configured model;
-- a host tool executes through the bridge and emits its real tool events;
+- a host tool receives a string input through the bridge and emits its real tool events;
 - a second turn reuses the live Pi process;
 - killing that process causes the next turn to spawn another process;
 - the new process resumes the conversation and recalls a random first-turn value;
-- the runtime writes `models.json` and Pi writes a transcript.
+- the runtime writes `models.json` for custom providers and Pi writes a transcript.
+- stopping the agent reaps every spawned Pi worker.
 
 The test records spawned runtime processes only for lifecycle assertions. It uses a stable
 `host/lifecycle` session key and a temporary data directory under the user's home directory. Do not
@@ -61,8 +67,8 @@ and remove the temporary directory in `finally`.
 
 ## Extension contract
 
-Each extension case runs in a separate child process and verifies both the tool event and its
-sentinel response from the real model:
+Each extension case runs in a separate child process and verifies the tool event, the input prefix,
+and its sentinel response from the real model:
 
 - `local-file`: bundled file-path extension with the local runtime;
 - `bwrap-bridge`: bundled host-tool bridge inside bubblewrap;
@@ -73,6 +79,20 @@ workspace-level `node_modules` directory for their pnpm package-store targets. R
 must make the fixture unloadable. Extension cases currently keep their named session data under
 `~/.picco/ext-*`.
 
+## Resource and plugin contracts
+
+- `resources.ts`: Pi discovers a mounted skill, follows its instructions with built-in file and
+  shell tools, and expands a mounted prompt template with positional arguments. Random markers
+  exist only in the fixture files; assert actual output files and successful tool events.
+- `mcp.ts`: Pi discovers a deferred MCP tool and invokes a local stdio server inside bubblewrap.
+  Assert protocol requests, relative cwd, interpolated environment, the fixture-only secret and
+  subprocess shutdown.
+- `cron.ts`: Pi creates and triggers a persisted job; a separate background worker calls a host
+  tool and reports its result. Restart the agent, trigger the loaded job and reap all workers.
+
+These cases use temporary data directories under the user's home directory and remove them after
+stopping the agent. The private smoke workspace owns their package dependencies.
+
 ## Add coverage
 
 - Add a smoke test only when the behavior depends on an installed executable, operating-system
@@ -80,7 +100,7 @@ must make the fixture unloadable. Extension cases currently keep their named ses
 - Put deterministic protocol and failure cases in `integration/` with the scripted model server.
 - Keep external-account tests such as Telegram, GitHub, OAuth, and hosted providers opt-in. Never
   make normal validation depend on personal credentials or third-party availability.
-- Reuse `local-model.ts` instead of repeating provider configuration.
+- Reuse `model.ts` instead of repeating provider configuration.
 - Assert observable behavior and exit nonzero on failure. Clean up temporary processes and files.
 
 Before committing smoke changes, run:

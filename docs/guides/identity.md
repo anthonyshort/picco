@@ -63,14 +63,21 @@ needs a credential.
 
 ## Expose connection commands
 
-Identity contributes three commands:
+Identity contributes connection commands:
 
 - `/connect <name>` starts or resumes authentication.
 - `/connections` lists connected services without revealing credentials.
 - `/disconnect <name>` removes a connection.
+- `/mcp reconnect <name>` loads a connected MCP service's tools in the current conversation.
 
 Gateway plugins decide how commands are presented and dispatch them through `ctx.commands`.
 Secret-bearing steps require a private-message callback.
+
+After connecting an MCP service, send `/mcp reconnect <name>` in each existing conversation
+where you want to use it. New sessions connect when they start. Gateways pass the current live
+session as `session: ctx.sessions.get(channelId)` when dispatching commands, alongside the
+authenticated user. The reconnect runs through that session's queue; Pi reports connection
+status to the logger.
 
 Without a public callback URL, OAuth uses a paste-back flow through
 `http://127.0.0.1:8976/oauth/callback`. The user copies the final callback URL back into the private

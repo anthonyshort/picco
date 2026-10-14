@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { createAgent } from "@picco-agent/core";
 import { bwrap } from "@picco-agent/runtime-bwrap";
 import { UNBUNDLED_SENTINEL, UNBUNDLED_TOOL } from "@picco-agent/smoke-extension/unbundled";
-import { model, models, runCheck } from "./shared.js";
+import { createSmokeModel, runCheck } from "./shared.js";
 
 // The un-bundled raw TypeScript entry (points pi straight at the source file).
 const rawEntry = fileURLToPath(import.meta.resolve("@picco-agent/smoke-extension/unbundled"));
@@ -45,11 +45,11 @@ const rootNodeModules = path.join(repoRoot, "node_modules");
 const agent = createAgent({
   name: "ext-bwrap-mount",
   pi: {
-    model,
-    models,
+    ...createSmokeModel(),
     extensions: [rawEntry],
   },
   runtime: bwrap({
+    env: ["OPENROUTER_API_KEY"],
     // Both mounts make the extension's `import "picocolors"` resolve in the jail.
     // Drop either and the worker dies with `Cannot find module 'picocolors'`.
     mounts: [

@@ -22,11 +22,11 @@ export default function ExampleExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: PING_TOOL,
     label: PING_TOOL,
-    description: "Returns a fixed sentinel string. Call this to prove the extension is loaded.",
-    parameters: Type.Object({}),
-    async execute(): Promise<AgentToolResult<undefined>> {
+    description: "Returns a sentinel with the supplied prefix, proving the extension is loaded.",
+    parameters: Type.Object({ prefix: Type.String() }),
+    async execute(...[, params]): Promise<AgentToolResult<undefined>> {
       return {
-        content: [{ type: "text", text: PING_SENTINEL }],
+        content: [{ type: "text", text: `${params.prefix}${PING_SENTINEL}` }],
         details: undefined,
       };
     },

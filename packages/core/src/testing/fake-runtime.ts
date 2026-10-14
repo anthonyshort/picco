@@ -2,7 +2,7 @@ import type { JsonObject } from "../session/jsonl.js";
 import type { Runtime, RuntimeExecOptions, RuntimeProcess, SpawnRequest } from "../types.js";
 
 /**
- * Scripted behavior for a FakeRuntimeProcess.
+ * Scripted behaviour for a FakeRuntimeProcess.
  */
 export interface FakeRuntimeProcessOptions {
   /**
@@ -10,7 +10,7 @@ export interface FakeRuntimeProcessOptions {
    */
   reply?: (prompt: string) => string | Promise<string>;
   /**
-   * Raw RPC events emitted between the prompt ack and agent_end (e.g. tool_execution_start/end,
+   * Raw RPC events emitted between the prompt ack and agent_settled (e.g. tool_execution_start/end,
    * message_update).
    */
   eventsFor?: (prompt: string) => JsonObject[];
@@ -19,11 +19,15 @@ export interface FakeRuntimeProcessOptions {
    */
   tokens?: number | null;
   /**
+   * Handle a prompt as an extension command without starting an agent run.
+   */
+  handlePrompt?: boolean;
+  /**
    * Simulate a crash: the process dies when it receives a prompt.
    */
   dieOnPrompt?: boolean;
   /**
-   * Never send agent_end — for timeout/abort tests.
+   * Never send agent_settled — for timeout/abort tests.
    */
   neverFinish?: boolean;
   /**
@@ -45,6 +49,10 @@ export class FakeRuntimeProcess implements RuntimeProcess {
    * Every prompt this process received, in arrival order.
    */
   readonly prompts: string[] = [];
+  /**
+   * Requests received by this process, including extension UI responses.
+   */
+  readonly requests: JsonObject[] = [];
   killed = false;
 
   private exitedFlag = false;
@@ -137,9 +145,10 @@ export class FakeRuntimeProcess implements RuntimeProcess {
   }
 
   /**
-   * Answer one RPC request according to the scripted behavior.
+   * Answer one RPC request according to the scripted behaviour.
    */
   private async handleRequest(msg: JsonObject): Promise<void> {
+    this.requests.push(msg);
     const id = msg.id;
 
     switch (msg.type) {
@@ -151,7 +160,17 @@ export class FakeRuntimeProcess implements RuntimeProcess {
         const message = String(msg.message ?? "");
         this.prompts.push(message);
         this.activePrompt = true;
-        this.push({ type: "response", id, success: true });
+        this.push({
+          type: "response",
+          command: "prompt",
+          id,
+          success: true,
+          data: { disposition: this.behavior.handlePrompt ? "handled" : "started" },
+        });
+        if (this.behavior.handlePrompt) {
+          this.activePrompt = false;
+          return;
+        }
         if (this.behavior.neverFinish) return;
 
         for (const event of this.behavior.eventsFor?.(message) ?? []) {
@@ -160,14 +179,22 @@ export class FakeRuntimeProcess implements RuntimeProcess {
         this.lastReply = await (this.behavior.reply?.(message) ?? `echo: ${message}`);
         this.activePrompt = false;
         this.push({ type: "agent_end" });
+        this.push({ type: "agent_settled" });
         return;
       }
       case "get_last_assistant_text":
-        this.push({ type: "response", id, success: true, data: { text: this.lastReply } });
+        this.push({
+          type: "response",
+          command: "get_last_assistant_text",
+          id,
+          success: true,
+          data: { text: this.lastReply },
+        });
         return;
       case "get_session_stats":
         this.push({
           type: "response",
+          command: "get_session_stats",
           id,
           success: true,
           data: {
@@ -176,15 +203,24 @@ export class FakeRuntimeProcess implements RuntimeProcess {
         });
         return;
       case "abort":
-        this.push({ type: "response", id, success: true });
-        // pi ends the aborted run — emit agent_end if a prompt is hanging.
+        this.push({ type: "response", command: "abort", id, success: true });
+        // pi ends the aborted run — emit agent_settled if a prompt is hanging.
         if (this.activePrompt) {
           this.activePrompt = false;
           this.push({ type: "agent_end" });
+          this.push({ type: "agent_settled" });
         }
         return;
+      case "extension_ui_response":
+        return;
       default:
-        this.push({ type: "response", id, success: false, error: `unknown: ${msg.type}` });
+        this.push({
+          type: "response",
+          command: String(msg.type),
+          id,
+          success: false,
+          error: `unknown: ${msg.type}`,
+        });
     }
   }
 }
