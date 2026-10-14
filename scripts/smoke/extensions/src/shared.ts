@@ -2,9 +2,7 @@
  * Shared runner for the extension-delivery smoke cases.
  */
 import type { AgentHandle } from "@picco-agent/core";
-import { model, models } from "../../local-model.js";
-
-export { model, models };
+export { createSmokeModel } from "../../model.js";
 
 /**
  * Drive one turn that asks the model to call `toolName` and echo its result, then assert the

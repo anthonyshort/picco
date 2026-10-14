@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { createAgent } from "@picco-agent/core";
 import { local } from "@picco-agent/runtime-local";
 import { PING_SENTINEL, PING_TOOL } from "@picco-agent/smoke-extension";
-import { model, models, runCheck } from "./shared.js";
+import { createSmokeModel, runCheck } from "./shared.js";
 
 // The package's "." export is its bundled dist/index.js — resolve it to a file path.
 const bundlePath = fileURLToPath(import.meta.resolve("@picco-agent/smoke-extension"));
@@ -18,8 +18,7 @@ const bundlePath = fileURLToPath(import.meta.resolve("@picco-agent/smoke-extensi
 const agent = createAgent({
   name: "ext-local-file",
   pi: {
-    model,
-    models,
+    ...createSmokeModel(),
     extensions: [bundlePath],
   },
   runtime: local(),

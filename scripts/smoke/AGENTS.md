@@ -6,8 +6,8 @@ under `scripts/smoke/`.
 
 ## Run the suite
 
-The suite requires Linux, bubblewrap, Pi, and a local OpenAI-compatible model serving
-`qwen38-27b-nvfp4` at `http://127.0.0.1:8080/v1`.
+The suite requires Linux, bubblewrap, Pi, and a model with tool calling. The local default serves
+`qwen38-27b-nvfp4` at `http://127.0.0.1:8080/v1`; CI uses OpenRouter with its repository secret.
 
 ```bash
 pnpm test:smoke
@@ -16,14 +16,15 @@ pnpm test:smoke:all
 ```
 
 Set `LLAMA_URL` and `DEFAULT_MODEL` to test another server or model. Smoke tests stay outside
-`pnpm validate` because they require local services and system packages.
+`pnpm validate` because they require model services and system packages. See [README.md](./README.md)
+for OpenRouter setup. CI runs the complete smoke suite on main and same-repository PRs.
 
 ## Structure
 
 ```text
 scripts/smoke/
 ├── real-model.ts
-├── local-model.ts
+├── model.ts
 ├── extensions/
 │   ├── run.ts
 │   ├── src/
@@ -52,7 +53,7 @@ The fixture build produces the bundled entry used by `local-file`; its unbundled
 - a second turn reuses the live Pi process;
 - killing that process causes the next turn to spawn another process;
 - the new process resumes the conversation and recalls a random first-turn value;
-- the runtime writes `models.json` and Pi writes a transcript.
+- the runtime writes `models.json` for custom providers and Pi writes a transcript.
 
 The test records spawned runtime processes only for lifecycle assertions. It uses a stable
 `host/lifecycle` session key and a temporary data directory under the user's home directory. Do not
@@ -80,7 +81,7 @@ must make the fixture unloadable. Extension cases currently keep their named ses
 - Put deterministic protocol and failure cases in `integration/` with the scripted model server.
 - Keep external-account tests such as Telegram, GitHub, OAuth, and hosted providers opt-in. Never
   make normal validation depend on personal credentials or third-party availability.
-- Reuse `local-model.ts` instead of repeating provider configuration.
+- Reuse `model.ts` instead of repeating provider configuration.
 - Assert observable behavior and exit nonzero on failure. Clean up temporary processes and files.
 
 Before committing smoke changes, run:

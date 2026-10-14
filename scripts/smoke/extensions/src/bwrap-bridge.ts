@@ -12,7 +12,7 @@
 import * as z from "zod";
 import { createAgent, tool } from "@picco-agent/core";
 import { bwrap } from "@picco-agent/runtime-bwrap";
-import { model, models, runCheck } from "./shared.js";
+import { createSmokeModel, runCheck } from "./shared.js";
 
 const SENTINEL = "bridge-host-tool-pong";
 
@@ -25,8 +25,8 @@ const ping = tool({
 
 const agent = createAgent({
   name: "ext-bwrap-bridge",
-  pi: { model, models },
-  runtime: bwrap(),
+  pi: createSmokeModel(),
+  runtime: bwrap({ env: ["OPENROUTER_API_KEY"] }),
   tools: [ping],
 });
 

@@ -6,7 +6,7 @@ import * as z from "zod";
 import { createAgent, tool } from "@picco-agent/core";
 import { bwrap } from "@picco-agent/runtime-bwrap";
 import type { Runtime, RuntimeProcess } from "@picco-agent/core";
-import { model, models } from "./local-model.js";
+import { createSmokeModel } from "./model.js";
 
 await runSmokeTest();
 
@@ -31,7 +31,7 @@ async function runSmokeTest(): Promise<void> {
     },
   });
 
-  const baseRuntime = bwrap();
+  const baseRuntime = bwrap({ env: ["OPENROUTER_API_KEY"] });
   const runtime: Runtime = {
     ...baseRuntime,
     async spawn(spec) {
@@ -40,10 +40,11 @@ async function runSmokeTest(): Promise<void> {
       return spawned;
     },
   };
+  const pi = createSmokeModel();
   const agent = createAgent({
     name: agentName,
     dataDir: smokeDataDirectory,
-    pi: { model, models },
+    pi,
     runtime,
     tools: [magicWord],
   });
@@ -111,8 +112,8 @@ async function runSmokeTest(): Promise<void> {
       ],
       ["conversation resumed after respawn", resumedResult.text.includes(secret)],
       [
-        "runtime wrote models.json",
-        existsSync(path.join(sessionDirectory, ".pi/agent/models.json")),
+        "runtime wrote custom model configuration when required",
+        !pi.models || existsSync(path.join(sessionDirectory, ".pi/agent/models.json")),
       ],
       [
         "Pi wrote a session transcript",

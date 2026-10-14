@@ -9,6 +9,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -55,3 +56,15 @@ jobs:
         run: pnpm test:integration
         env:
           PICCO_REQUIRE_BWRAP: "1"
+
+      - name: Smoke tests
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          DEFAULT_MODEL: openrouter/google/gemini-2.5-flash-lite
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::Configure the OPENROUTER_API_KEY repository secret to run smoke tests."
+            exit 1
+          fi
+          pnpm test:smoke:all
