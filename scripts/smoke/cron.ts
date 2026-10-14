@@ -73,7 +73,7 @@ async function runCronSmoke(): Promise<void> {
       try {
         await agent.start({ handleSignals: false });
         const prompt = restarted
-          ? `Call cron_list and confirm it contains ${jobId}, then call cron_run for ${jobId} exactly once. Do not add or update any jobs.`
+          ? `Call cron_list with exactly {} (it takes no parameters) and confirm it contains ${jobId}. Wait for that result, then call cron_run with exactly ${JSON.stringify({ id: jobId })} once. Do not add or update any jobs.`
           : `Call cron_add exactly once with ${JSON.stringify({
               id: jobId,
               description: "Cron smoke job",
@@ -83,13 +83,13 @@ async function runCronSmoke(): Promise<void> {
               timeout: TURN_TIMEOUT_MS / 1_000,
             })}. Wait for its successful result before calling cron_run for ${jobId} exactly once.`;
         const turn = agent.sessions.run("setup", prompt, { timeoutMs: TURN_TIMEOUT_MS });
-        await turn;
+        const result = await turn;
         const events: string[] = [];
         for await (const event of turn.events) {
           if (event.type === "tool_end" && !event.isError) events.push(event.tool);
         }
-        assert.ok(events.includes(restarted ? "cron_list" : "cron_add"));
-        assert.ok(events.includes("cron_run"));
+        assert.ok(events.includes(restarted ? "cron_list" : "cron_add"), result.text);
+        assert.ok(events.includes("cron_run"), result.text);
         const run = await withDeadline(completed.promise, TURN_TIMEOUT_MS);
         assert.equal(run.jobId, jobId);
         assert.equal(run.status, "success", run.error);
