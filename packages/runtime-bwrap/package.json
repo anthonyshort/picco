@@ -1,6 +1,6 @@
 {
   "name": "@picco-agent/runtime-bwrap",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Picco bubblewrap runtime: per-session Linux filesystem isolation for pi sessions.",
   "homepage": "https://github.com/picco-agent/picco/tree/main/packages/runtime-bwrap",
   "bugs": {

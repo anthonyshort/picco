@@ -1,6 +1,6 @@
 {
   "name": "@picco-agent/identity-sqlite",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Picco identity store backend: a SQLite-backed IdentityStore for @picco-agent/identity.",
   "homepage": "https://github.com/picco-agent/picco/tree/main/packages/identity-sqlite",
   "bugs": {
