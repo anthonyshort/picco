@@ -26,6 +26,7 @@ function agentJob(overrides: Partial<AgentJobConfig> = {}): AgentJobConfig {
     description: "A daily job",
     schedule: "0 0 9 * * *",
     enabled: true,
+    maxConcurrentRuns: 1,
     prompt: "Do the thing",
     ...overrides,
   };
@@ -38,6 +39,7 @@ function scriptJob(overrides: Partial<ScriptJobConfig> = {}): ScriptJobConfig {
     description: "A backup job",
     schedule: "0 */5 * * * *",
     enabled: true,
+    maxConcurrentRuns: 1,
     command: "echo hi",
     ...overrides,
   };
@@ -246,4 +248,25 @@ describe("update", () => {
     const onDisk = await readFile(path.join(jobDir, "keep.yaml"), "utf-8");
     expect(onDisk).toContain("0 */5 * * * *");
   });
+});
+
+describe("concurrency configuration", () => {
+  test("defaults existing YAML to one and persists an explicit limit", async () => {
+    const { maxConcurrentRuns, ...legacy } = agentJob();
+    expect(maxConcurrentRuns).toBe(1);
+    await loader.save(legacy);
+    expect(loader.get(legacy.id)?.maxConcurrentRuns).toBe(1);
+    await loader.update(legacy.id, { maxConcurrentRuns: 3 });
+    await loader.refresh();
+    expect(loader.get(legacy.id)?.maxConcurrentRuns).toBe(3);
+  });
+
+  test.each([0, 11, 1.5])(
+    "rejects an invalid concurrency limit %s before writing",
+    async (maxConcurrentRuns) => {
+      await expect(loader.save(agentJob({ maxConcurrentRuns }))).rejects.toThrow();
+      expect(loader.getAll().size).toBe(0);
+      expect(await readdir(jobDir)).toEqual([]);
+    },
+  );
 });

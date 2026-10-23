@@ -2,7 +2,7 @@ import { Cron as Croner } from "croner";
 import type { Cron } from "croner";
 import isEqual from "fast-deep-equal";
 import { createLogger, errorMessage, type ThinkingLevel } from "@picco-agent/core";
-import type { JobConfig, JobConfigUpdate, JobLoader } from "./loader.js";
+import type { JobConfig, JobConfigInput, JobConfigUpdate, JobLoader } from "./loader.js";
 
 const logger = createLogger("job-scheduler");
 
@@ -15,7 +15,14 @@ interface ScheduledJob {
   id: string;
   config: JobConfig;
   cron: Cron | null;
-  running: boolean;
+  execution: JobExecutionState;
+}
+
+/**
+ * Execution counters retained when a job configuration or timer is replaced.
+ */
+interface JobExecutionState {
+  activeCount: number;
   /**
    * ISO timestamp of the last completed run (since process start).
    */
@@ -34,6 +41,8 @@ export interface JobState {
   type: JobConfig["type"];
   schedule: string;
   enabled: boolean;
+  maxConcurrentRuns: number;
+  activeCount: number;
   lastRun: string | null;
   fireCount: number;
 }
@@ -89,12 +98,13 @@ export interface JobSchedulerOptions {
 }
 
 /**
- * Arms croner timers for loaded jobs, fires them with overlap-skip, and reports every completed run
- * to the injected onRunComplete hook. Keeps no state on disk; job execution is injected
- * (runAgent/runScript) so the scheduler stays decoupled from the agent runtime.
+ * Arms croner timers for loaded jobs, fires them with bounded concurrency, and reports every
+ * completed run to the injected onRunComplete hook. Keeps no state on disk; job execution is
+ * injected (runAgent/runScript) so the scheduler stays decoupled from the agent runtime.
  */
 export class JobScheduler {
   private jobs = new Map<string, ScheduledJob>();
+  private executions = new Map<string, JobExecutionState>();
   private readonly loader: JobLoader;
   private readonly runAgent: RunAgent;
   private readonly runScript: RunScript;
@@ -117,8 +127,10 @@ export class JobScheduler {
       type: job.config.type,
       schedule: job.config.schedule,
       enabled: job.config.enabled,
-      lastRun: job.lastRun,
-      fireCount: job.fireCount,
+      maxConcurrentRuns: job.config.maxConcurrentRuns,
+      activeCount: job.execution.activeCount,
+      lastRun: job.execution.lastRun,
+      fireCount: job.execution.fireCount,
     }));
   }
 
@@ -126,7 +138,7 @@ export class JobScheduler {
    * Add a job by writing its YAML file, then reload to arm it. Throws if the id is already loaded —
    * silently overwriting would leave the old timer armed with the old config.
    */
-  async addJob(config: JobConfig): Promise<void> {
+  async addJob(config: JobConfigInput): Promise<void> {
     if (this.jobs.has(config.id)) {
       throw new Error(`Job "${config.id}" already exists — use cron_update to change it.`);
     }
@@ -171,6 +183,9 @@ export class JobScheduler {
     const job = this.jobs.get(id);
     if (!job) return `Job "${id}" not found.`;
     if (!job.config.enabled) return `Job "${id}" is disabled.`;
+    if (job.execution.activeCount >= job.config.maxConcurrentRuns) {
+      return `Job "${id}" skipped — concurrency limit ${job.config.maxConcurrentRuns} reached.`;
+    }
     this.fireJob(id).catch((err) => {
       logger.error(`triggered run failed for ${id}`, err);
     });
@@ -191,13 +206,12 @@ export class JobScheduler {
    * changed jobs, starts new jobs.
    */
   async reload(): Promise<void> {
-    const prevConfigs = this.loader.getAll();
     const newConfigs = await this.loader.refresh();
 
     // Jobs on disk
     for (const [id, config] of newConfigs) {
       const prev = this.jobs.get(id);
-      const prevConfig = prevConfigs.get(id);
+      const prevConfig = prev?.config;
 
       if (!prev || !prevConfig) {
         // New job — build and arm if enabled
@@ -224,28 +238,31 @@ export class JobScheduler {
   }
 
   /**
-   * Run one job to completion, with overlap-skip; the outcome goes to onRunComplete. A no-op for an
-   * id that is no longer loaded (a timer can fire in the same tick its job is removed).
+   * Run one job to completion, within its concurrency limit; the outcome goes to onRunComplete. A
+   * no-op for an id that is no longer loaded (a timer can fire in the same tick its job is
+   * removed).
    */
   async fireJob(id: string): Promise<void> {
     const job = this.jobs.get(id);
-    if (!job) return;
+    if (!job || !job.config.enabled) return;
 
-    if (job.running) {
-      logger.log(`${job.id} skipped (already running)`);
+    const config = job.config;
+    const execution = job.execution;
+    if (execution.activeCount >= config.maxConcurrentRuns) {
+      logger.log(`${job.id} skipped (concurrency limit reached)`);
       return;
     }
 
     const startedMs = Date.now();
     const startedAt = new Date(startedMs).toISOString();
-    job.running = true;
+    execution.activeCount++;
 
     logger.log(`Starting ${job.id} (${job.config.type})`);
 
     const run: JobRun = { jobId: job.id, startedAt, durationMs: 0, status: "success" };
 
     try {
-      run.output = await this.runJobBody(job.config);
+      run.output = await this.runJobBody(config);
     } catch (err) {
       run.status = "error";
       run.error = errorMessage(err);
@@ -253,14 +270,15 @@ export class JobScheduler {
     } finally {
       run.durationMs = Date.now() - startedMs;
       logger.log(`${job.id} — duration=${(run.durationMs / 1000).toFixed(1)}s`);
-      job.running = false;
-      job.lastRun = startedAt;
-      job.fireCount++;
+      execution.lastRun = startedAt;
+      execution.fireCount++;
 
       try {
         await this.onRunComplete(run);
       } catch (err) {
         logger.error(`onRunComplete failed for ${job.id}`, err);
+      } finally {
+        execution.activeCount--;
       }
     }
   }
@@ -319,13 +337,16 @@ export class JobScheduler {
    * loader (invalid files never reach here).
    */
   private buildLoadedJob(config: JobConfig): ScheduledJob {
+    let execution = this.executions.get(config.id);
+    if (!execution) {
+      execution = { activeCount: 0, lastRun: null, fireCount: 0 };
+      this.executions.set(config.id, execution);
+    }
     return {
       id: config.id,
       config,
       cron: null,
-      running: false,
-      lastRun: null,
-      fireCount: 0,
+      execution,
     };
   }
 }

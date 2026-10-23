@@ -46,6 +46,7 @@ function agentJob(overrides: Partial<AgentJobConfig> = {}): AgentJobConfig {
     description: "an agent job",
     schedule: "0 */5 * * * *",
     enabled: true,
+    maxConcurrentRuns: 1,
     prompt: "hello",
     ...overrides,
   };
@@ -58,6 +59,7 @@ function scriptJob(overrides: Partial<ScriptJobConfig> = {}): ScriptJobConfig {
     description: "a script job",
     schedule: "0 */5 * * * *",
     enabled: true,
+    maxConcurrentRuns: 1,
     command: "echo hello",
     timeout: 10,
     ...overrides,
@@ -342,5 +344,68 @@ describe("timer lifecycle", () => {
     const fired = runAgentCalls.length;
     await vi.advanceTimersByTimeAsync(5_000);
     expect(runAgentCalls).toHaveLength(fired);
+  });
+});
+
+describe("bounded concurrency", () => {
+  test("admits three runs, skips excess triggers and retains counts across reload, update and readd", async () => {
+    const pending: ReturnType<typeof Promise.withResolvers<string>>[] = [];
+    scheduler = new JobScheduler({
+      loader,
+      runAgent: (opts) => {
+        runAgentCalls.push(opts);
+        const result = Promise.withResolvers<string>();
+        pending.push(result);
+        return result.promise;
+      },
+      runScript: async () => "unused",
+      onRunComplete: (run) => void runs.push(run),
+    });
+    await scheduler.addJob(agentJob({ maxConcurrentRuns: 3 }));
+    const first = scheduler.fireJob("agent-job");
+    await writeJobFile(agentJob({ maxConcurrentRuns: 3, prompt: "new prompt" }));
+    await scheduler.reload();
+    const second = scheduler.fireJob("agent-job");
+    const third = scheduler.fireJob("agent-job");
+    expect(runAgentCalls.map((call) => call.prompt)).toEqual(["hello", "new prompt", "new prompt"]);
+    expect(scheduler.listJobs()[0]).toMatchObject({ activeCount: 3, maxConcurrentRuns: 3 });
+    expect(scheduler.triggerJob("agent-job")).toMatch(/skipped.*limit 3/);
+    await scheduler.fireJob("agent-job");
+    expect(pending).toHaveLength(3);
+    await scheduler.updateJob("agent-job", { maxConcurrentRuns: 1 });
+    expect(scheduler.triggerJob("agent-job")).toMatch(/skipped.*limit 1/);
+    await scheduler.removeJob("agent-job");
+    await scheduler.addJob(agentJob({ maxConcurrentRuns: 1 }));
+    expect(scheduler.listJobs()[0].activeCount).toBe(3);
+    expect(scheduler.triggerJob("agent-job")).toMatch(/skipped/);
+    pending.forEach((result, index) => result.resolve(`run-${index}`));
+    await Promise.all([first, second, third]);
+    expect(runs.map((run) => run.output).sort()).toEqual(["run-0", "run-1", "run-2"]);
+    expect(scheduler.listJobs()[0]).toMatchObject({ activeCount: 0, fireCount: 3 });
+    expect(pending).toHaveLength(3);
+  });
+
+  test("keeps the slot until completion reporting settles and releases it after failures", async () => {
+    const completion = Promise.withResolvers<void>();
+    const reporting = Promise.withResolvers<void>();
+    scheduler = new JobScheduler({
+      loader,
+      runAgent: async () => {
+        throw new Error("run failed");
+      },
+      runScript: async () => "unused",
+      onRunComplete: async () => {
+        reporting.resolve();
+        await completion.promise;
+        throw new Error("report failed");
+      },
+    });
+    await scheduler.addJob(agentJob());
+    const run = scheduler.fireJob("agent-job");
+    await reporting.promise;
+    expect(scheduler.triggerJob("agent-job")).toMatch(/skipped/);
+    completion.resolve();
+    await run;
+    expect(scheduler.listJobs()[0]).toMatchObject({ activeCount: 0, fireCount: 1 });
   });
 });

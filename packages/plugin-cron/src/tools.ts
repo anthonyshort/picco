@@ -1,6 +1,7 @@
 import * as z from "zod";
 import { errorMessage, markdownTable, THINKING_LEVELS, tool, type Tool } from "@picco-agent/core";
 import type { JobConfigUpdate } from "./loader.js";
+import { MaxConcurrentRunsSchema } from "./loader.js";
 import type { JobScheduler } from "./scheduler.js";
 
 export const CronAddSchema = z.object({
@@ -8,6 +9,9 @@ export const CronAddSchema = z.object({
   description: z.string().describe("Job description"),
   schedule: z.string().describe('6-field cron expression (seconds first), e.g. "0 0 9 * * *"'),
   type: z.enum(["agent", "script"]),
+  maxConcurrentRuns: MaxConcurrentRunsSchema.optional().describe(
+    "Maximum simultaneous runs, 1–10 (default 1); excess triggers are skipped",
+  ),
   prompt: z.string().optional().describe("Agent prompt (required for agent jobs)"),
   command: z.string().optional().describe("Shell command (required for script jobs)"),
   timeout: z.number().optional().describe("Timeout in seconds (scripts default 300, agents 600)"),
@@ -25,6 +29,7 @@ export const CronUpdateSchema = z.object({
     .optional()
     .describe('New schedule: 6-field cron expression, e.g. "0 0 9 * * *"'),
   enabled: z.boolean().optional().describe("Enable or disable the job"),
+  maxConcurrentRuns: MaxConcurrentRunsSchema.optional().describe("Maximum simultaneous runs, 1–10"),
   prompt: z.string().optional().describe("New agent prompt (agent jobs only)"),
   command: z.string().optional().describe("New shell command (script jobs only)"),
   timeout: z.number().optional().describe("New timeout in seconds"),
@@ -44,12 +49,14 @@ export function cronList(scheduler: JobScheduler): string {
   }
 
   return markdownTable(
-    ["Name", "Type", "Schedule", "Status", "Last Run", "Runs"],
+    ["Name", "Type", "Schedule", "Status", "Active", "Limit", "Last Run", "Runs"],
     jobs.map((j) => [
       j.id,
       j.type,
       j.schedule,
       j.enabled ? "enabled" : "disabled",
+      String(j.activeCount),
+      String(j.maxConcurrentRuns),
       j.lastRun ?? "never",
       String(j.fireCount),
     ]),
@@ -71,6 +78,7 @@ export async function cronAdd(scheduler: JobScheduler, params: CronAddParams): P
           description: params.description,
           prompt: params.prompt,
           enabled: true,
+          maxConcurrentRuns: params.maxConcurrentRuns,
           timeout: params.timeout,
           model: params.model,
           thinking: params.thinking,
@@ -86,6 +94,7 @@ export async function cronAdd(scheduler: JobScheduler, params: CronAddParams): P
           command: params.command,
           timeout: params.timeout,
           enabled: true,
+          maxConcurrentRuns: params.maxConcurrentRuns,
         });
         break;
       default:
@@ -111,6 +120,8 @@ export async function cronUpdate(
     if (params.description !== undefined) partial.description = params.description;
     if (params.schedule !== undefined) partial.schedule = params.schedule;
     if (params.enabled !== undefined) partial.enabled = params.enabled;
+    if (params.maxConcurrentRuns !== undefined)
+      partial.maxConcurrentRuns = params.maxConcurrentRuns;
     if (params.prompt !== undefined) partial.prompt = params.prompt;
     if (params.command !== undefined) partial.command = params.command;
     if (params.timeout !== undefined) partial.timeout = params.timeout;
@@ -169,7 +180,7 @@ export function buildCronTools(deps: () => CronDeps): Tool[] {
       name: "cron_run",
       description:
         "Trigger a cron job to run immediately, bypassing its schedule. " +
-        "Runs in the background.",
+        "Runs in the background; skipped without queuing when the job concurrency limit is reached.",
       input: z.object({ id: z.string().describe("Job id to run") }),
       execute: ({ id }) => deps().scheduler.triggerJob(id),
     }),

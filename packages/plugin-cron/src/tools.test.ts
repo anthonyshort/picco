@@ -49,8 +49,8 @@ describe("cronList", () => {
     });
 
     const out = cronList(scheduler);
-    expect(out).toContain("| Name | Type | Schedule | Status | Last Run | Runs |");
-    expect(out).toContain("| j1 | script | 0 */5 * * * * | enabled | never | 0 |");
+    expect(out).toContain("| Name | Type | Schedule | Status | Active | Limit | Last Run | Runs |");
+    expect(out).toContain("| j1 | script | 0 */5 * * * * | enabled | 0 | 1 | never | 0 |");
   });
 });
 
@@ -166,4 +166,27 @@ describe("cron_remove", () => {
     const res = await remove.execute({ id: "missing" }, toolCtx);
     expect(res).toContain("not found");
   });
+});
+
+test("cron tools persist concurrency and omitted updates preserve the current limit", async () => {
+  const tools = buildCronTools(() => ({ scheduler }));
+  const add = tools.find((tool) => tool.name === "cron_add")!;
+  const update = tools.find((tool) => tool.name === "cron_update")!;
+  const input = add.input.parse({
+    id: "parallel",
+    description: "d",
+    type: "agent",
+    prompt: "review",
+    schedule: "0 */5 * * * *",
+    maxConcurrentRuns: 3,
+  });
+  await add.execute(input, toolCtx);
+  await update.execute(update.input.parse({ id: "parallel", description: "updated" }), toolCtx);
+  await update.execute(update.input.parse({ id: "parallel", schedule: "0 */10 * * * *" }), toolCtx);
+  await loader.refresh();
+  expect(loader.get("parallel")?.maxConcurrentRuns).toBe(3);
+  await update.execute(update.input.parse({ id: "parallel", maxConcurrentRuns: 2 }), toolCtx);
+  await loader.refresh();
+  expect(loader.get("parallel")?.maxConcurrentRuns).toBe(2);
+  expect(update.input.safeParse({ id: "parallel", maxConcurrentRuns: 11 }).success).toBe(false);
 });
