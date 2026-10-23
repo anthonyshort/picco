@@ -13,11 +13,14 @@ import { assertValidSchedule, validateCronExpression } from "./schedule.js";
 const JOB_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const JOB_ID_MESSAGE = "Job name must be alphanumeric (hyphens and underscores allowed).";
 
+export const MaxConcurrentRunsSchema = z.number().int().min(1).max(10);
+
 const BaseJobConfigSchema = z.object({
   id: z.string().regex(JOB_ID_PATTERN, JOB_ID_MESSAGE),
   description: z.string(),
   schedule: z.string(),
   enabled: z.boolean(),
+  maxConcurrentRuns: MaxConcurrentRunsSchema.default(1),
 });
 
 const AgentJobConfigSchema = BaseJobConfigSchema.extend({
@@ -57,6 +60,11 @@ export type ScriptJobConfig = z.infer<typeof ScriptJobConfigSchema>;
  * Union of all supported job configuration types.
  */
 export type JobConfig = z.infer<typeof JobConfigSchema>;
+
+/**
+ * Accepted job configuration before optional defaults are applied.
+ */
+export type JobConfigInput = z.input<typeof JobConfigSchema>;
 
 /**
  * Flat partial across both job types, for updates that don't change the discriminant. Derived from
@@ -148,7 +156,7 @@ export class JobLoader {
    * invalid id or schedule BEFORE writing — a bad file on disk would otherwise be skipped (with a
    * warning) on every reload forever.
    */
-  async save(config: JobConfig): Promise<void> {
+  async save(config: JobConfigInput): Promise<void> {
     if (!JOB_ID_PATTERN.test(config.id)) {
       throw new Error(JOB_ID_MESSAGE);
     }

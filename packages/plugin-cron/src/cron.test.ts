@@ -104,7 +104,9 @@ describe("cron plugin", () => {
     expect(ctx.turns).toEqual([
       {
         source: "cron",
-        key: expect.stringMatching(/^hello\/\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/),
+        key: expect.stringMatching(
+          /^hello\/\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[a-f0-9-]{36}$/,
+        ),
         prompt: "say hello",
         user: undefined,
         // No model/thinking on the job — nothing overrides the agent-wide pi config.

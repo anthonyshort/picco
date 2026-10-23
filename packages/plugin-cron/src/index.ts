@@ -7,6 +7,7 @@
  * creating sessions under sessions/cron/{jobId}/{timestamp}/. Script jobs run through
  * ctx.runtime.exec in the agent's configured runtime.
  */
+import { randomUUID } from "node:crypto";
 import { JobLoader } from "./loader.js";
 import { JobScheduler, type JobRun, type OnRunComplete } from "./scheduler.js";
 import { buildCronTools, type CronDeps } from "./tools.js";
@@ -68,7 +69,7 @@ export function cron(options: CronOptions = {}): Plugin {
       const scheduler = new JobScheduler({
         loader,
         runAgent: async ({ jobId, prompt, model, thinking, timeoutMs }) => {
-          const key = `${jobId}/${generateTimestamp()}`;
+          const key = `${jobId}/${generateTimestamp()}-${randomUUID()}`;
           const { text } = await ctx.sessions.run(key, prompt, {
             timeoutMs: timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
             // The key is unique per run, so this always creates the session — the job's

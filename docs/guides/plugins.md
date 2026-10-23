@@ -216,3 +216,24 @@ expect(ctx.turns[0]).toMatchObject({ key: "channel-1", prompt: "hello" });
 ```
 
 Keep gateway routing separate from framework event objects so tests can pass small fakes.
+
+## Overlapping cron runs
+
+Cron jobs run one at a time by default. Set `maxConcurrentRuns` in a job's YAML,
+or through `cron_add` or `cron_update`, when independent executions may overlap:
+
+```yaml
+id: requested-reviews
+type: agent
+description: Review requested pull requests
+schedule: "0 */5 * * * *"
+enabled: true
+prompt: Review the next unclaimed pull request.
+maxConcurrentRuns: 3
+```
+
+This admits up to three simultaneous runs of that job. Additional timer ticks and
+manual triggers are skipped immediately rather than queued. The limit must be an
+integer from one to ten. Updating, reloading or removing a job does not cancel
+existing runs or release their occupied slots; each run finishes with the
+configuration it started with. Independent agent runs receive unique sessions.
