@@ -41,3 +41,38 @@ For a managed service, systemd can capture stdout/stderr in the journal, inspect
 `journalctl -u your-service -o cat`. Docker captures container output through its configured logging
 driver. Retention is a host setting; the shell example alone does not bound file size. Picco creates
 no per-session operational log files.
+
+## Follow a failure
+
+Events bind the application/component and logical session `{source, key}`. A request ID connects
+queueing and execution; a worker ID identifies one spawned Pi process. Native Pi session IDs and
+transcript paths appear after a successful state response. Child events add execution and ancestry
+IDs, preserving the request that created the child even during a later root turn.
+
+For example, normal idle cleanup produces:
+
+```text
+session.idle_expired
+worker.stop_requested reason=idle_eviction
+worker.exited expected=true signal=SIGTERM stopReason=idle_eviction
+```
+
+An unexpected exit records `expected=false` and the affected request. Inspect the service/container
+logs when Picco cannot explain the external termination.
+
+A child authentication failure produces `model.failed` and `agent.failed` with the provider/model,
+selected failure category and transcript reference. `statusCode=401` means authentication was
+rejected; `reason=credentials_expired` requires explicit expiry evidence. An ambiguous OAuth
+preflight can report `credentials_unavailable` without claiming the exact cause. A failed attempt
+followed by `model.recovered` can still finish the enclosing request successfully.
+
+## Keep content private
+
+Core operational events select IDs, durations, outcomes and known failure codes. They omit prompts,
+tool arguments/results, raw provider errors, headers, stacks and worker stderr. Plugins
+control any content they explicitly send to their logger.
+
+Native Pi transcripts can contain secrets and full tool output; they are private conversation data,
+not sanitised logs. Use their paths when deeper inspection is necessary. See
+[Sessions](../concepts/sessions.md#diagnose-failures) for worker lifetime and
+[Headless subagents](./headless-subagents.md) for child manifests.

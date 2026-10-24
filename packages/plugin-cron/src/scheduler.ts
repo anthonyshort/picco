@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Cron as Croner } from "croner";
 import type { Cron } from "croner";
 import isEqual from "fast-deep-equal";
@@ -49,6 +50,7 @@ export interface JobState {
  * One completed run's outcome — handed to CronOptions.onRunComplete.
  */
 export interface JobRun {
+  requestId: string;
   jobId: string;
   startedAt: string;
   durationMs: number;
@@ -66,6 +68,7 @@ export interface JobRun {
  */
 export type RunAgent = (opts: {
   jobId: string;
+  requestId: string;
   prompt: string;
   model?: string;
   thinking?: ThinkingLevel;
@@ -78,6 +81,7 @@ export type RunAgent = (opts: {
  */
 export type RunScript = (opts: {
   jobId: string;
+  requestId: string;
   command: string;
   timeoutMs: number;
 }) => Promise<string>;
@@ -187,8 +191,8 @@ export class JobScheduler {
     if (job.execution.activeCount >= job.config.maxConcurrentRuns) {
       return `Job "${id}" skipped — concurrency limit ${job.config.maxConcurrentRuns} reached.`;
     }
-    this.fireJob(id).catch((err) => {
-      this.logger.error(`triggered run failed for ${id}`, err);
+    this.fireJob(id).catch(() => {
+      this.logger.error("job.trigger_failed", { jobId: id });
     });
     return `Job "${id}" triggered — running in the background.`;
   }
@@ -258,26 +262,34 @@ export class JobScheduler {
     const startedAt = new Date(startedMs).toISOString();
     execution.activeCount++;
 
-    this.logger.log(`Starting ${job.id} (${job.config.type})`);
+    const requestId = randomUUID();
+    this.logger.log("request.received", { requestId, source: "cron", jobId: job.id });
 
-    const run: JobRun = { jobId: job.id, startedAt, durationMs: 0, status: "success" };
+    const run: JobRun = { jobId: job.id, requestId, startedAt, durationMs: 0, status: "success" };
 
     try {
-      run.output = await this.runJobBody(config);
+      run.output = await this.runJobBody(config, requestId);
     } catch (err) {
       run.status = "error";
       run.error = errorMessage(err);
-      this.logger.error(`error ${job.id}`, err);
     } finally {
       run.durationMs = Date.now() - startedMs;
-      this.logger.log(`${job.id} — duration=${(run.durationMs / 1000).toFixed(1)}s`);
+      const fields = {
+        requestId,
+        source: "cron",
+        jobId: job.id,
+        durationMs: run.durationMs,
+        outcome: run.status,
+      };
+      if (run.status === "error") this.logger.error("job.finished", fields);
+      else this.logger.log("job.finished", fields);
       execution.lastRun = startedAt;
       execution.fireCount++;
 
       try {
         await this.onRunComplete(run);
-      } catch (err) {
-        this.logger.error(`onRunComplete failed for ${job.id}`, err);
+      } catch {
+        this.logger.error("job.completion_hook_failed", { requestId, jobId: job.id });
       } finally {
         execution.activeCount--;
       }
@@ -287,11 +299,12 @@ export class JobScheduler {
   /**
    * Dispatch to the injected runner for the job's type.
    */
-  private runJobBody(config: JobConfig): Promise<string> {
+  private runJobBody(config: JobConfig, requestId: string): Promise<string> {
     switch (config.type) {
       case "agent":
         return this.runAgent({
           jobId: config.id,
+          requestId,
           prompt: config.prompt,
           model: config.model ?? undefined,
           thinking: config.thinking,
@@ -300,6 +313,7 @@ export class JobScheduler {
       case "script":
         return this.runScript({
           jobId: config.id,
+          requestId,
           command: config.command,
           timeoutMs: (config.timeout ?? DEFAULT_SCRIPT_TIMEOUT) * 1_000,
         });
@@ -318,8 +332,8 @@ export class JobScheduler {
     try {
       job.cron?.stop();
       job.cron = new Croner(job.config.schedule, () => this.fireJob(id));
-    } catch (err) {
-      this.logger.error(`failed to start job ${id}`, err);
+    } catch {
+      this.logger.error("job.schedule_failed", { jobId: id });
     }
   }
 

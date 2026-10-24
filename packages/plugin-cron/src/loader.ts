@@ -111,7 +111,7 @@ export class JobLoader {
           const result = JobConfigSchema.safeParse(parsed);
 
           if (!result.success) {
-            this.logger.warning(`skipping ${file} — invalid job config: ${result.error.message}`);
+            this.logger.warning("job.config_rejected", { file, reason: "invalid_config" });
             continue;
           }
 
@@ -119,22 +119,17 @@ export class JobLoader {
 
           const check = validateCronExpression(config.schedule);
           if (!check.valid) {
-            this.logger.warning(
-              `skipping ${file} — invalid schedule "${config.schedule}": ${check.error}`,
-            );
+            this.logger.warning("job.config_rejected", { file, reason: "invalid_schedule" });
             continue;
           }
 
           configs.set(config.id, config);
-        } catch (err) {
-          this.logger.error(`failed to read ${file}`, err);
+        } catch {
+          this.logger.error("job.config_read_failed", { file });
         }
       }
-    } catch (err) {
-      this.logger.error(
-        "failed to read jobs directory — all jobs suspended until the next reload",
-        err,
-      );
+    } catch {
+      this.logger.error("job.directory_read_failed");
     }
 
     this.configs = configs;

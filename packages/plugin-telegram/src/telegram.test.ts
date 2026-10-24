@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { silentLogger } from "@picco-agent/core";
 import {
   createFakePluginContext,
@@ -70,8 +70,24 @@ describe("telegram message handler", () => {
 
   test("runs a turn keyed by chat and replies with the agent's response", async () => {
     const { handler, message, ctx, replies } = setup();
+    const log = vi.fn();
+    ctx.logger = { ...silentLogger(), log };
+    const run = vi.spyOn(ctx.sessions, "run");
 
     await handler(message({ text: "what's up?" }));
+    const requestId = run.mock.calls[0]![2]!.requestId;
+    expect(requestId).toEqual(expect.any(String));
+    expect(log).toHaveBeenCalledWith("request.received", {
+      source: "telegram",
+      key: "1-general",
+      requestId,
+    });
+    expect(log).toHaveBeenCalledWith("response.sent", {
+      source: "telegram",
+      key: "1-general",
+      requestId,
+      chunks: 1,
+    });
 
     expect(replies).toEqual(["echo: what's up?"]);
     expect(ctx.turns).toEqual([

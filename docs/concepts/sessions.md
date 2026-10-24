@@ -28,6 +28,24 @@ working directory with `--continue` after:
 The conversation resumes from the latest transcript. Process statistics start again when a process
 is recreated.
 
+## Diagnose failures
+
+Picco sends structured lifecycle events to the [host's logger](../guides/logging.md). Follow the
+request ID through queueing, model retries, tool calls and completion. Worker IDs change on each
+spawn; `{source, key}` identifies the continuing logical conversation. Long requests emit a
+30-second progress summary with elapsed time, quiet time and pending-tool count.
+
+`worker.stop_requested` records the reason before signalling. `worker.exited` includes the observed
+exit code/signal, stop reason and whether termination was expected. An idle eviction is therefore
+distinct from an unexpected SIGTERM during active work. Picco cannot identify an external signal's
+sender.
+
+With [headless subagents](../guides/headless-subagents.md), events also identify each descendant and
+its originating request, including work finishing after the parent turn. Follow the manifest and
+native transcript paths for conversation content. Transcript pointers identify Pi's selected file;
+an early failure may occur before that file contains conversation messages. Final shutdown events
+may occur after RPC disconnects, so the plugin's lifecycle manifest remains the durable record.
+
 ## Start a fresh conversation
 
 ```ts

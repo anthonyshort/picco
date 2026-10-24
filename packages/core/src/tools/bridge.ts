@@ -214,12 +214,17 @@ export class ToolBridge {
    * sees and can react to. Never throws.
    */
   private async runTool(tool: Tool, args: unknown, ctx: ToolContext): Promise<RunToolResult> {
-    this.logger.log("tool call", { tool: tool.name, caller: describeCaller(ctx.caller) });
+    const caller = callerFields(ctx.caller);
+    this.logger.log("tool call", { tool: tool.name, ...caller });
 
     const parsed = tool.input.safeParse(args ?? {});
     if (!parsed.success) {
       const message = `Error: invalid arguments for ${tool.name}: ${z.prettifyError(parsed.error)}`;
-      this.logger.error("tool rejected args", { tool: tool.name, error: message });
+      this.logger.error("tool rejected args", {
+        tool: tool.name,
+        ...caller,
+        category: "validation",
+      });
       return { content: [{ type: "text", text: message }], isError: true };
     }
 
@@ -229,23 +234,23 @@ export class ToolBridge {
     } catch (err) {
       // A thrown execute() is a tool error the model sees and can react to.
       const message = err instanceof Error ? err.message : String(err);
-      this.logger.error("tool failed", { tool: tool.name, error: message });
+      this.logger.error("tool failed", { tool: tool.name, ...caller, category: "tool" });
       return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
     }
   }
 }
 
 /**
- * Format the caller identity for log lines.
+ * Bind available session identity without expanding the bridge protocol.
  */
-function describeCaller(caller: Caller): string {
+function callerFields(caller: Caller): Record<string, unknown> {
   switch (caller.kind) {
     case "session":
-      return `session:${caller.ref.source}/${caller.ref.key}`;
+      return { source: caller.ref.source, key: caller.ref.key };
     case "host":
-      return "host";
+      return { caller: "host" };
     default:
-      throw new Error(`Unknown caller kind: ${(caller as Caller).kind}`);
+      throw new Error(`Unknown caller kind: ${(caller as { kind: string }).kind}`);
   }
 }
 

@@ -111,7 +111,7 @@ describe("refresh", () => {
       const configs = await loader.refresh();
 
       expect(configs.size).toBe(0);
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("jobs suspended"));
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("job.directory_read_failed"));
     } finally {
       errorSpy.mockRestore();
     }

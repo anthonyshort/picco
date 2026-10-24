@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Bot } from "grammy";
 import * as z from "zod";
 import { tool, type Tool } from "@picco-agent/core";
@@ -155,21 +156,29 @@ export function createMessageHandler(
 
   return async (message) => {
     const { chatId, threadId, text, reply, sendTyping, postStatus } = message;
-    const threadLabel = threadId ?? "general";
 
     if (!allowlist.has(chatId)) {
       ctx.logger.log("ignoring message from non-allowlisted chat", { chatId });
       return;
     }
 
-    ctx.logger.log("received message", { chatId, threadId: threadLabel });
-
+    const requestId = randomUUID();
     const key = telegramSessionKey(chatId, threadId);
+    const context = { requestId, source: "telegram", key };
+    ctx.logger.log("request.received", context);
 
     // Handle commands (those starting with "/")
     if (text.trim().startsWith("/")) {
-      const response = await handleCommand(ctx, message, key);
-      if (response) await reply(response);
+      try {
+        const response = await handleCommand(ctx, message, key);
+        if (response) {
+          await reply(response);
+          ctx.logger.log("response.sent", { ...context, via: "command" });
+        }
+      } catch (err) {
+        ctx.logger.error("response.failed", context);
+        throw err;
+      }
       return;
     }
 
@@ -190,6 +199,7 @@ export function createMessageHandler(
 
     try {
       const turn = ctx.sessions.run(key, text, {
+        requestId,
         // The sender rides every turn so the kernel can pin who is speaking
         // (per-user connections, user-aware tools).
         user: telegramIdentity(message.from),
@@ -222,14 +232,14 @@ export function createMessageHandler(
       // Belt and braces: if the model replied via the tool, it has already
       // delivered its answer — posting the final text would duplicate it.
       if (replyState.replied) {
-        ctx.logger.log("replied via reply tool", { chat: chatId, thread: threadLabel });
+        ctx.logger.log("response.sent", { ...context, via: "tool" });
       } else {
         const chunks = chunk(replyText);
         for (const part of chunks) await reply(part);
-        ctx.logger.log("replied", { chat: chatId, thread: threadLabel, chunks: chunks.length });
+        ctx.logger.log("response.sent", { ...context, chunks: chunks.length });
       }
-    } catch (err) {
-      ctx.logger.error("failed to reply", err);
+    } catch {
+      ctx.logger.error("response.failed", context);
       await reply("Something went wrong handling that. Check the server logs.");
     } finally {
       clearInterval(typing);

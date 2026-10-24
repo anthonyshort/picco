@@ -18,17 +18,22 @@ const ROLE_PRELUDE = {
 export type ModelAction =
   | { text: string }
   | { toolCall: { name: string; args: Record<string, unknown> } }
-  | { hang: true };
+  | { hang: true }
+  | { error: { status: number; message: string } };
 
 /**
  * The actions that stream back as SSE — a hang never reaches the body builder.
  */
-type StreamedAction = Exclude<ModelAction, { hang: true }>;
+type StreamedAction = Exclude<
+  ModelAction,
+  { hang: true } | { error: { status: number; message: string } }
+>;
 
 /**
  * Inbound chat request from the worker to the model endpoint.
  */
 export interface ChatRequest {
+  model?: string;
   messages: { role: string; content?: unknown; tool_calls?: unknown }[];
   tools?: { function: { name: string; parameters: Record<string, unknown> } }[];
 }
@@ -65,7 +70,15 @@ export async function startFakeModel(script: ModelScript): Promise<FakeModelServ
       const params = JSON.parse(Buffer.concat(body).toString()) as ChatRequest;
       requests.push({ params, authorization: req.headers.authorization });
       const actions = current(params);
-      const streamed = actions.filter((action): action is StreamedAction => !("hang" in action));
+      const failure = actions.find((action) => "error" in action);
+      if (failure && "error" in failure) {
+        res.writeHead(failure.error.status, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: failure.error.message } }));
+        return;
+      }
+      const streamed = actions.filter(
+        (action): action is StreamedAction => !("hang" in action) && !("error" in action),
+      );
       res.writeHead(200, { "content-type": "text/event-stream" });
       if (streamed.length < actions.length) {
         res.write(`data: ${JSON.stringify(ROLE_PRELUDE)}\n\n`);

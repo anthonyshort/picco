@@ -100,11 +100,25 @@ describe("cron plugin", () => {
     );
     expect(added).toContain("added successfully");
 
+    const run = vi.spyOn(ctx.sessions, "run");
+    const log = vi.fn();
+    ctx.logger.log = log;
     const triggered = await findTool(plugin, "cron_run").execute({ id: "hello" }, toolCtx);
     expect(triggered).toContain("triggered");
 
     await vi.waitFor(() => expect(runs).toHaveLength(1));
     expect(runs[0]).toMatchObject({ jobId: "hello", status: "success" });
+    const requestId = run.mock.calls[0]![2]!.requestId;
+    expect(requestId).toBe(runs[0]!.requestId);
+    expect(log).toHaveBeenCalledWith("request.received", {
+      requestId,
+      source: "cron",
+      jobId: "hello",
+    });
+    expect(log).toHaveBeenCalledWith(
+      "job.finished",
+      expect.objectContaining({ requestId, jobId: "hello", outcome: "success" }),
+    );
     expect(ctx.turns).toEqual([
       {
         source: "cron",

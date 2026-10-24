@@ -73,7 +73,29 @@ describe("RpcSession", () => {
     const session = new RpcSession("k", proc, { logger });
     await session.refreshState();
     sessionId = "new";
-    await session.prompt("/fresh");
+    const command = session.prompt("/fresh");
+    proc.push({
+      type: "entry_appended",
+      entry: {
+        type: "custom",
+        customType: "headless-subagents:event",
+        data: {
+          version: 1,
+          at: "2026-10-24T14:20:00.000Z",
+          rootSessionId: "new",
+          executionId: "new-execution",
+          agentId: "child",
+          parentAgentId: null,
+          event: "agent.created",
+          data: {},
+        },
+      },
+    });
+    await command;
+    const child = logger.log.mock.calls.find(([event]) => event === "agent.created")![1];
+    expect(child).toMatchObject({ rootSessionId: "new" });
+    expect(child).not.toHaveProperty("piSessionId");
+    expect(child).not.toHaveProperty("rootTranscriptPath");
     await session.prompt("next", { requestId: "next-request" });
     expect(logger.log).toHaveBeenCalledWith(
       "request.started",
@@ -506,6 +528,55 @@ describe("RpcSession", () => {
       await session.kill();
       vi.useRealTimers();
     }
+  });
+
+  test("background child origin remains attached to its creation request", async () => {
+    const logger = { log: vi.fn(), warning: vi.fn(), error: vi.fn() };
+    const reply = Promise.withResolvers<string>();
+    const proc = new FakeRuntimeProcess({
+      reply: (prompt) => (prompt === "second" ? reply.promise : "started"),
+    });
+    const session = new RpcSession("k", proc, { logger });
+    const event = (name: string, agentId: string, parentAgentId: string | null) => ({
+      type: "entry_appended",
+      entry: {
+        type: "custom",
+        customType: "headless-subagents:event",
+        data: {
+          version: 1,
+          at: "2026-10-24T14:20:00.000Z",
+          rootSessionId: "root",
+          executionId: "execution1",
+          agentId,
+          parentAgentId,
+          event: name,
+          data: {},
+        },
+      },
+    });
+    const first = session.prompt("first", { requestId: "request1" });
+    proc.push(event("agent.created", "child", null));
+    await first;
+    const second = session.prompt("second", { requestId: "request2" });
+    proc.push(event("agent.created", "grandchild", "child"));
+    proc.push(event("agent.completed", "grandchild", "child"));
+    proc.push(event("agent.completed", "unobserved-child", null));
+    reply.resolve("done");
+    await second;
+    expect(logger.log).toHaveBeenCalledWith(
+      "agent.completed",
+      expect.objectContaining({
+        agentId: "grandchild",
+        parentAgentId: "child",
+        requestId: "request1",
+      }),
+    );
+    expect(
+      logger.log.mock.calls.find(
+        ([name, data]) => name === "agent.completed" && data.agentId === "unobserved-child",
+      )![1],
+    ).not.toHaveProperty("requestId");
+    await session.kill();
   });
 
   test("extension/protocol/stderr content is not copied to operational events", async () => {

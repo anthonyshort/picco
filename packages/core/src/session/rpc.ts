@@ -2,13 +2,16 @@ import { randomUUID } from "node:crypto";
 import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
 import { parseJsonl, JsonlWriter, type JsonObject } from "./jsonl.js";
+import { readSubagentDiagnostic } from "./subagent-diagnostics.js";
 import { classifyFailure, type Failure } from "./failure.js";
 import { scopeLogger, silentLogger } from "../utils/logger.js";
 import type { Logger, RuntimeProcess } from "../types.js";
 import type { TurnEvent } from "./turn.js";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const SUBAGENT_PROGRESS_INTERVAL_MS = 10_000;
 const PROGRESS_INTERVAL_MS = 30_000;
+const MAX_AGENT_ORIGINS = 10_000;
 const MAX_STDERR_CHARS = 4096;
 const EXPECTED_STOP_EXIT_CODES = new Set([0, 143]);
 const LabelSchema = z
@@ -130,6 +133,8 @@ export class RpcSession {
   private readonly stderrLines: string[] = [];
   private readonly requestTimeoutMs: number;
   private readonly activeTools = new Map<string, number>();
+  private readonly subagentProgressAt = new Map<string, number>();
+  private readonly agentOrigins = new Map<string, string>();
   private lastEventAt = 0;
   private lastEventType = "none";
   private modelStopReason: string | null = null;
@@ -412,6 +417,49 @@ export class RpcSession {
       this.lastEventType =
         typeof msg.type === "string" && ACTIVITY_EVENTS.has(msg.type) ? msg.type : "other";
     }
+    const diagnostic = readSubagentDiagnostic(msg);
+    if (diagnostic) {
+      const id = `${diagnostic.data.executionId}/${diagnostic.data.agentId}`;
+      if (!this.agentOrigins.has(id)) {
+        const parentId = diagnostic.data.parentAgentId;
+        const origin =
+          parentId === null
+            ? diagnostic.event === "agent.created"
+              ? this.activeRequestId
+              : undefined
+            : this.agentOrigins.get(`${diagnostic.data.executionId}/${parentId}`);
+        if (origin && this.agentOrigins.size < MAX_AGENT_ORIGINS) this.agentOrigins.set(id, origin);
+      }
+      const last = this.subagentProgressAt.get(id);
+      if (
+        diagnostic.event !== "agent.progress" ||
+        last === undefined ||
+        Date.now() - last >= SUBAGENT_PROGRESS_INTERVAL_MS
+      ) {
+        // A background event must never inherit the currently active root request.
+        const {
+          requestId: activeRequestId,
+          transcriptPath: rootTranscriptPath,
+          piSessionId,
+          ...context
+        } = this.context();
+        void activeRequestId;
+        const origin = this.agentOrigins.get(id);
+        const data = {
+          ...context,
+          ...(piSessionId === diagnostic.data.rootSessionId ? { piSessionId } : {}),
+          ...(rootTranscriptPath && diagnostic.data.rootSessionId === piSessionId
+            ? { rootTranscriptPath }
+            : {}),
+          ...diagnostic.data,
+          ...(origin ? { requestId: origin } : {}),
+        };
+        if (diagnostic.isError) this.logger.error(diagnostic.event, data);
+        else this.logger.log(diagnostic.event, data);
+        if (diagnostic.event === "agent.progress") this.subagentProgressAt.set(id, Date.now());
+      }
+      if (diagnostic.terminal) this.subagentProgressAt.delete(id);
+    }
     if (msg.type === "response") {
       const pending = typeof msg.id === "string" ? this.pending.get(msg.id) : undefined;
       if (!pending) return;
@@ -583,6 +631,8 @@ export class RpcSession {
   private markDead(code: number | null, signal: string | null, failure?: Failure): void {
     if (this.dead) return;
     this.dead = true;
+    this.agentOrigins.clear();
+    this.subagentProgressAt.clear();
     this.writer.markClosed();
     const expected =
       !failure &&

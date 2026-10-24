@@ -197,7 +197,12 @@ describe("script jobs", () => {
     await runNow(scheduler, "sc");
 
     expect(runScriptCalls).toEqual([
-      { jobId: "sc", command: "echo hello-world", timeoutMs: 10_000 },
+      {
+        jobId: "sc",
+        requestId: expect.any(String),
+        command: "echo hello-world",
+        timeoutMs: 10_000,
+      },
     ]);
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({
@@ -245,7 +250,7 @@ describe("onRunComplete", () => {
       await rejecting.addJob(scriptJob({ id: "sink" }));
 
       await expect(rejecting.fireJob("sink")).resolves.toBeUndefined();
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("onRunComplete failed"));
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("job.completion_hook_failed"));
     } finally {
       rejecting.stopAllTimers();
       errorSpy.mockRestore();

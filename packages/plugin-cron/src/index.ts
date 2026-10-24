@@ -9,7 +9,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { JobLoader } from "./loader.js";
-import { JobScheduler, type JobRun, type OnRunComplete } from "./scheduler.js";
+import { JobScheduler, type OnRunComplete } from "./scheduler.js";
 import { buildCronTools, type CronDeps } from "./tools.js";
 import { generateTimestamp } from "@picco-agent/core";
 import type { Plugin, PluginContext } from "@picco-agent/core";
@@ -56,23 +56,16 @@ export function cron(options: CronOptions = {}): Plugin {
       const dir = options.jobDir ?? ctx.filePath();
       const loader = new JobLoader(dir, ctx.logger);
 
-      const onRunComplete =
-        options.onRunComplete ??
-        ((run: JobRun) => {
-          if (run.status === "error") {
-            ctx.logger.error(`job ${run.jobId} failed`, run.error);
-          } else {
-            ctx.logger.log(`job ${run.jobId} completed`, { durationMs: run.durationMs });
-          }
-        });
+      const onRunComplete = options.onRunComplete ?? (() => {});
 
       const scheduler = new JobScheduler({
-        logger: ctx.logger,
         loader,
-        runAgent: async ({ jobId, prompt, model, thinking, timeoutMs }) => {
+        logger: ctx.logger,
+        runAgent: async ({ jobId, requestId, prompt, model, thinking, timeoutMs }) => {
           const key = `${jobId}/${generateTimestamp()}-${randomUUID()}`;
           try {
             const { text } = await ctx.sessions.run(key, prompt, {
+              requestId,
               timeoutMs: timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
               // The key is unique per run, so this always creates the session — the job's
               // model/thinking overrides land on the fresh pi session. Conditional spreads keep an
@@ -92,9 +85,9 @@ export function cron(options: CronOptions = {}): Plugin {
       // Initial load + heartbeat: picks up YAML edits and agent-added
       // jobs without a restart.
       const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
-      await scheduler.reload().catch((err) => ctx.logger.error("failed to load jobs", err));
+      await scheduler.reload().catch(() => ctx.logger.error("job.reload_failed"));
       heartbeat = setInterval(() => {
-        scheduler.reload().catch((err) => ctx.logger.error("heartbeat tick failed", err));
+        scheduler.reload().catch(() => ctx.logger.error("job.reload_failed"));
       }, heartbeatMs);
       ctx.logger.log("started", { dir, heartbeat: heartbeatMs });
     },
