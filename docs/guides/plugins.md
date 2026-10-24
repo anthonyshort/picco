@@ -237,3 +237,24 @@ manual triggers are skipped immediately rather than queued. The limit must be an
 integer from one to ten. Updating, reloading or removing a job does not cancel
 existing runs or release their occupied slots; each run finishes with the
 configuration it started with. Independent agent runs receive unique sessions.
+Their workers are closed after success, failure or timeout, before completion is
+reported. Session files remain available for inspection.
+
+## Send Telegram notifications
+
+A conversation replies through its session-scoped `reply` tool. For unattended
+work such as a cron run, enable a fixed notification recipient:
+
+```ts
+telegram({
+  botToken: process.env.TELEGRAM_BOT_TOKEN!,
+  allowlist: [123456789],
+  notificationChatId: 123456789,
+});
+```
+
+This exposes `telegram_notify` to agent sessions. Its only input is `text`; the
+recipient must be in the allowlist and cannot be changed by the model. Messages
+are plain text and must fit in one Telegram message. Delivery is attempted once;
+an uncertain failure is reported without exposing the bot token. The consuming
+workflow decides when a notification is appropriate and prevents duplicate calls.

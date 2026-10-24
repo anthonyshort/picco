@@ -4,8 +4,8 @@
  * Jobs are YAML files in {jobDir} (agent-writable via cron_add, hot-reloaded by a 60s heartbeat).
  * The plugin keeps no other state: every completed run is reported to `onRunComplete` and then
  * forgotten. Agent jobs run via ctx.sessions.run with a composite key ({jobId}/{timestamp}),
- * creating sessions under sessions/cron/{jobId}/{timestamp}/. Script jobs run through
- * ctx.runtime.exec in the agent's configured runtime.
+ * creating sessions under sessions/cron/{jobId}/{timestamp}/ and closing each worker afterward.
+ * Script jobs run through ctx.runtime.exec in the agent's configured runtime.
  */
 import { randomUUID } from "node:crypto";
 import { JobLoader } from "./loader.js";
@@ -70,14 +70,18 @@ export function cron(options: CronOptions = {}): Plugin {
         loader,
         runAgent: async ({ jobId, prompt, model, thinking, timeoutMs }) => {
           const key = `${jobId}/${generateTimestamp()}-${randomUUID()}`;
-          const { text } = await ctx.sessions.run(key, prompt, {
-            timeoutMs: timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
-            // The key is unique per run, so this always creates the session — the job's
-            // model/thinking overrides land on the fresh pi session. Conditional spreads keep an
-            // undefined from clobbering the agent-wide value in the pi merge.
-            session: { pi: { ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) } },
-          });
-          return text;
+          try {
+            const { text } = await ctx.sessions.run(key, prompt, {
+              timeoutMs: timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
+              // The key is unique per run, so this always creates the session — the job's
+              // model/thinking overrides land on the fresh pi session. Conditional spreads keep an
+              // undefined from clobbering the agent-wide value in the pi merge.
+              session: { pi: { ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) } },
+            });
+            return text;
+          } finally {
+            await ctx.sessions.reset(key);
+          }
         },
         runScript: ({ command, timeoutMs }) => ctx.runtime.exec(command, { timeoutMs }),
         onRunComplete,

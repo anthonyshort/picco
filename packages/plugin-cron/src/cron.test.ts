@@ -3,8 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { stringify as yamlStringify } from "yaml";
-import { createFakePluginContext, type FakePluginContext } from "@picco-agent/core/testing";
-import { silentLogger, type ToolContext } from "@picco-agent/core";
+import {
+  createFakePluginContext,
+  FakeRuntime,
+  type FakePluginContext,
+} from "@picco-agent/core/testing";
+import { createAgent, silentLogger, type ToolContext } from "@picco-agent/core";
 import { cron, type JobRun } from "./index.js";
 
 let dir: string;
@@ -181,3 +185,52 @@ describe("cron plugin", () => {
     expect(ctx.turns).toEqual([]);
   });
 });
+
+test.each(["success", "failure", "timeout"] as const)(
+  "closes cron workers after %s and starts a fresh worker on the next run",
+  async (outcome) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "cron-workers-"));
+    const completedRuns: JobRun[] = [];
+    const runtime = new FakeRuntime((index) => {
+      if (index === 0 && outcome === "failure") return { dieOnPrompt: true };
+      if (index === 0 && outcome === "timeout") return { neverFinish: true };
+      return { reply: () => "completed" };
+    });
+    const plugin = cron({
+      jobDir: directory,
+      onRunComplete: (run) => void completedRuns.push(run),
+    });
+    const agent = createAgent({
+      name: "worker-test",
+      dataDir: path.join(directory, "data"),
+      runtime,
+      pi: { model: "local/example", thinking: "medium" },
+      plugins: [plugin],
+    });
+    try {
+      await writeFile(
+        path.join(directory, "probe.yaml"),
+        'id: probe\ntype: agent\ndescription: Worker lifecycle\nenabled: true\nschedule: "0 0 0 1 1 *"\nprompt: Reply completed\ntimeout: 1\n',
+      );
+      await agent.start({ handleSignals: false });
+      const trigger = plugin.tools?.find((entry) => entry.name === "cron_run");
+      expect(trigger).toBeDefined();
+      for (let index = 0; index < 2; index++) {
+        await trigger!.execute(trigger!.input.parse({ id: "probe" }), toolCtx);
+        await vi.waitFor(() => expect(completedRuns).toHaveLength(index + 1), { timeout: 5000 });
+        expect(runtime.spawns).toHaveLength(index + 1);
+        expect(runtime.spawns.every(({ process }) => !process.alive)).toBe(true);
+      }
+      expect(completedRuns[0].status).toBe(outcome === "success" ? "success" : "error");
+      expect(completedRuns[1]).toMatchObject({ status: "success", output: "completed" });
+      expect(runtime.spawns[0].spec.ref.key).not.toBe(runtime.spawns[1].spec.ref.key);
+      for (const { spec } of runtime.spawns) {
+        expect(spec.ref).toMatchObject({ source: "cron", key: expect.stringMatching(/^probe\//) });
+        expect(spec.pi).toMatchObject({ model: "local/example", thinking: "medium" });
+      }
+    } finally {
+      await agent.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
