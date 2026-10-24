@@ -202,6 +202,11 @@ export interface SessionIdentity {
 
 export interface TurnOptions {
   /**
+   * Correlate host receipt, queueing, execution and delivery. Generated when omitted.
+   */
+  requestId?: string;
+
+  /**
    * Abort the turn after this long. Default: 15 minutes.
    */
   timeoutMs?: number;

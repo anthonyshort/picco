@@ -7,6 +7,7 @@ import * as z from "zod";
 import { createAgentPaths, generateSessionId } from "./utils/agent-paths.js";
 import type { AgentPaths } from "./utils/agent-paths.js";
 import { ToolBridge } from "./tools/bridge.js";
+import { classifyFailure } from "./session/failure.js";
 import { createLogger, scopeLogger } from "./utils/logger.js";
 import { SessionManager } from "./session/manager.js";
 import type { Tool } from "./tools/tool.js";
@@ -166,7 +167,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
     } catch (err) {
       // A failed startup (port in use, plugin crash) must not leave the
       // earlier plugins running headless — unwind what already started.
-      logger.error("startup failed, stopping", err);
+      logger.error("agent.start_failed", classifyFailure(err, "startup"));
       await stop().catch(() => {});
       throw err;
     }
@@ -260,8 +261,8 @@ export function createAgent(config: AgentConfig): AgentHandle {
         for (const plugin of [...plugins].reverse()) {
           try {
             plugin.releaseSession?.(ref);
-          } catch (err) {
-            logger.error("plugin session release failed", { plugin: plugin.name, error: err });
+          } catch {
+            logger.error("plugin.release_failed", { plugin: plugin.name, phase: "cleanup" });
           }
         }
       },
@@ -277,7 +278,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
       signalHandler = (signal: string) => {
         logger.log(`shutting down (${signal})`);
         stop()
-          .catch((err) => logger.error("shutdown failed", err))
+          .catch(() => logger.error("agent.stop_failed", { phase: "cleanup" }))
           .finally(() => process.exit(0));
       };
       process.once("SIGINT", signalHandler);
@@ -306,8 +307,8 @@ export function createAgent(config: AgentConfig): AgentHandle {
     for (const plugin of [...startedPlugins].reverse()) {
       try {
         await plugin.stop?.();
-      } catch (err) {
-        logger.error("plugin stop failed", { plugin: plugin.name, error: err });
+      } catch {
+        logger.error("plugin.stop_failed", { plugin: plugin.name, phase: "cleanup" });
       }
     }
     startedPlugins.length = 0;

@@ -23,6 +23,18 @@ export interface FakeRuntimeProcessOptions {
    */
   handlePrompt?: boolean;
   /**
+   * Native state returned for each supported get_state request.
+   */
+  state?: () => { sessionId: string; sessionFile?: string };
+  /**
+   * Leave final text retrieval pending to exercise RPC command deadlines.
+   */
+  neverReturnText?: boolean;
+  /**
+   * Reject prompt preflight before an agent run starts.
+   */
+  promptError?: string;
+  /**
    * Simulate a crash: the process dies when it receives a prompt.
    */
   dieOnPrompt?: boolean;
@@ -34,6 +46,10 @@ export interface FakeRuntimeProcessOptions {
    * The process exits immediately after spawn (before the ready check).
    */
   exitOnSpawn?: { code: number; stderr?: string };
+  /**
+   * Exit while the host queries initial native session identity.
+   */
+  exitOnState?: number;
 }
 
 /**
@@ -153,6 +169,16 @@ export class FakeRuntimeProcess implements RuntimeProcess {
 
     switch (msg.type) {
       case "prompt": {
+        if (this.behavior.promptError) {
+          this.push({
+            type: "response",
+            command: "prompt",
+            id,
+            success: false,
+            error: this.behavior.promptError,
+          });
+          return;
+        }
         if (this.behavior.dieOnPrompt) {
           this.die(1, null);
           return;
@@ -182,7 +208,24 @@ export class FakeRuntimeProcess implements RuntimeProcess {
         this.push({ type: "agent_settled" });
         return;
       }
+      case "get_state":
+        if (this.behavior.exitOnState !== undefined) {
+          this.die(this.behavior.exitOnState);
+          return;
+        }
+        this.push({
+          type: "response",
+          command: "get_state",
+          id,
+          success: true,
+          data: this.behavior.state?.() ?? {
+            sessionId: "fake-pi-session",
+            sessionFile: "/fake/transcript.jsonl",
+          },
+        });
+        return;
       case "get_last_assistant_text":
+        if (this.behavior.neverReturnText) return;
         this.push({
           type: "response",
           command: "get_last_assistant_text",

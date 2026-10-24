@@ -17,6 +17,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const mgr of managers) await mgr.stopAll();
   rmSync(workspace, { recursive: true, force: true });
 });
@@ -53,6 +54,243 @@ describe("parseDuration", () => {
 });
 
 describe("SessionManager", () => {
+  test.each([false, true])(
+    "startup failure before a prompt is terminal, oneShot=%s",
+    async (oneShot) => {
+      const logger = { log: vi.fn(), warning: vi.fn(), error: vi.fn() };
+      const mgr = manager(new FakeRuntime({ exitOnState: 1 }), { logger });
+      const turn = oneShot
+        ? mgr.runOnce("cron", "go", { requestId: "startup-request" })
+        : mgr.namespace("telegram").run("chat", "go", { requestId: "startup-request" });
+      await expect(turn).rejects.toThrow("session worker exited prematurely");
+      expect(logger.log).toHaveBeenCalledWith(
+        "worker.starting",
+        expect.objectContaining({ requestId: "startup-request", workerId: expect.any(String) }),
+      );
+      expect(logger.log).not.toHaveBeenCalledWith("worker.started", expect.anything());
+      expect(logger.error).toHaveBeenCalledWith(
+        "worker.start_failed",
+        expect.objectContaining({
+          requestId: "startup-request",
+          category: "runtime",
+          reason: "worker_exited",
+        }),
+      );
+      expect(
+        logger.error.mock.calls.filter(([event]) => event === "request.finished"),
+      ).toHaveLength(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        "request.finished",
+        expect.objectContaining({
+          requestId: "startup-request",
+          outcome: "failed",
+          category: "runtime",
+        }),
+      );
+    },
+  );
+
+  test("request identity survives per-session queueing and worker recreation", async () => {
+    const logger = { log: vi.fn(), warning: vi.fn(), error: vi.fn() };
+    const reply = Promise.withResolvers<string>();
+    const started = Promise.withResolvers<void>();
+    const runtime = new FakeRuntime({
+      reply: async (prompt) => {
+        if (prompt === "first") {
+          started.resolve();
+          return reply.promise;
+        }
+        return "second";
+      },
+    });
+    const sessions = manager(runtime, { logger }).namespace("telegram");
+    const first = sessions.run("chat", "first", { requestId: "first-request" });
+    await started.promise;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    const second = sessions.run("chat", "second", { requestId: "second-request" });
+    expect(logger.log).toHaveBeenCalledWith("request.queued", {
+      source: "telegram",
+      key: "chat",
+      requestId: "second-request",
+      ahead: 1,
+    });
+    clock.mockReturnValue(1250);
+    reply.resolve("done");
+    await Promise.all([first, second]);
+    expect(logger.log).toHaveBeenCalledWith("request.admitted", {
+      source: "telegram",
+      key: "chat",
+      requestId: "second-request",
+      queueWaitMs: 250,
+    });
+    await sessions.reset("chat");
+    await sessions.run("chat", "third", { requestId: "third-request" });
+    const starts = logger.log.mock.calls.filter(([event]) => event === "worker.started");
+    expect(starts).toHaveLength(2);
+    expect(starts[0]![1].workerId).not.toBe(starts[1]![1].workerId);
+    expect(logger.log).toHaveBeenCalledWith(
+      "request.started",
+      expect.objectContaining({
+        requestId: "third-request",
+        source: "telegram",
+        key: "chat",
+        piSessionId: "fake-pi-session",
+        transcriptPath: "/fake/transcript.jsonl",
+      }),
+    );
+  });
+
+  test("final text RPC timeout selects timeout recovery and the stalled command", async () => {
+    const logger = { log: vi.fn(), warning: vi.fn(), error: vi.fn() };
+    const mgr = manager(new FakeRuntime({ neverReturnText: true }), {
+      logger,
+      requestTimeoutMs: 20,
+    });
+    await expect(
+      mgr.namespace("telegram").run("chat", "go", { requestId: "request1" }),
+    ).rejects.toThrow("get_last_assistant_text timed out after 0.02s");
+    expect(logger.error).toHaveBeenCalledWith(
+      "request.recovery_started",
+      expect.objectContaining({
+        requestId: "request1",
+        category: "timeout",
+        phase: "protocol",
+        rpcCommand: "get_last_assistant_text",
+      }),
+    );
+    expect(logger.log).toHaveBeenCalledWith(
+      "worker.stop_requested",
+      expect.objectContaining({ reason: "timeout" }),
+    );
+  });
+
+  test("queued cancellation records the caller and the different active execution", async () => {
+    const logger = { log: vi.fn(), warning: vi.fn(), error: vi.fn() };
+    const started = Promise.withResolvers<void>();
+    const reply = Promise.withResolvers<string>();
+    const runtime = new FakeRuntime({
+      reply: async (prompt) => {
+        if (prompt === "first") {
+          started.resolve();
+          return reply.promise;
+        }
+        return "second reply";
+      },
+    });
+    const sessions = manager(runtime, { logger }).namespace("telegram");
+    const first = sessions.run("chat", "first", { requestId: "request-a" });
+    await started.promise;
+    const second = sessions.run("chat", "second", { requestId: "request-b" });
+    second.abort("private reason");
+    await expect(second).rejects.toThrow("Turn aborted: private reason");
+    expect(logger.log).toHaveBeenCalledWith(
+      "request.cancel_requested",
+      expect.objectContaining({ requestId: "request-b" }),
+    );
+    expect(logger.log).toHaveBeenCalledWith(
+      "request.cancel_forwarded",
+      expect.objectContaining({
+        requestId: "request-a",
+        targetRequestId: "request-b",
+        inFlight: true,
+      }),
+    );
+    await first;
+    await vi.waitFor(() => expect(runtime.spawns[0]!.process.prompts).toEqual(["first", "second"]));
+    reply.resolve("late reply");
+    expect(JSON.stringify(logger.log.mock.calls)).not.toContain("private reason");
+  });
+
+  test.each([false, true])("startup cancellation remains visible, oneShot=%s", async (oneShot) => {
+    const logger = { log: vi.fn(), warning: vi.fn(), error: vi.fn() };
+    const starting = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const mgr = manager(new FakeRuntime(), {
+      logger,
+      prepareSession: async () => {
+        starting.resolve();
+        await release.promise;
+      },
+    });
+    const turn = oneShot
+      ? mgr.runOnce("cron", "go", { requestId: "startup" })
+      : mgr.namespace("telegram").run("chat", "go", { requestId: "startup" });
+    await starting.promise;
+    turn.abort();
+    await expect(turn).rejects.toThrow("Turn aborted");
+    expect(logger.log).toHaveBeenCalledWith(
+      "request.cancel_requested",
+      expect.objectContaining({ requestId: "startup" }),
+    );
+    expect(logger.log).not.toHaveBeenCalledWith("request.cancel_forwarded", expect.anything());
+    release.resolve();
+    await vi.waitFor(() =>
+      expect(logger.log).toHaveBeenCalledWith(
+        "request.finished",
+        expect.objectContaining({ requestId: "startup", outcome: "completed" }),
+      ),
+    );
+  });
+
+  test("one-shot admission uses the same request identity", async () => {
+    const logger = { log: vi.fn(), warning: vi.fn(), error: vi.fn() };
+    const reply = Promise.withResolvers<string>();
+    const started = Promise.withResolvers<void>();
+    const runtime = new FakeRuntime({
+      reply: async (prompt) => {
+        if (prompt === "first") {
+          started.resolve();
+          return reply.promise;
+        }
+        return "second";
+      },
+    });
+    const mgr = manager(runtime, { maxRuns: 1, logger });
+    const first = mgr.runOnce("cron", "first", { requestId: "request1" });
+    await started.promise;
+    const second = mgr.runOnce("cron", "second", { requestId: "request2" });
+    expect(logger.log).toHaveBeenCalledWith(
+      "request.queued",
+      expect.objectContaining({ requestId: "request2", activeRuns: 1, queuedRuns: 1 }),
+    );
+    reply.resolve("done");
+    await Promise.all([first, second]);
+    expect(logger.log).toHaveBeenCalledWith(
+      "request.admitted",
+      expect.objectContaining({ requestId: "request2" }),
+    );
+    expect(logger.log).toHaveBeenCalledWith(
+      "worker.exited",
+      expect.objectContaining({ stopReason: "one_shot_completed", expected: true }),
+    );
+  });
+
+  test("idle eviction emits an explicit stop cause and never exposes session inputs", async () => {
+    vi.useFakeTimers();
+    const logger = { log: vi.fn(), warning: vi.fn(), error: vi.fn() };
+    const mgr = manager(new FakeRuntime(), { idleTimeout: 1000, logger });
+    try {
+      await mgr
+        .namespace("telegram")
+        .run("chat", "private prompt", { session: { env: { SECRET: "private token" } } });
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(logger.log).toHaveBeenCalledWith(
+        "session.idle_expired",
+        expect.objectContaining({ source: "telegram", key: "chat", inFlight: false }),
+      );
+      expect(logger.log).toHaveBeenCalledWith(
+        "worker.exited",
+        expect.objectContaining({ stopReason: "idle_eviction", expected: true }),
+      );
+      expect(JSON.stringify([logger.log.mock.calls, logger.error.mock.calls])).not.toContain(
+        "private",
+      );
+    } finally {
+      await mgr.stopAll();
+      vi.useRealTimers();
+    }
+  });
+
   test("lazily spawns the session worker in the session cwd", async () => {
     const runtime = new FakeRuntime();
     const sessions = manager(runtime).namespace("telegram");

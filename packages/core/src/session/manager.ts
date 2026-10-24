@@ -1,5 +1,7 @@
 import { mkdir } from "node:fs/promises";
-import { RpcSession } from "./rpc.js";
+import { randomUUID } from "node:crypto";
+import { classifyFailure, type Failure } from "./failure.js";
+import { RpcSession, RpcOperationError, type StopReason } from "./rpc.js";
 import { scopeLogger, silentLogger } from "../utils/logger.js";
 import { generateSessionId } from "../utils/agent-paths.js";
 import type { AgentPaths } from "../utils/agent-paths.js";
@@ -140,6 +142,7 @@ interface LiveSession {
  */
 interface Slot {
   ref: SessionRef;
+  logger: Logger;
   live: LiveSession | null;
   /**
    * Tail of the FIFO queue for this key.
@@ -225,32 +228,57 @@ export class SessionManager {
     opts?: TurnOptions & { session?: SessionOptions },
   ): Turn {
     const slot = this.slot(source, key);
-    const controller = this.createTurnController(() => slot.live?.rpc);
+    const requestId = opts?.requestId ?? randomUUID();
+    slot.logger.log("request.accepted", { requestId });
+    const acceptedAt = Date.now();
+    const controller = this.createTurnController(slot, requestId);
 
-    void this.enqueue(slot, async () => {
-      // Pin the sender at dequeue, before ensureLive: FIFO guarantees at most
-      // one running turn per key, so the pin is unambiguous for the whole
-      // turn — including a first turn's spawn (when MCP clients initialize).
-      if (opts?.user) slot.currentUser = opts.user;
-      try {
-        const live = await this.ensureLive(slot, opts?.session);
-        live.lastActiveAt = new Date();
-        const result = await this.driveTurn(controller, live.rpc, prompt, opts?.timeoutMs);
-        live.turns++;
-        live.lastActiveAt = new Date();
-        controller.resolve(result);
-      } catch (err) {
-        // A failed turn (timeout, crash, dead process) can leave the pi
-        // process wedged, poisoning every later turn — kill the session
-        // process so the next run starts fresh.
-        this.logger.error("turn failed, resetting session", {
-          ...slot.ref,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        await this.killLive(slot);
-        controller.reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
+    void this.enqueue(
+      slot,
+      async () => {
+        // Pin the sender at dequeue, before ensureLive: FIFO guarantees at most
+        // one running turn per key, so the pin is unambiguous for the whole
+        // turn — including a first turn's spawn (when MCP clients initialize).
+        if (opts?.user) slot.currentUser = opts.user;
+        let promptStarted = false;
+        try {
+          const live = await this.ensureLive(slot, opts?.session, requestId);
+          live.lastActiveAt = new Date();
+          promptStarted = true;
+          const result = await this.driveTurn(
+            controller,
+            live.rpc,
+            prompt,
+            requestId,
+            opts?.timeoutMs,
+          );
+          live.turns++;
+          live.lastActiveAt = new Date();
+          controller.resolve(result);
+        } catch (err) {
+          // A failed turn (timeout, crash, dead process) can leave the pi
+          // process wedged, poisoning every later turn — kill the session
+          // process so the next run starts fresh.
+          if (!promptStarted)
+            slot.logger.error("request.finished", {
+              requestId,
+              outcome: "failed",
+              durationMs: Date.now() - acceptedAt,
+              ...(err instanceof RpcOperationError ? err.failure : classifyFailure(err, "startup")),
+            });
+          slot.logger.error("request.recovery_started", {
+            requestId,
+            ...(err instanceof RpcOperationError ? err.failure : classifyFailure(err, "model")),
+            ...(err instanceof RpcOperationError && err.rpcCommand
+              ? { rpcCommand: err.rpcCommand }
+              : {}),
+          });
+          await this.killLive(slot, recoveryReason(err));
+          controller.reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      },
+      requestId,
+    );
 
     return controller.turn;
   }
@@ -273,8 +301,8 @@ export class SessionManager {
   async reset(source: string, key: string): Promise<void> {
     const slot = this.slot(source, key);
     slot.freshNextSpawn = true;
-    await this.killLive(slot);
-    this.logger.log("reset", { source, key });
+    await this.killLive(slot, "reset");
+    slot.logger.log("session.reset");
   }
 
   /**
@@ -309,35 +337,49 @@ export class SessionManager {
    */
   runOnce(source: string, prompt: string, opts: RunOptions = {}): Turn {
     const id = generateSessionId();
-    const slot: Slot = {
-      ref: { source, key: id },
-      live: null,
-      queueTail: Promise.resolve(),
-      pending: 0,
-    };
-    const controller = this.createTurnController(() => slot.live?.rpc);
+    const slot = this.createSlot({ source, key: id });
+    const requestId = opts.requestId ?? randomUUID();
+    slot.logger.log("request.accepted", { requestId });
+    const acceptedAt = Date.now();
+    const controller = this.createTurnController(slot, requestId);
 
     void (async () => {
-      await this.acquireRunSlot();
+      await this.acquireRunSlot(slot, requestId);
       let result: TurnResult | null = null;
       let failure: Error | null = null;
+      let promptStarted = false;
       try {
-        const live = await this.ensureLive(slot, {
-          cwd: opts.cwd ?? this.opts.paths.runCwd(id),
-          pi: opts.pi,
-          env: opts.env,
-          tools: opts.tools,
-        });
-        result = await this.driveTurn(controller, live.rpc, prompt, opts.timeoutMs);
+        const live = await this.ensureLive(
+          slot,
+          {
+            cwd: opts.cwd ?? this.opts.paths.runCwd(id),
+            pi: opts.pi,
+            env: opts.env,
+            tools: opts.tools,
+          },
+          requestId,
+        );
+        promptStarted = true;
+        result = await this.driveTurn(controller, live.rpc, prompt, requestId, opts.timeoutMs);
       } catch (err) {
         failure = err instanceof Error ? err : new Error(String(err));
       } finally {
         // Settle only after teardown — a resolved one-shot has no live
         // process. A failed spawn leaves no live state but may have minted
         // a token.
-        if (slot.live) await this.killLive(slot);
+        if (slot.live)
+          await this.killLive(slot, failure ? recoveryReason(failure) : "one_shot_completed");
         else this.opts.teardownSession?.(slot.ref);
         this.releaseRunSlot();
+        if (!promptStarted && failure)
+          slot.logger.error("request.finished", {
+            requestId,
+            outcome: "failed",
+            durationMs: Date.now() - acceptedAt,
+            ...(failure instanceof RpcOperationError
+              ? failure.failure
+              : classifyFailure(failure, "startup")),
+          });
         if (failure) controller.reject(failure);
         else controller.resolve(result!);
       }
@@ -349,13 +391,20 @@ export class SessionManager {
   /**
    * Bounded one-shot concurrency: take a slot or wait FIFO for one.
    */
-  private async acquireRunSlot(): Promise<void> {
+  private async acquireRunSlot(slot: Slot, requestId: string): Promise<void> {
     if (this.activeRuns < this.maxRuns) {
       this.activeRuns++;
       return;
     }
+    const queuedAt = Date.now();
+    slot.logger.log("request.queued", {
+      requestId,
+      activeRuns: this.activeRuns,
+      queuedRuns: this.runQueue.length + 1,
+    });
     // The releasing run hands its slot over — no increment on wake.
     await new Promise<void>((resolve) => this.runQueue.push(resolve));
+    slot.logger.log("request.admitted", { requestId, queueWaitMs: Date.now() - queuedAt });
   }
 
   private releaseRunSlot(): void {
@@ -378,7 +427,7 @@ export class SessionManager {
     // inconsistent (goes negative) — deliberately unmaintained past stopAll, as
     // every later run rejects at ensureLive regardless of the count.
     while (this.runQueue.length) this.runQueue.shift()!();
-    const kills = [...this.slots.values()].map((slot) => this.killLive(slot));
+    const kills = [...this.slots.values()].map((slot) => this.killLive(slot, "host_shutdown"));
     await Promise.all(kills);
     this.slots.clear();
   }
@@ -388,10 +437,11 @@ export class SessionManager {
    * turn. Fire-and-forget callers (cron, tests) must not trip unhandled rejections — failures are
    * logged by the run paths.
    */
-  private createTurnController(getRpc: () => RpcSession | null | undefined): TurnController {
+  private createTurnController(slot: Slot, requestId: string): TurnController {
     const controller = createTurn({
       onAbort: (reason) => {
-        getRpc()?.abortTurn();
+        slot.logger.log("request.cancel_requested", { requestId });
+        slot.live?.rpc.abortTurn(requestId);
         controller.reject(new Error(`Turn aborted${reason ? `: ${reason}` : ""}`));
       },
     });
@@ -406,23 +456,48 @@ export class SessionManager {
     const slotKey = fullKey(source, key);
     let slot = this.slots.get(slotKey);
     if (!slot) {
-      slot = { ref: { source, key }, live: null, queueTail: Promise.resolve(), pending: 0 };
+      slot = this.createSlot({ source, key });
       this.slots.set(slotKey, slot);
     }
     return slot;
   }
 
   /**
+   * Bind the logical session identity without owning a logging destination.
+   */
+  private createSlot(ref: SessionRef): Slot {
+    return {
+      ref,
+      logger: scopeLogger(this.logger, { ...ref }),
+      live: null,
+      queueTail: Promise.resolve(),
+      pending: 0,
+    };
+  }
+
+  /**
    * Append work to a slot's FIFO queue. `pending` covers queued + running items so the idle sweep
    * never evicts a session with work in flight.
    */
-  private enqueue<T>(slot: Slot, task: () => Promise<T>): Promise<T> {
+  private enqueue<T>(slot: Slot, task: () => Promise<T>, requestId?: string): Promise<T> {
+    const queuedAt = slot.pending > 0 ? Date.now() : null;
+    if (queuedAt !== null) {
+      slot.logger.log("request.queued", { requestId, ahead: slot.pending });
+    }
     slot.pending++;
     const settle = () => {
       slot.pending--;
       return undefined;
     };
-    const result = slot.queueTail.then(task);
+    const result = slot.queueTail.then(() => {
+      if (queuedAt !== null) {
+        slot.logger.log("request.admitted", {
+          requestId,
+          queueWaitMs: Date.now() - queuedAt,
+        });
+      }
+      return task();
+    });
     slot.queueTail = result.then(settle, settle);
     return result;
   }
@@ -435,11 +510,13 @@ export class SessionManager {
     controller: TurnController,
     rpc: RpcSession,
     prompt: string,
+    requestId: string,
     timeoutMs?: number,
   ): Promise<TurnResult> {
     const startedAt = Date.now();
     controller.emit({ type: "turn_start" });
     const text = await rpc.prompt(prompt, {
+      requestId,
       timeoutMs: timeoutMs ?? this.turnTimeoutMs,
       onEvent: (event) => controller.emit(event),
     });
@@ -477,11 +554,15 @@ export class SessionManager {
    * Get-or-create the live session process for a slot. Runs inside the FIFO queue (one-shot runs
    * call it directly on their transient slot).
    */
-  private async ensureLive(slot: Slot, opts?: SessionOptions): Promise<LiveSession> {
+  private async ensureLive(
+    slot: Slot,
+    opts?: SessionOptions,
+    requestId?: string,
+  ): Promise<LiveSession> {
     if (this.stopped) throw new Error("Session manager is stopped");
 
     if (slot.live && !slot.live.rpc.isAlive()) {
-      this.logger.error("session process died, respawning", slot.ref);
+      slot.logger.log("worker.respawn_requested");
       slot.live = null;
     }
 
@@ -493,6 +574,8 @@ export class SessionManager {
     slot.freshNextSpawn = false;
     const rpc = await this.spawn({
       ref: slot.ref,
+      requestId,
+      logger: slot.logger,
       cwd,
       pi: opts?.pi,
       env: opts?.env,
@@ -515,77 +598,91 @@ export class SessionManager {
    */
   private async spawn(info: {
     ref: SessionRef;
+    requestId?: string;
+    logger: Logger;
     cwd: string;
     pi?: Partial<PiOptions>;
     env?: Record<string, string>;
     tools?: Tool[];
     resume?: boolean;
   }): Promise<RpcSession> {
-    await mkdir(info.cwd, { recursive: true });
-    const { ref } = info;
-    await this.opts.prepareSession?.({ ref, cwd: info.cwd });
-
-    // setupSession resolves the pi config, tool manifest, per-session env, and bridge token. It
-    // receives only per-call values; the agent host merges the pi overrides onto the base pi
-    // settings it owns.
-    const setup = await this.opts.setupSession?.({
-      ref,
+    const startedAt = Date.now();
+    const workerId = randomUUID();
+    const workerLogger = scopeLogger(info.logger, { workerId });
+    workerLogger.log("worker.starting", {
+      requestId: info.requestId,
       cwd: info.cwd,
-      tools: info.tools,
-      pi: info.pi,
-      env: info.env,
+      runtime: this.opts.runtime.name,
     });
+    try {
+      await mkdir(info.cwd, { recursive: true });
+      const { ref } = info;
+      await this.opts.prepareSession?.({ ref, cwd: info.cwd });
 
-    this.logger.log("spawning", { ...ref, cwd: info.cwd });
-    const spec: SpawnRequest = {
-      ref,
-      cwd: info.cwd,
-      // A setup-provided env is the complete host-contributed child env (the fold's output, e.g. a
-      // gateway's per-session token); the base + per-session merge is the bare-manager fallback.
-      // Ambient host env is layered on by the runtime; the bridge token rides `bridge.token`.
-      env: setup?.env ?? { ...this.opts.env, ...info.env },
-      pi: setup?.pi ?? {},
-      tools: setup?.tools,
-      resume: info.resume,
-      bridge: { url: this.opts.bridge?.url ?? "", token: setup?.bridgeToken },
-    };
-    const proc = await this.opts.runtime.spawn(spec);
-    const rpc = new RpcSession(fullKey(ref.source, ref.key), proc, {
-      logger: this.logger,
-      requestTimeoutMs: this.opts.requestTimeoutMs,
-    });
+      // setupSession resolves the pi config, tool manifest, per-session env, and bridge token. It
+      // receives only per-call values; the agent host merges the pi overrides onto the base pi
+      // settings it owns.
+      const setup = await this.opts.setupSession?.({
+        ref,
+        cwd: info.cwd,
+        tools: info.tools,
+        pi: info.pi,
+        env: info.env,
+      });
 
-    // No ready message from RPC mode — wait briefly, then check it's alive.
-    if (this.readyDelayMs > 0)
-      await new Promise((resolve) => setTimeout(resolve, this.readyDelayMs));
-    if (!rpc.isAlive()) {
-      const stderr = rpc.stderrTail();
-      const hint = /execvp/.test(stderr)
-        ? " (command not found inside the session environment)"
-        : /Cannot find module|ERR_MODULE_NOT_FOUND/.test(stderr)
-          ? " (an extension's dependency is not visible inside the session — bundle the" +
-            " extension so its deps are inlined, or mount its node_modules tree(s) via" +
-            " bwrap({ mounts }))"
-          : "";
-      throw new Error(`session worker exited prematurely${stderr ? `: ${stderr}` : ""}${hint}`);
+      const spec: SpawnRequest = {
+        ref,
+        cwd: info.cwd,
+        // A setup-provided env is the complete host-contributed child env (the fold's output, e.g. a
+        // gateway's per-session token); the base + per-session merge is the bare-manager fallback.
+        // Ambient host env is layered on by the runtime; the bridge token rides `bridge.token`.
+        env: setup?.env ?? { ...this.opts.env, ...info.env },
+        pi: setup?.pi ?? {},
+        tools: setup?.tools,
+        resume: info.resume,
+        bridge: { url: this.opts.bridge?.url ?? "", token: setup?.bridgeToken },
+      };
+      const proc = await this.opts.runtime.spawn(spec);
+      const rpc = new RpcSession(ref.key, proc, {
+        logger: workerLogger,
+        workerId,
+        requestTimeoutMs: this.opts.requestTimeoutMs,
+      });
+
+      // No ready message from RPC mode — wait briefly, then check it's alive.
+      if (this.readyDelayMs > 0)
+        await new Promise((resolve) => setTimeout(resolve, this.readyDelayMs));
+      if (!rpc.isAlive()) throw startupError(rpc);
+      await rpc.refreshState();
+      if (!rpc.isAlive()) throw startupError(rpc);
+      workerLogger.log("worker.started", {
+        requestId: info.requestId,
+        startupMs: Date.now() - startedAt,
+        resume: info.resume ?? false,
+      });
+      return rpc;
+    } catch (err) {
+      workerLogger.error("worker.start_failed", {
+        requestId: info.requestId,
+        ...(err instanceof RpcOperationError ? err.failure : classifyFailure(err, "startup")),
+      });
+      throw err;
     }
-    return rpc;
   }
 
   /**
    * Tear down a slot's live process (if any); the slot and its queue survive.
    */
-  private async killLive(slot: Slot): Promise<void> {
+  private async killLive(slot: Slot, reason: StopReason): Promise<void> {
     const live = slot.live;
     if (!live) return;
     slot.live = null;
     this.opts.teardownSession?.(slot.ref);
-    await live.rpc.kill().catch((err) =>
-      this.logger.error("session kill failed", {
-        ...slot.ref,
-        error: err instanceof Error ? err.message : String(err),
-      }),
-    );
+    await live.rpc
+      .kill(reason)
+      .catch((err) =>
+        slot.logger.error("worker.stop_failed", { reason, ...classifyFailure(err, "cleanup") }),
+      );
   }
 
   /**
@@ -597,8 +694,11 @@ export class SessionManager {
     for (const [slotKey, slot] of this.slots) {
       if (!slot.live || slot.pending > 0) continue;
       if (slot.live.lastActiveAt.getTime() > cutoff) continue;
-      this.logger.log("evicting idle session", { ...slot.ref });
-      void this.killLive(slot);
+      slot.logger.log("session.idle_expired", {
+        idleMs: Date.now() - slot.live.lastActiveAt.getTime(),
+        inFlight: false,
+      });
+      void this.killLive(slot, "idle_eviction");
       this.slots.delete(slotKey);
     }
   }
@@ -622,4 +722,37 @@ export function parseDuration(value: string | number): number {
   const unit = match[2] ?? "ms";
   const factor = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[unit]!;
   return n * factor;
+}
+
+/**
+ * Preserve timeout/cancellation causes from Picco-owned operation failures.
+ */
+function recoveryReason(error: unknown): StopReason {
+  if (error instanceof RpcOperationError) {
+    if (error.failure.category === "timeout") return "timeout";
+    if (error.failure.category === "cancelled") return "cancelled";
+  }
+  return "turn_failed";
+}
+
+/**
+ * Preserve private startup detail for callers and select only known operational causes.
+ */
+function startupError(rpc: RpcSession): RpcOperationError {
+  const stderr = rpc.stderrTail();
+  let failure: Failure = classifyFailure(stderr.replace(/^Error: /, ""), "startup");
+  let hint = "";
+  if (/execvp/.test(stderr)) {
+    failure = { category: "runtime", phase: "startup", reason: "command_not_found" };
+    hint = " (command not found inside the session environment)";
+  } else if (/Cannot find module|ERR_MODULE_NOT_FOUND/.test(stderr)) {
+    failure = { category: "runtime", phase: "startup", reason: "dependency_unavailable" };
+    hint =
+      " (an extension's dependency is not visible inside the session — bundle the extension so its deps are inlined, or mount its node_modules tree(s) via bwrap({ mounts }))";
+  } else if (failure.category === "unknown")
+    failure = { category: "runtime", phase: "startup", reason: "worker_exited" };
+  return new RpcOperationError(
+    `session worker exited prematurely${stderr ? `: ${stderr}` : ""}${hint}`,
+    failure,
+  );
 }

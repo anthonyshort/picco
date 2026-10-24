@@ -61,7 +61,7 @@ describe("createAgent", () => {
       ],
     });
     await agent.start({ handleSignals: false });
-    await agent.sessions.run("chat", "go");
+    await agent.sessions.run("chat", "go", { requestId: "request1" });
     await agent.stop();
     expect(records).toContainEqual({
       event: "fixture.started",
@@ -72,12 +72,13 @@ describe("createAgent", () => {
       fields: expect.objectContaining({ agentName: "agent", component: "bridge" }),
     });
     expect(records).toContainEqual({
-      event: "spawning",
+      event: "request.started",
       fields: expect.objectContaining({
         agentName: "agent",
         component: "sessions",
         source: "host",
         key: "chat",
+        requestId: "request1",
       }),
     });
     expect(records).toContainEqual({ event: "stopped", fields: { agentName: "agent" } });
