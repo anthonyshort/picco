@@ -3,7 +3,8 @@ import * as z from "zod";
 import { tool, type Tool } from "@picco-agent/core";
 import type { Plugin, PluginContext, SessionIdentity } from "@picco-agent/core";
 
-const TELEGRAM_MAX = 4096;
+import { TELEGRAM_MAX } from "./limits.js";
+import { createNotificationTool } from "./notification.js";
 const TYPING_REFRESH_MS = 4000;
 
 /**
@@ -61,6 +62,10 @@ export interface TelegramOptions {
    * Chat ids allowed to talk to the agent. Everything else is ignored.
    */
   allowlist: number[];
+  /**
+   * Enable telegram_notify for this fixed recipient, which must also be in allowlist.
+   */
+  notificationChatId?: number;
 }
 
 /**
@@ -285,10 +290,25 @@ async function handleCommand(
  * Create the Telegram plugin: long-polling bot and message routing.
  */
 export function telegram(options: TelegramOptions): Plugin {
+  const chatId = options.notificationChatId;
+  if (
+    chatId !== undefined &&
+    (!Number.isSafeInteger(chatId) || chatId === 0 || !options.allowlist.includes(chatId))
+  ) {
+    throw new Error("Telegram notificationChatId must be a nonzero safe integer in allowlist");
+  }
   const bot = new Bot(options.botToken);
 
   return {
     name: "telegram",
+    tools:
+      chatId === undefined
+        ? []
+        : [
+            createNotificationTool(chatId, (recipient, text) =>
+              bot.api.sendMessage(recipient, text, { link_preview_options: { is_disabled: true } }),
+            ),
+          ],
 
     async start(ctx: PluginContext) {
       const handle = createMessageHandler(ctx, options);
