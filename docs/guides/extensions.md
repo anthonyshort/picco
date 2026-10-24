@@ -49,3 +49,5 @@ See [bwrap extensions](./runtimes/bwrap.md#load-extensions) for the sandbox conf
 
 Everything loaded as an extension executes inside the session's trust boundary. Review third-party
 extensions before installing them and do not include host credentials in their files.
+
+For task delegation with persistent child traces, see [Headless subagents](./headless-subagents.md).
