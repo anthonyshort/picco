@@ -7,7 +7,7 @@ import * as z from "zod";
 import { createAgentPaths, generateSessionId } from "./utils/agent-paths.js";
 import type { AgentPaths } from "./utils/agent-paths.js";
 import { ToolBridge } from "./tools/bridge.js";
-import { createLogger } from "./utils/logger.js";
+import { createLogger, scopeLogger } from "./utils/logger.js";
 import { SessionManager } from "./session/manager.js";
 import type { Tool } from "./tools/tool.js";
 import type { Turn } from "./session/turn.js";
@@ -76,7 +76,7 @@ function resolveBundledExtensionFile(name: string): string {
 export function createAgent(config: AgentConfig): AgentHandle {
   const name = config.name;
   const paths: AgentPaths = createAgentPaths(config.dataDir ?? DEFAULT_DATA_DIR, name);
-  const logger = createLogger(name);
+  const logger = scopeLogger(config.logger ?? createLogger(name), { agentName: name });
   const plugins = config.plugins ?? [];
   const runtime = config.runtime;
 
@@ -126,7 +126,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
   function pluginContext(pluginName: string): PluginContext {
     return {
       agentName: config.name,
-      logger: createLogger(pluginName),
+      logger: scopeLogger(logger, { component: pluginName }),
       filePath(...segments: string[]): string {
         const base = paths.pluginDir(pluginName);
         mkdirSync(base, { recursive: true });
@@ -187,7 +187,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
     // without exposing the environment or secrets to the agent.
     bridge = new ToolBridge({
       tools,
-      logger: createLogger(`${name}:bridge`),
+      logger: scopeLogger(logger, { component: "bridge" }),
       currentUser: (ref) => manager?.currentUser(ref.source, ref.key),
     });
     await bridge.start();
@@ -197,7 +197,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
     manager = new SessionManager({
       paths,
       runtime,
-      logger: createLogger(`${name}:sessions`),
+      logger: scopeLogger(logger, { component: "sessions" }),
       bridge: { url: bridge.callUrl() },
       idleTimeout: config.sessions?.idleTimeout,
       maxRuns: config.sessions?.maxRuns,

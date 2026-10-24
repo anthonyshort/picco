@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import type { AgentMailClient } from "agentmail";
 import { createWebsocketEmailSource, matchesAllowlist } from "./client.js";
 
@@ -42,13 +42,17 @@ describe("createWebsocketEmailSource", () => {
       websockets: { connect: async () => fakeSocket },
     } as unknown as AgentMailClient;
 
-    const source = createWebsocketEmailSource(client, "inbox-1");
+    const logger = { log: vi.fn(), warning: vi.fn(), error: vi.fn() };
+    const source = createWebsocketEmailSource(client, "inbox-1", logger);
     await source.start(async () => {});
     expect(subscribes).toEqual([{ type: "subscribe", inboxIds: ["inbox-1"] }]);
+    expect(logger.log).toHaveBeenCalledWith("subscribed to inbox", { inboxId: "inbox-1" });
 
     // The SDK reconnects after a drop but does not replay the subscription — our open handler must.
     handlers["open"]!(undefined as never);
     expect(subscribes).toHaveLength(2);
+    handlers["close"]!(undefined as never);
+    expect(logger.log).toHaveBeenCalledWith("websocket closed");
 
     source.stop();
   });

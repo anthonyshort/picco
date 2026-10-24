@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import * as z from "zod";
-import { silentLogger } from "../utils/logger.js";
+import { scopeLogger, silentLogger } from "../utils/logger.js";
 import type { Caller, ContentBlock, SessionCaller, Tool, ToolContext, ToolResult } from "./tool.js";
 import type { Logger, SessionIdentity, SessionRef } from "../types.js";
 
@@ -63,7 +63,7 @@ export class ToolBridge {
 
   constructor(opts: ToolBridgeOptions) {
     this.tools = opts.tools;
-    this.logger = opts.logger ?? silentLogger();
+    this.logger = scopeLogger(opts.logger ?? silentLogger(), {});
     this.currentUser = opts.currentUser;
   }
 

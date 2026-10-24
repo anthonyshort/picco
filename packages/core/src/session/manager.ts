@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { RpcSession } from "./rpc.js";
-import { silentLogger } from "../utils/logger.js";
+import { scopeLogger, silentLogger } from "../utils/logger.js";
 import { generateSessionId } from "../utils/agent-paths.js";
 import type { AgentPaths } from "../utils/agent-paths.js";
 import type { Tool } from "../tools/tool.js";
@@ -186,7 +186,7 @@ export class SessionManager {
 
   constructor(opts: SessionManagerOptions) {
     this.opts = opts;
-    this.logger = opts.logger ?? silentLogger();
+    this.logger = scopeLogger(opts.logger ?? silentLogger(), {});
     const resolvedTimeout = opts.idleTimeout ?? DEFAULT_IDLE_TIMEOUT;
     this.idleTimeoutMs = resolvedTimeout === false ? false : parseDuration(resolvedTimeout);
     this.maxRuns = opts.maxRuns ?? DEFAULT_MAX_RUNS;

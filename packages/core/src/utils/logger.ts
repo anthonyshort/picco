@@ -21,6 +21,30 @@ export function createLogger(prefix: string): Logger {
 }
 
 /**
+ * Bind immutable scope fields and isolate host logging failures from application work.
+ */
+export function scopeLogger(parent: Logger, fields: Record<string, unknown>): Logger {
+  function write(method: keyof Logger, event: string, data?: unknown): void {
+    const attached =
+      data !== null && typeof data === "object" && !(data instanceof Error) && !Array.isArray(data)
+        ? data
+        : data === undefined
+          ? {}
+          : { detail: data };
+    try {
+      parent[method](event, { ...attached, ...fields });
+    } catch {
+      // The host owns logger failures; reporting through the same sink would recurse.
+    }
+  }
+  return {
+    log: (event, data) => write("log", event, data),
+    warning: (event, data) => write("warning", event, data),
+    error: (event, data) => write("error", event, data),
+  };
+}
+
+/**
  * A logger that discards everything — handy default for tests.
  */
 export function silentLogger(): Logger {

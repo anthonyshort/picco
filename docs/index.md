@@ -28,6 +28,7 @@ extensions, skills, or packages.
 - [Runtimes](./guides/runtimes/index.md) — choose local execution or a bubblewrap sandbox.
 - [Providers](./guides/providers.md) — make model credentials and custom providers available.
 - [Extensions](./guides/extensions.md) — load Pi extensions from packages or files.
+- [Logging](./guides/logging.md) — supply a host logger and capture server output.
 - [Skills](./guides/skills.md) — add procedural knowledge to sessions.
 - [MCP servers](./guides/mcp.md) — connect static external MCP services.
 

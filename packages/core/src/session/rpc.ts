@@ -1,6 +1,6 @@
 import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
 import { parseJsonl, JsonlWriter, type JsonObject } from "./jsonl.js";
-import { silentLogger } from "../utils/logger.js";
+import { scopeLogger, silentLogger } from "../utils/logger.js";
 import type { Logger, RuntimeProcess } from "../types.js";
 import type { TurnEvent } from "./turn.js";
 
@@ -53,7 +53,7 @@ export class RpcSession {
     this.key = key;
     this.proc = proc;
     this.writer = new JsonlWriter(proc.stdin);
-    this.logger = opts.logger ?? silentLogger();
+    this.logger = scopeLogger(opts.logger ?? silentLogger(), {});
     this.requestTimeoutMs = opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
 
     proc.exited.then(

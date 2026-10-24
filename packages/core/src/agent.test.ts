@@ -12,6 +12,7 @@ import type {
   Plugin,
   PluginContext,
   PluginResolveContext,
+  Logger,
 } from "./types.js";
 
 let workspace: string;
@@ -35,6 +36,63 @@ function agentWith(config: Partial<AgentConfig> & { runtime?: FakeRuntime }) {
 }
 
 describe("createAgent", () => {
+  test("one host sink receives all scopes and bound identity cannot be overridden", async () => {
+    const records: { event: string; fields: unknown }[] = [];
+    const logger: Logger = {
+      log: (event, fields) => {
+        records.push({ event, fields });
+      },
+      warning: (event, fields) => {
+        records.push({ event, fields });
+      },
+      error: (event, fields) => {
+        records.push({ event, fields });
+      },
+    };
+    const { agent } = agentWith({
+      logger,
+      plugins: [
+        {
+          name: "fixture",
+          start(ctx) {
+            ctx.logger.log("fixture.started", { agentName: "forged", component: "forged" });
+          },
+        },
+      ],
+    });
+    await agent.start({ handleSignals: false });
+    await agent.sessions.run("chat", "go");
+    await agent.stop();
+    expect(records).toContainEqual({
+      event: "fixture.started",
+      fields: { agentName: "agent", component: "fixture" },
+    });
+    expect(records).toContainEqual({
+      event: "tool bridge listening",
+      fields: expect.objectContaining({ agentName: "agent", component: "bridge" }),
+    });
+    expect(records).toContainEqual({
+      event: "spawning",
+      fields: expect.objectContaining({
+        agentName: "agent",
+        component: "sessions",
+        source: "host",
+        key: "chat",
+      }),
+    });
+    expect(records).toContainEqual({ event: "stopped", fields: { agentName: "agent" } });
+  });
+
+  test("a throwing host logger does not break execution or shutdown", async () => {
+    const fail = () => {
+      throw new Error("logging destination unavailable");
+    };
+    const { agent } = agentWith({ logger: { log: fail, warning: fail, error: fail } });
+    await agent.start({ handleSignals: false });
+    expect((await agent.sessions.run("chat", "hello")).text).toBe("echo: hello");
+    await expect(agent.stop()).resolves.toBeUndefined();
+  });
+
   describe("validation", () => {
     test("duplicate tool names are a startup error", () => {
       const a = tool({ name: "x", description: "d", input: z.object({}), execute: () => "" });
