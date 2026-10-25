@@ -65,7 +65,7 @@ describe("agent lifecycle with real workers", () => {
     const active = harness.agent.sessions.run("active", "Wait for another instruction.", {
       timeoutMs: 60_000,
     });
-    const failure = expect(active).rejects.toThrow("exited");
+    const failure = expect(active).rejects.toThrow("agent shutdown");
     await requested.promise;
 
     await harness.agent.stop();

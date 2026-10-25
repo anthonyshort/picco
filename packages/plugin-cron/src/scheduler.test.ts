@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { stringify as yamlStringify } from "yaml";
 import type { AgentJobConfig, JobConfig, ScriptJobConfig } from "./loader.js";
 import { JobLoader } from "./loader.js";
+import { CronHistory } from "./history.js";
+import { ExecutionFailure } from "@picco-agent/core";
 import { JobScheduler, type JobRun, type RunAgent } from "./scheduler.js";
 
 let cronDir: string;
@@ -403,9 +405,164 @@ describe("bounded concurrency", () => {
     await scheduler.addJob(agentJob());
     const run = scheduler.fireJob("agent-job");
     await reporting.promise;
+    expect(scheduler.details("agent-job").activeRuns).toEqual([]);
+    expect(scheduler.listJobs()[0]).toMatchObject({ activeCount: 1, runningCount: 0 });
     expect(scheduler.triggerJob("agent-job")).toMatch(/skipped/);
     completion.resolve();
     await run;
     expect(scheduler.listJobs()[0]).toMatchObject({ activeCount: 0, fireCount: 1 });
+  });
+});
+
+describe("persistent inspection", () => {
+  test("records admission before work, links its execution and persists terminal output before observers", async () => {
+    const history = new CronHistory({ file: path.join(cronDir, "history.json") });
+    const work = Promise.withResolvers<string>();
+    const started = Promise.withResolvers<void>();
+    scheduler = new JobScheduler({
+      loader,
+      history,
+      runAgent: ({ reportExecution }) => {
+        expect(history.list()[0]).toMatchObject({
+          status: "running",
+          definition: { model: "local/first" },
+        });
+        reportExecution?.("execution-123");
+        started.resolve();
+        return work.promise;
+      },
+      runScript: async () => "unused",
+      onRunComplete: () => {
+        expect(history.list()[0]).toMatchObject({ status: "success", output: "complete" });
+      },
+    });
+    await scheduler.addJob(agentJob({ model: "local/first" }));
+    const operation = scheduler.fireJob("agent-job");
+    await started.promise;
+    expect(scheduler.details("agent-job")).toMatchObject({
+      activeRuns: [{ executionId: "execution-123", status: "running" }],
+    });
+    await scheduler.updateJob("agent-job", { model: "local/second" });
+    work.resolve("complete");
+    await operation;
+    const detail = scheduler.details("agent-job");
+    expect(detail).toMatchObject({
+      definition: { model: "local/second" },
+      activeRuns: [],
+      recentRuns: [{ definition: { model: "local/first" } }],
+    });
+    await scheduler.removeJob("agent-job");
+    expect(scheduler.details("agent-job")).toMatchObject({
+      found: true,
+      scheduled: false,
+      definition: null,
+    });
+    await scheduler.stop();
+    const restored = new CronHistory({ file: path.join(cronDir, "history.json") });
+    try {
+      expect(restored.list()[0]).toMatchObject({
+        executionId: "execution-123",
+        output: "complete",
+      });
+    } finally {
+      restored.close();
+    }
+  });
+
+  test("skipped triggers are recorded separately and do not run or count as completions", async () => {
+    const work = Promise.withResolvers<string>();
+    scheduler = new JobScheduler({
+      loader,
+      runAgent: () => work.promise,
+      runScript: async () => "unused",
+      onRunComplete: () => {},
+    });
+    await scheduler.addJob(agentJob());
+    const first = scheduler.fireJob("agent-job");
+    expect(scheduler.triggerJob("agent-job")).toContain("skipped");
+    expect(scheduler.details("agent-job").recentRuns).toEqual([
+      expect.objectContaining({ status: "skipped", reason: "Concurrency limit reached" }),
+      expect.objectContaining({ status: "running" }),
+    ]);
+    expect(scheduler.listJobs()[0].fireCount).toBe(0);
+    work.resolve("done");
+    await first;
+    expect(scheduler.listJobs()[0].fireCount).toBe(1);
+  });
+
+  test("failed history admission prevents side effects and releases capacity", async () => {
+    const history = new CronHistory();
+    let invoked = false;
+    scheduler = new JobScheduler({
+      loader,
+      history,
+      runAgent: async () => {
+        invoked = true;
+        return "unused";
+      },
+      runScript: async () => "unused",
+      onRunComplete: () => {},
+    });
+    await scheduler.addJob(agentJob());
+    history.close();
+    await expect(scheduler.fireJob("agent-job")).rejects.toThrow("history is closed");
+    expect(invoked).toBe(false);
+    expect(scheduler.listJobs()[0].activeCount).toBe(0);
+  });
+
+  test("shutdown is bounded while pending work retains exclusive history ownership", async () => {
+    const file = path.join(cronDir, "pending-history.json");
+    const history = new CronHistory({ file });
+    const work = Promise.withResolvers<string>();
+    scheduler = new JobScheduler({
+      loader,
+      history,
+      runAgent: () => work.promise,
+      runScript: async () => "unused",
+      onRunComplete: () => {},
+    });
+    await scheduler.addJob(agentJob());
+    const running = scheduler.fireJob("agent-job");
+    vi.useFakeTimers();
+    try {
+      const stopping = scheduler.stop();
+      const failure = expect(stopping).rejects.toThrow("pending work retains history ownership");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await failure;
+      expect(() => new CronHistory({ file })).toThrow("already open");
+      expect(scheduler.triggerJob("agent-job")).toContain("stopped");
+      work.resolve("finished");
+      await running;
+      await scheduler.stop();
+      const reopened = new CronHistory({ file });
+      expect(reopened.list()[0].status).toBe("success");
+      reopened.close();
+    } finally {
+      vi.useRealTimers();
+      work.resolve("finished");
+      await running;
+    }
+  });
+
+  test("retains primary and finalisation failures as separate history evidence", async () => {
+    scheduler = new JobScheduler({
+      loader,
+      runAgent: async () => {
+        throw new ExecutionFailure(
+          { id: "execution-failed", session: { source: "cron", key: "example" } },
+          new Error("provider failed"),
+          [new Error("claim cleanup failed")],
+        );
+      },
+      runScript: async () => "unused",
+      onRunComplete: () => {},
+    });
+    await scheduler.addJob(agentJob());
+    await scheduler.fireJob("agent-job");
+    expect(scheduler.details("agent-job").recentRuns[0]).toMatchObject({
+      status: "error",
+      error: "provider failed",
+      finalisationErrors: ["claim cleanup failed"],
+    });
   });
 });

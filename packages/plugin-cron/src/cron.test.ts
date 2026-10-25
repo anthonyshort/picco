@@ -47,10 +47,11 @@ function findTool(plugin: ReturnType<typeof cron>, name: string) {
 }
 
 describe("cron plugin", () => {
-  test("registers all five cron tools", () => {
+  test("registers cron management and inspection tools", () => {
     const plugin = cron({ jobDir: dir });
     expect(plugin.tools!.map((t) => t.name)).toEqual([
       "cron_list",
+      "cron_details",
       "cron_add",
       "cron_update",
       "cron_remove",
@@ -114,7 +115,7 @@ describe("cron plugin", () => {
         prompt: "say hello",
         user: undefined,
         // No model/thinking on the job — nothing overrides the agent-wide pi config.
-        session: { pi: {} },
+        session: { ephemeral: true, pi: {} },
       },
     ]);
   });
@@ -138,7 +139,7 @@ describe("cron plugin", () => {
 
     await vi.waitFor(() => expect(runs).toHaveLength(1));
     expect(ctx.turns[0]).toMatchObject({
-      session: { pi: { model: "anthropic/claude-sonnet-4-5", thinking: "high" } },
+      session: { ephemeral: true, pi: { model: "anthropic/claude-sonnet-4-5", thinking: "high" } },
     });
   });
 

@@ -1,3 +1,4 @@
+import { ExecutionError } from "./execution.js";
 import * as z from "zod";
 import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
 import { parseJsonl, JsonlWriter, type JsonObject } from "./jsonl.js";
@@ -6,6 +7,13 @@ import type { Logger, RuntimeProcess } from "../types.js";
 import type { TurnEvent } from "./turn.js";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+/**
+ * Only terminal assistant metadata is needed to reject provider failures safely.
+ */
+const AssistantEndSchema = z.object({
+  type: z.literal("message_end"),
+  message: z.object({ role: z.literal("assistant"), stopReason: z.string() }),
+});
 
 /**
  * Structured pi-subagents tool metadata exposed by Pi's existing RPC events.
@@ -69,6 +77,9 @@ export class RpcSession {
   private requestId = 0;
   private dead = false;
   private promptInFlight = false;
+  private promptFailure: Error | undefined;
+  private reloadFailure: Error | undefined;
+  private reloading = false;
   private agentSettled: { resolve: () => void; reject: (err: Error) => void } | null = null;
   private onEvent: ((event: TurnEvent) => void) | null = null;
 
@@ -113,6 +124,7 @@ export class RpcSession {
       throw new Error(`Session ${this.key} already has a prompt in flight`);
     }
     this.promptInFlight = true;
+    this.promptFailure = undefined;
     this.onEvent = opts.onEvent ?? null;
 
     try {
@@ -127,7 +139,9 @@ export class RpcSession {
             // The turn is still running inside pi — abort it, or the next
             // prompt would overlap it and be resolved by its agent_settled.
             this.request({ type: "abort" }).catch(() => {});
-            reject(new Error(`Prompt timed out after ${opts.timeoutMs! / 1000}s`));
+            reject(
+              new ExecutionError("timeout", `Prompt timed out after ${opts.timeoutMs! / 1000}s`),
+            );
           }, opts.timeoutMs)
         : null;
       this.agentSettled = { resolve, reject };
@@ -149,11 +163,35 @@ export class RpcSession {
         this.agentSettled = null;
       }
 
+      if (this.promptFailure) throw this.promptFailure;
       const resp = await this.request({ type: "get_last_assistant_text" });
       return resp.data.text || "(no text response)";
     } finally {
       this.promptInFlight = false;
       this.onEvent = null;
+    }
+  }
+
+  /**
+   * Execute the bundled reload command only after verifying that it is registered.
+   */
+  async reload(): Promise<void> {
+    if (this.promptInFlight) throw new Error("Cannot reload during a prompt");
+    const catalogue = await this.request({ type: "get_commands" });
+    if (!catalogue.data.commands.some((command) => command.name === "picco-reload")) {
+      throw new Error("The Picco reload command is unavailable in this worker");
+    }
+    this.reloadFailure = undefined;
+    this.reloading = true;
+    try {
+      const response = await this.request({ type: "prompt", message: "/picco-reload" }, 30_000);
+      if (response.data.disposition !== "handled") {
+        this.abortTurn();
+        throw new Error("Reload was not handled as a session command");
+      }
+      if (this.reloadFailure) throw this.reloadFailure;
+    } finally {
+      this.reloading = false;
     }
   }
 
@@ -251,6 +289,28 @@ export class RpcSession {
    * Dispatch one stdout message: responses, agent_settled, live progress events.
    */
   private handleMessage(msg: JsonObject): void {
+    const ended = AssistantEndSchema.safeParse(msg);
+    if (ended.success && this.promptInFlight) {
+      switch (ended.data.message.stopReason) {
+        case "error":
+          this.promptFailure = new Error(
+            "Model provider request failed; inspect session diagnostics.",
+          );
+          break;
+        case "aborted":
+          this.promptFailure = new ExecutionError("cancelled", "Model request was aborted.");
+          break;
+        default:
+          this.promptFailure = undefined;
+      }
+    }
+    if (
+      msg.type === "extension_error" &&
+      this.reloading &&
+      msg.extensionPath === "command:picco-reload"
+    ) {
+      this.reloadFailure = new Error("Pi resource reload failed; inspect session diagnostics.");
+    }
     // Responses correlate to a pending request by id
     if (msg.type === "response") {
       const req = typeof msg.id === "string" ? this.pending.get(msg.id) : undefined;
@@ -377,7 +437,7 @@ export class RpcSession {
     // session directory. Harmless if already dead.
     this.proc.kill().catch(() => {});
 
-    const err = new Error(reason);
+    const err = new ExecutionError("worker", reason);
     for (const req of this.pending.values()) {
       clearTimeout(req.timer);
       req.reject(err);

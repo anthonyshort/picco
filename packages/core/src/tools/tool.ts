@@ -1,4 +1,5 @@
 import type * as z from "zod";
+import type { ExecutionRef } from "../session/execution.js";
 import type { Logger, SessionIdentity, SessionRef } from "../types.js";
 
 /**
@@ -35,6 +36,11 @@ export type Caller = SessionCaller | HostCaller;
  * (connector tools only) the caller's resolved credential.
  */
 export interface ToolContext {
+  /**
+   * Trusted owning execution and cancellation signal for bridged calls.
+   */
+  execution?: ExecutionRef;
+  signal?: AbortSignal;
   /**
    * Structured logger for use inside the tool.
    */

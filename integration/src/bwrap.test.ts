@@ -2,7 +2,7 @@ import { startFakeMcp } from "./fake-mcp.js";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -231,6 +231,62 @@ describe.skipIf(!sandboxAvailable)("bwrap() + native MCP (real bwrap)", () => {
 });
 
 describe.skipIf(!sandboxAvailable)("bwrap() session resume (real bwrap)", () => {
+  test("reload refreshes resources without inference and preserves conversation history", async () => {
+    const workspace = makeWorkspaceRoot();
+    const skills = path.join(workspace, "skills", "reload-probe");
+    mkdirSync(skills, { recursive: true });
+    const skill = path.join(skills, "SKILL.md");
+    writeFileSync(
+      skill,
+      "---\nname: reload-probe\ndescription: Initial resource marker\n---\nRead only.\n",
+    );
+    const model = await startFakeModel(() => [{ text: "ok" }]);
+    const agent = createAgent({
+      name: "reload-int",
+      dataDir: workspace,
+      runtime: bwrap(),
+      pi: {
+        model: "fake/fake-1",
+        skills: [skills],
+        models: {
+          providers: {
+            fake: {
+              baseUrl: model.url,
+              api: "openai-completions",
+              apiKey: "test-key",
+              models: [{ id: "fake-1" }],
+            },
+          },
+        },
+      },
+    });
+    try {
+      await agent.start({ handleSignals: false });
+      await agent.sessions.run("chat", "Remember the earlier conversation marker.");
+      expect(model.requests).toHaveLength(1);
+      writeFileSync(
+        skill,
+        "---\nname: reload-probe\ndescription: Refreshed resource marker\n---\nRead only.\n",
+      );
+      const operation = agent.sessions.get("chat")!.reload();
+      await operation.completed;
+      expect(operation.status).toBe("completed");
+      expect(model.requests).toHaveLength(1);
+      await agent.sessions.run("chat", "Continue after resource reload.");
+      expect(model.requests).toHaveLength(2);
+      expect(JSON.stringify(model.requests[1]!.params.messages)).toContain(
+        "Refreshed resource marker",
+      );
+      expect(JSON.stringify(model.requests[1]!.params.messages)).toContain(
+        "earlier conversation marker",
+      );
+    } finally {
+      await agent.stop();
+      await model.close();
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   test("resumes the conversation across a sandbox respawn — the transcript persists via the rw mount", async () => {
     const workspace = makeWorkspaceRoot();
     const requests: ChatRequest[] = [];

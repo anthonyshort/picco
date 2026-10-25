@@ -1,3 +1,5 @@
+import { request } from "node:http";
+import type { ExecutionRef } from "../session/execution.js";
 import { afterEach, describe, expect, test } from "vitest";
 import * as z from "zod";
 import { ToolBridge, type ToolBridgeOptions } from "./bridge.js";
@@ -271,5 +273,184 @@ describe("session tokens", () => {
 
     // Nothing was minted by the failed calls.
     expect(b.tokenCount).toBe(0);
+  });
+});
+
+/**
+ * Send headers and one body byte, leaving dispatch gated on the remaining JSON.
+ */
+function pausedRequest(b: ToolBridge, token: string) {
+  const completed = Promise.withResolvers<{ status: number; body: string }>();
+  const body = JSON.stringify({ tool: "get_weather", args: { city: "Sydney" } });
+  const outgoing = request(
+    b.callUrl(),
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    },
+    (incoming) => {
+      let text = "";
+      incoming.setEncoding("utf8");
+      incoming.on("data", (chunk: string) => {
+        text += chunk;
+      });
+      incoming.on("end", () => completed.resolve({ status: incoming.statusCode ?? 0, body: text }));
+      incoming.on("error", completed.reject);
+    },
+  );
+  outgoing.on("error", completed.reject);
+  outgoing.write(body.slice(0, 1));
+  return {
+    finish() {
+      outgoing.end(body.slice(1));
+    },
+    destroy() {
+      outgoing.destroy();
+    },
+    response: completed.promise,
+  };
+}
+
+describe("execution admission", () => {
+  test("a body admitted under an earlier execution cannot dispatch under the next one", async () => {
+    const admitted = Promise.withResolvers<void>();
+    const abort = new AbortController();
+    const session = { source: "telegram", key: "42" };
+    let current: ExecutionRef = { id: "first-execution", session };
+    const seen: string[] = [];
+    const guarded = tool({
+      name: "get_weather",
+      description: "d",
+      input: z.object({ city: z.string() }),
+      execute(_, ctx) {
+        seen.push(ctx.execution?.id ?? "missing");
+        return "ok";
+      },
+    });
+    const b = await startBridge([guarded], {
+      executionContext() {
+        admitted.resolve();
+        return { execution: current, signal: abort.signal };
+      },
+    });
+    const partial = pausedRequest(b, b.issueToken(session));
+    try {
+      await admitted.promise;
+      current = { id: "second-execution", session };
+      partial.finish();
+      expect((await partial.response).status).toBe(409);
+      expect(seen).toEqual([]);
+    } finally {
+      partial.destroy();
+    }
+  });
+
+  test("a token revoked while its request body is pending cannot execute from a cached entry", async () => {
+    const admitted = Promise.withResolvers<void>();
+    const abort = new AbortController();
+    const session = { source: "telegram", key: "42" };
+    let calls = 0;
+    const guarded = tool({
+      name: "get_weather",
+      description: "d",
+      input: z.object({ city: z.string() }),
+      execute() {
+        calls++;
+        return "ok";
+      },
+    });
+    const b = await startBridge([guarded], {
+      executionContext() {
+        admitted.resolve();
+        return { execution: { id: "first-execution", session }, signal: abort.signal };
+      },
+    });
+    const partial = pausedRequest(b, b.issueToken(session));
+    try {
+      await admitted.promise;
+      b.releaseSession(session);
+      partial.finish();
+      expect((await partial.response).status).toBe(401);
+      expect(calls).toBe(0);
+    } finally {
+      partial.destroy();
+    }
+  });
+
+  test("quiescence waits for admitted body reads and tool work", async () => {
+    const admitted = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    const work = Promise.withResolvers<string>();
+    const abort = new AbortController();
+    const session = { source: "telegram", key: "42" };
+    const guarded = tool({
+      name: "get_weather",
+      description: "d",
+      input: z.object({ city: z.string() }),
+      execute() {
+        entered.resolve();
+        return work.promise;
+      },
+    });
+    const b = await startBridge([guarded], {
+      executionContext() {
+        admitted.resolve();
+        return { execution: { id: "first-execution", session }, signal: abort.signal };
+      },
+    });
+    const partial = pausedRequest(b, b.issueToken(session));
+    try {
+      await admitted.promise;
+      let settled = false;
+      const quiesced = b.settleExecution("first-execution").then(() => {
+        settled = true;
+        return undefined;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      partial.finish();
+      await entered.promise;
+      expect(settled).toBe(false);
+      work.resolve("complete");
+      expect((await partial.response).status).toBe(200);
+      await quiesced;
+      expect(settled).toBe(true);
+    } finally {
+      work.resolve("complete");
+      partial.destroy();
+    }
+  });
+
+  test("ending execution ownership aborts an unfinished body without invoking its tool", async () => {
+    const admitted = Promise.withResolvers<void>();
+    const abort = new AbortController();
+    const session = { source: "telegram", key: "42" };
+    let calls = 0;
+    const guarded = tool({
+      name: "get_weather",
+      description: "d",
+      input: z.object({ city: z.string() }),
+      execute() {
+        calls++;
+        return "ok";
+      },
+    });
+    const b = await startBridge([guarded], {
+      executionContext() {
+        admitted.resolve();
+        return { execution: { id: "first-execution", session }, signal: abort.signal };
+      },
+    });
+    const partial = pausedRequest(b, b.issueToken(session));
+    const failed = partial.response.catch((err: unknown) => err);
+    try {
+      await admitted.promise;
+      abort.abort();
+      await b.settleExecution("first-execution");
+      expect(await failed).toBeInstanceOf(Error);
+      expect(calls).toBe(0);
+    } finally {
+      partial.destroy();
+    }
   });
 });

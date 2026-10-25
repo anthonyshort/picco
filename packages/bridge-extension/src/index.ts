@@ -66,6 +66,12 @@ export type BridgeCallResult = z.infer<typeof BridgeCallResultSchema>;
  */
 export default function BridgeExtension(pi: ExtensionAPI) {
   const config = readBridgeConfig(DEFAULT_CONFIG_PATH);
+  pi.registerCommand("picco-reload", {
+    description: "Reload this session's resources while preserving history",
+    async handler(_args, ctx) {
+      await ctx.reload();
+    },
+  });
 
   for (const spec of config.tools) {
     pi.registerTool({
