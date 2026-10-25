@@ -1,0 +1,17 @@
+{
+  "name": "@picco-agent/example-subagent-debugging",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/observe-subagents.ts --bundle --platform=node --format=esm --outfile=dist/observe-subagents.js --external:@earendil-works/pi-coding-agent && esbuild node_modules/@tintinweb/pi-subagents/src/index.ts --bundle --platform=node --format=esm --outfile=dist/subagents.js --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-ai --external:@earendil-works/pi-ai/* --external:@earendil-works/pi-tui --external:typebox",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@picco-agent/core": "workspace:*",
+    "@picco-agent/runtime-bwrap": "workspace:*",
+    "@picco-agent/runtime-local": "workspace:*",
+    "@tintinweb/pi-subagents": "0.22.0",
+    "zod": "^4.4.3"
+  }
+}
