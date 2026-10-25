@@ -1,5 +1,4 @@
 import { Bot } from "grammy";
-import path from "node:path";
 import * as z from "zod";
 import { tool, type Tool } from "@picco-agent/core";
 import type { Plugin, PluginContext, SessionIdentity } from "@picco-agent/core";
@@ -7,7 +6,6 @@ import type { Plugin, PluginContext, SessionIdentity } from "@picco-agent/core";
 import { TELEGRAM_MAX } from "./limits.js";
 import { createNotificationTool, createDeliveryTool, createNotifications } from "./notification.js";
 import type { NotificationInput, NotificationResult } from "./notification.js";
-import { DeliveryStore } from "./delivery-store.js";
 export type { NotificationInput, NotificationResult } from "./notification.js";
 const TYPING_REFRESH_MS = 4000;
 
@@ -75,17 +73,17 @@ export interface TelegramOptions {
    */
   notificationTimeoutMs?: number;
   /**
-   * Maximum retained delivery records (default 10,000); unresolved records never expire.
+   * Maximum cached receipts and simultaneous active attempts, each bounded to 10,000 by default.
    */
   maxDeliveryRecords?: number;
   /**
-   * Retain confirmed/rejected receipts for this many days (default 30).
+   * Completed receipt cache TTL, including uncertain outcomes (default 30 days).
    */
   deliveryRetentionDays?: number;
 }
 
 /**
- * Host notifications share the same ledger as the model tools; available after start.
+ * Host notifications share the same in-memory cache as the model tools; available after start.
  */
 export interface TelegramPlugin extends Plugin {
   notify(input: NotificationInput): Promise<NotificationResult>;
@@ -335,7 +333,6 @@ export function telegram(options: TelegramOptions): TelegramPlugin {
   const bot = new Bot(options.botToken, {
     client: { timeoutSeconds: deliveryOptions.timeoutMs / 1000 },
   });
-  let deliveryFile: string | undefined;
   let notifications: ReturnType<typeof createNotifications> | undefined;
   function ensureNotifications() {
     if (!notifications) throw new Error("Telegram notifications are not started");
@@ -349,9 +346,6 @@ export function telegram(options: TelegramOptions): TelegramPlugin {
         ? []
         : [createNotificationTool(ensureNotifications), createDeliveryTool(ensureNotifications)],
 
-    resolve(ctx) {
-      deliveryFile = path.join(ctx.dataDir, "plugins", "telegram", "deliveries.sqlite");
-    },
     notify(input) {
       return ensureNotifications().notify(input);
     },
@@ -367,13 +361,10 @@ export function telegram(options: TelegramOptions): TelegramPlugin {
       if (chatId !== undefined) {
         notifications = createNotifications(
           chatId,
-          new DeliveryStore(deliveryFile ?? ctx.filePath("deliveries.sqlite"), {
-            maxRecords: deliveryOptions.maxRecords,
-            retentionMs: deliveryOptions.retentionDays * 86_400_000,
-          }),
           (recipient, text) =>
             bot.api.sendMessage(recipient, text, { link_preview_options: { is_disabled: true } }),
           deliveryOptions.timeoutMs,
+          { max: deliveryOptions.maxRecords, ttl: deliveryOptions.retentionDays * 86_400_000 },
         );
       }
       const handle = createMessageHandler(ctx, options);

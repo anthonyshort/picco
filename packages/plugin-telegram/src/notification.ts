@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { LRUCache } from "lru-cache";
 import { GrammyError } from "grammy";
 import { tool, type Tool } from "@picco-agent/core";
 import * as z from "zod";
-import type { Delivery, DeliveryStore } from "./delivery-store.js";
 import { TELEGRAM_MAX } from "./limits.js";
 
 /**
@@ -21,11 +21,32 @@ export const NotificationInputSchema = z
 export type NotificationInput = z.infer<typeof NotificationInputSchema>;
 
 /**
+ * Delivery states shared by active attempts and cached receipts.
+ */
+const DELIVERY_STATUSES = ["in-flight", "confirmed", "rejected", "uncertain"] as const;
+
+/**
+ * Cached metadata excludes message text and credentials.
+ */
+interface Delivery {
+  deliveryId: string;
+  digest: string;
+  status: (typeof DELIVERY_STATUSES)[number];
+  messageId: number | null;
+}
+
+/**
  * Public delivery evidence never includes text, a token or the payload digest.
  */
-export type NotificationResult = Pick<Delivery, "deliveryId" | "status" | "messageId"> & {
-  duplicate: boolean;
-};
+export type NotificationResult = Omit<Delivery, "digest"> & { duplicate: boolean };
+
+/**
+ * Bound completed receipts and active attempts separately; TTL begins on completion.
+ */
+interface NotificationCacheOptions {
+  max: number;
+  ttl: number;
+}
 
 /**
  * The transport accepts cancellation and returns Telegram's receipt.
@@ -37,28 +58,19 @@ export type NotificationSender = (
 ) => Promise<{ message_id: number }>;
 
 /**
- * Share durable delivery semantics between host callbacks and model tools.
+ * Share bounded process-local deduplication between host callbacks and model tools.
  */
 export function createNotifications(
   chatId: number,
-  store: DeliveryStore,
   send: NotificationSender,
   timeoutMs: number,
+  options: NotificationCacheOptions,
 ) {
-  const active = new Set<Promise<NotificationResult>>();
+  const cache = new LRUCache<string, Delivery>({ max: options.max, ttl: options.ttl });
+  const active = new Map<string, { delivery: Delivery; completion: Promise<NotificationResult> }>();
   let stopped = false;
-  async function deliver(
-    input: NotificationInput,
-    executionId?: string,
-  ): Promise<NotificationResult> {
-    const { text, deduplicationKey } = NotificationInputSchema.parse(input);
-    const { delivery, duplicate } = store.reserve(
-      chatId,
-      createHash("sha256").update(text).digest("hex"),
-      deduplicationKey,
-      executionId,
-    );
-    if (duplicate) return result(delivery, true);
+
+  async function deliver(delivery: Delivery, text: string): Promise<NotificationResult> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
@@ -69,30 +81,60 @@ export function createNotifications(
     });
     try {
       const receipt = await Promise.race([send(chatId, text, controller.signal), timeout]);
-      return result(store.finish(delivery.deliveryId, "confirmed", receipt.message_id), false);
+      delivery.status = "confirmed";
+      delivery.messageId = receipt.message_id;
     } catch (err) {
-      const status = err instanceof GrammyError ? "rejected" : "uncertain";
-      return result(store.finish(delivery.deliveryId, status), false);
+      delivery.status = err instanceof GrammyError ? "rejected" : "uncertain";
     } finally {
       clearTimeout(timer);
     }
+    return result(delivery, false);
   }
+
   return {
-    notify(input: NotificationInput, executionId?: string): Promise<NotificationResult> {
-      if (stopped) return Promise.reject(new Error("Telegram notifications are stopped"));
-      const operation = deliver(input, executionId);
-      active.add(operation);
-      void operation.finally(() => active.delete(operation)).catch(() => {});
-      return operation;
+    async notify(input: NotificationInput): Promise<NotificationResult> {
+      if (stopped) throw new Error("Telegram notifications are stopped");
+      const { text, deduplicationKey } = NotificationInputSchema.parse(input);
+      const key = deduplicationKey === undefined ? `id:${randomUUID()}` : `key:${deduplicationKey}`;
+      const digest = createHash("sha256").update(text).digest("hex");
+      const previous = active.get(key)?.delivery ?? cache.get(key);
+      if (previous) {
+        if (previous.digest !== digest)
+          throw new Error("Telegram notification key was already used for different content");
+        return result(previous, true);
+      }
+      if (active.size >= options.max)
+        throw new Error("Telegram notification capacity reached; wait for active attempts");
+      const delivery: Delivery = {
+        deliveryId: randomUUID(),
+        digest,
+        status: "in-flight",
+        messageId: null,
+      };
+      const completion = Promise.resolve().then(async () => {
+        try {
+          return await deliver(delivery, text);
+        } finally {
+          cache.set(key, delivery);
+          active.delete(key);
+        }
+      });
+      active.set(key, { delivery, completion });
+      return completion;
     },
     delivery(deliveryId: string): NotificationResult | undefined {
-      const delivery = store.get(deliveryId);
-      return delivery?.recipient === chatId ? result(delivery, true) : undefined;
+      for (const { delivery } of active.values()) {
+        if (delivery.deliveryId === deliveryId) return result(delivery, true);
+      }
+      for (const delivery of cache.values()) {
+        if (delivery.deliveryId === deliveryId) return result(delivery, true);
+      }
+      return undefined;
     },
     async stop(): Promise<void> {
       stopped = true;
-      await Promise.allSettled(active);
-      store.close();
+      await Promise.allSettled([...active.values()].map(({ completion }) => completion));
+      cache.clear();
     },
   };
 }
@@ -109,7 +151,7 @@ export function createNotificationTool(
       "Send one plain-text notification to the configured chat. Reuse a deduplicationKey for the same intent. Inspect uncertain delivery; never retry it automatically. Use reply for conversation responses.",
     input: NotificationInputSchema,
     async execute(input, ctx) {
-      const delivery = await notifications().notify(input, ctx.execution?.id);
+      const delivery = await notifications().notify(input);
       ctx.logger.log("notification delivery", {
         executionId: ctx.execution?.id,
         deliveryId: delivery.deliveryId,
@@ -129,7 +171,7 @@ export function createDeliveryTool(
 ): Tool {
   return tool({
     name: "telegram_delivery",
-    description: "Inspect retained delivery evidence by deliveryId without sending a message.",
+    description: "Inspect cached delivery evidence by deliveryId without sending a message.",
     input: z.object({ deliveryId: z.uuid() }).strict(),
     execute({ deliveryId }) {
       return JSON.stringify(notifications().delivery(deliveryId) ?? { found: false });

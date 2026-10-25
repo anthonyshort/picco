@@ -264,24 +264,30 @@ telegram_notify({ text: "Digest ready.", deduplicationKey: "digest:2026-10-26" }
 → { deliveryId, status: "confirmed", messageId: 123, duplicate: false }
 
 telegram_delivery({ deliveryId })
-→ { deliveryId, status: "confirmed", messageId: 123, duplicate: true }
+→ the cached receipt without sending another message
 ```
 
-The plugin reserves keyed intents before sending and persists delivery evidence
-in its private data directory. Concurrent calls or repeats after restart return
-the existing state without sending again. Reusing a key with different text is
-an error. A provider rejection is distinct from uncertain delivery caused by a
-timeout or broken connection. Interrupted sends become uncertain after restart;
-they are never automatically retried.
+The plugin uses `lru-cache` for completed receipts and keeps active attempts in a
+separate bounded map. Identical calls share the active delivery ID; a key reused
+with different text fails. Both the completed cache and active attempts have a
+separate limit of 10,000 entries by default, configured with `maxDeliveryRecords`.
+At the active-attempt limit, new intents fail rather than evicting an unfinished
+reservation. Completed receipts are evicted in least-recently-used order.
+
+Receipt TTL starts when an attempt completes and defaults to 30 days, configured
+with `deliveryRetentionDays`. Reading a duplicate does not extend its TTL.
+Confirmed, rejected and uncertain outcomes all expire or evict. An expired or
+evicted key can send again; these are process-local cache semantics, not durable
+delivery guarantees. Stopping or restarting the plugin loses the cache and never
+replays previous attempts. No notification state is written to disk.
+
+A provider rejection is distinct from uncertain delivery caused by a timeout or
+broken connection. The plugin never automatically retries. Inspect uncertainty
+before deliberately requesting another send, including after cache eviction.
 
 The host methods `gateway.notify(input)` and `gateway.delivery(id)` use the same
-ledger after startup. They allow workflows to derive keys from authoritative
-domain state. A model generating a new key creates a new intent, so arbitrary
-keys alone cannot enforce a domain's duplicate-prevention policy.
-
-Receipts exclude message text and credentials. Confirmed/rejected records expire
-after 30 days by default; unresolved records remain. The default capacity is
-10,000 records and new sends fail closed when full. Deduplication cannot be
-promised after a key's record expires. Telegram requires Node 22.13 or newer for
-the private SQLite ledger. The consuming workflow decides when to notify; empty
-queues and review outcomes are not Telegram concepts.
+cache after startup. Tool diagnostics include trusted execution IDs and safe
+receipt metadata. The cache excludes message text and credentials. Workflows
+choose when to notify and derive stable intent keys from their domain state; a
+new model-generated key creates a new intent. Empty queues and review outcomes
+are not Telegram concepts.

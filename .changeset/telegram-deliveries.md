@@ -2,4 +2,4 @@
 "@picco-agent/plugin-telegram": minor
 ---
 
-Persist notification delivery evidence with optional deduplication keys, receipts and uncertainty inspection. Notification tools return structured JSON delivery results. The plugin now requires Node 22.13 or newer.
+Add process-local notification deduplication and receipt inspection using a bounded lru-cache. Active attempts are reserved separately, completed receipts expire or evict, and plugin restarts discard the cache without replaying sends. Notification tools return structured JSON delivery results.
