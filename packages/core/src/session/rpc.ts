@@ -1,3 +1,6 @@
+import { createInterface } from "node:readline";
+import { Readable } from "node:stream";
+import { readWorkerLog } from "../utils/worker-logger.js";
 import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
 import { parseJsonl, JsonlWriter, type JsonObject } from "./jsonl.js";
 import { silentLogger } from "../utils/logger.js";
@@ -201,16 +204,24 @@ export class RpcSession {
   }
 
   /**
-   * Keep a short stderr tail for diagnostics (e.g. spawn failures).
+   * Forward worker log entries and keep a short stderr tail for diagnostics (e.g. spawn failures).
    */
   private readStderr(): void {
     (async () => {
       try {
-        const decoder = new TextDecoder();
-        for await (const chunk of this.proc.stderr) {
-          const text = decoder.decode(chunk, { stream: true }).trim();
+        const lines = createInterface({
+          input: Readable.from(this.proc.stderr),
+          crlfDelay: Infinity,
+        });
+        for await (const line of lines) {
+          const text = line.trim();
           if (!text) continue;
-          this.logger.log("worker stderr", { key: this.key, text });
+          const entry = readWorkerLog(text);
+          if (entry) {
+            this.logger[entry.level](entry.message, { ...entry.data, key: this.key });
+          } else {
+            this.logger.log("worker stderr", { key: this.key, text });
+          }
           this.stderrLines.push(text);
           if (this.stderrLines.length > 5) this.stderrLines.shift();
         }
