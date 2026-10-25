@@ -1,13 +1,5 @@
-/**
- * Cron plugin — scheduler service + the cron_* toolkit.
- *
- * Jobs are YAML files in {jobDir} (agent-writable via cron_add, hot-reloaded by a 60s heartbeat).
- * The plugin keeps no other state: every completed run is reported to `onRunComplete` and then
- * forgotten. Agent jobs run via ctx.sessions.run with a composite key ({jobId}/{timestamp}),
- * creating sessions under sessions/cron/{jobId}/{timestamp}/ and closing each worker afterward.
- * Script jobs run through ctx.runtime.exec in the agent's configured runtime.
- */
 import { randomUUID } from "node:crypto";
+import { CronHistory, type CronHistoryOptions } from "./history.js";
 import { JobLoader } from "./loader.js";
 import { JobScheduler, type JobRun, type OnRunComplete } from "./scheduler.js";
 import { buildCronTools, type CronDeps } from "./tools.js";
@@ -22,6 +14,10 @@ const DEFAULT_AGENT_TIMEOUT_MS = 600_000; // 10 minutes
  */
 export interface CronOptions {
   /**
+   * Private persisted history: defaults to 1,000 records, 30 days and 8,192 output characters.
+   */
+  history?: CronHistoryOptions;
+  /**
    * The jobs directory: {jobDir}/*.yaml. Default: the plugin's data directory.
    */
   jobDir?: string;
@@ -30,9 +26,8 @@ export interface CronOptions {
    */
   heartbeatMs?: number;
   /**
-   * Called after every job run with its outcome (status, output, error). Wire this to your own
-   * log/store if you want run history — the plugin keeps no state on disk. May be async; a
-   * rejection is logged, never thrown into the run loop. Default: logs through the plugin logger.
+   * Observe completed runs after their history is persisted. Rejections are logged without changing
+   * the recorded execution result. Default: logs through the plugin logger.
    */
   onRunComplete?: OnRunComplete;
 }
@@ -66,13 +61,18 @@ export function cron(options: CronOptions = {}): Plugin {
           }
         });
 
+      const history = new CronHistory({
+        file: ctx.filePath("runs.json"),
+        history: options.history,
+      });
       const scheduler = new JobScheduler({
+        history,
         logger: ctx.logger,
         loader,
-        runAgent: async ({ jobId, prompt, model, thinking, timeoutMs }) => {
+        runAgent: async ({ jobId, prompt, model, thinking, timeoutMs, reportExecution }) => {
           const key = `${jobId}/${generateTimestamp()}-${randomUUID()}`;
           try {
-            const { text } = await ctx.sessions.run(key, prompt, {
+            const turn = ctx.sessions.run(key, prompt, {
               timeoutMs: timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
               // The key is unique per run, so this always creates the session — the job's
               // model/thinking overrides land on the fresh pi session. Conditional spreads keep an
@@ -82,7 +82,8 @@ export function cron(options: CronOptions = {}): Plugin {
                 pi: { ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) },
               },
             });
-            return text;
+            if (turn.execution) reportExecution?.(turn.execution.id);
+            return (await turn).text;
           } finally {
             await ctx.sessions.reset(key);
           }
@@ -105,11 +106,14 @@ export function cron(options: CronOptions = {}): Plugin {
     async stop() {
       if (heartbeat) clearInterval(heartbeat);
       heartbeat = null;
-      deps?.scheduler.stopAllTimers();
+      const scheduler = deps?.scheduler;
       deps = null;
+      await scheduler?.stop();
     },
   };
 }
 
 export type { JobConfig } from "./loader.js";
 export type { JobRun, OnRunComplete } from "./scheduler.js";
+
+export type { CronHistoryOptions, JobRunRecord } from "./history.js";

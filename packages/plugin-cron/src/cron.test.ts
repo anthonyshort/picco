@@ -47,10 +47,11 @@ function findTool(plugin: ReturnType<typeof cron>, name: string) {
 }
 
 describe("cron plugin", () => {
-  test("registers all five cron tools", () => {
+  test("registers cron management and inspection tools", () => {
     const plugin = cron({ jobDir: dir });
     expect(plugin.tools!.map((t) => t.name)).toEqual([
       "cron_list",
+      "cron_details",
       "cron_add",
       "cron_update",
       "cron_remove",

@@ -2,6 +2,7 @@ import * as z from "zod";
 import { errorMessage, markdownTable, THINKING_LEVELS, tool, type Tool } from "@picco-agent/core";
 import type { JobConfigUpdate } from "./loader.js";
 import { MaxConcurrentRunsSchema } from "./loader.js";
+import type { JobRunRecord } from "./history.js";
 import type { JobScheduler } from "./scheduler.js";
 
 export const CronAddSchema = z.object({
@@ -42,25 +43,59 @@ export type CronUpdateParams = z.infer<typeof CronUpdateSchema>;
 /**
  * Render all loaded jobs as a markdown table.
  */
-export function cronList(scheduler: JobScheduler): string {
-  const jobs = scheduler.listJobs();
+export function cronList(
+  scheduler: JobScheduler,
+  limit = 20,
+  offset = 0,
+  includeDisabled = true,
+): string {
+  const allJobs = scheduler
+    .listJobs()
+    .filter((job) => includeDisabled || job.enabled || job.activeCount > 0);
+  const jobs = allJobs.slice(offset, offset + limit);
   if (jobs.length === 0) {
-    return "No cron jobs loaded.";
+    const history = scheduler.recentRuns(limit, offset).map(runSummary);
+    return history.length
+      ? JSON.stringify({ jobs: [], totalJobs: allJobs.length, offset, recentRuns: history })
+      : allJobs.length
+        ? "No cron jobs on this page."
+        : "No cron jobs loaded.";
   }
 
-  return markdownTable(
-    ["Name", "Type", "Schedule", "Status", "Active", "Limit", "Last Run", "Runs"],
+  const table = markdownTable(
+    [
+      "Name",
+      "Type",
+      "Schedule",
+      "Status",
+      "Active",
+      "Limit",
+      "Last Run",
+      "Runs",
+      "Outcome",
+      "Description",
+    ],
     jobs.map((j) => [
       j.id,
       j.type,
       j.schedule,
-      j.enabled ? "enabled" : "disabled",
+      j.runningCount > 0
+        ? "running"
+        : j.activeCount > 0
+          ? "reporting"
+          : j.enabled
+            ? "enabled"
+            : "disabled",
       String(j.activeCount),
       String(j.maxConcurrentRuns),
       j.lastRun ?? "never",
       String(j.fireCount),
+      j.latestRun?.status ?? "never-run",
+      j.description.slice(0, 1_000),
     ]),
   );
+  const recentRuns = scheduler.recentRuns(limit).map(runSummary);
+  return `${table}\n\nShowing ${jobs.length} of ${allJobs.length} loaded jobs (offset ${offset}).${recentRuns.length ? `\n\nRecent executions (not current running state):\n${JSON.stringify(recentRuns)}` : ""}`;
 }
 
 /**
@@ -142,18 +177,42 @@ export interface CronDeps {
 }
 
 /**
- * Build the five cron_* tool definitions. Enable/disable is a `cron_update { enabled }` call; run
- * outcomes go to CronOptions.onRunComplete (the plugin keeps no history). Deps are resolved per
- * call — the scheduler exists only after the plugin starts, but Plugin.tools is collected by
- * createAgent() before that.
+ * Build cron management and inspection tools. Enable/disable is a `cron_update { enabled }` call.
+ * Run history is private to the plugin. Deps are resolved per call — the scheduler exists only
+ * after the plugin starts, but Plugin.tools is collected by createAgent() before that.
  */
 export function buildCronTools(deps: () => CronDeps): Tool[] {
   return [
     tool({
       name: "cron_list",
-      description: "List all scheduled cron jobs with their status, schedule, and type.",
-      input: z.object({}),
-      execute: () => cronList(deps().scheduler),
+      description:
+        "List scheduled jobs with enabled state, schedules, live capacity and bounded recent executions. History does not prove current activity or domain success.",
+      input: z
+        .object({
+          limit: z.number().int().min(1).max(100).optional(),
+          offset: z.number().int().min(0).max(10_000).optional(),
+          includeDisabled: z.boolean().optional(),
+        })
+        .strict(),
+      execute: ({ limit, offset, includeDisabled }) =>
+        cronList(deps().scheduler, limit, offset, includeDisabled),
+    }),
+    tool({
+      name: "cron_details",
+      description:
+        "Inspect a current or historical cron job: current definition, actual active executions and persisted outcomes with bounded output/errors. This does not start work.",
+      input: z
+        .object({
+          id: z
+            .string()
+            .regex(/^[a-zA-Z0-9_-]+$/)
+            .max(200),
+          recentRunsLimit: z.number().int().min(1).max(100).optional(),
+          offset: z.number().int().min(0).max(10_000).optional(),
+        })
+        .strict(),
+      execute: ({ id, recentRunsLimit, offset }) =>
+        JSON.stringify(deps().scheduler.details(id, recentRunsLimit, offset)),
     }),
     tool({
       name: "cron_add",
@@ -185,4 +244,22 @@ export function buildCronTools(deps: () => CronDeps): Tool[] {
       execute: ({ id }) => deps().scheduler.triggerJob(id),
     }),
   ];
+}
+
+/**
+ * Keep listing output small; detailed output belongs to cron_details.
+ */
+function runSummary(run: JobRunRecord) {
+  return {
+    id: run.id,
+    jobId: run.jobId,
+    status: run.status,
+    executionId: run.executionId,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    durationMs: run.durationMs,
+    reason: run.reason,
+    error: run.error?.slice(0, 200),
+    description: run.definition.description,
+  };
 }

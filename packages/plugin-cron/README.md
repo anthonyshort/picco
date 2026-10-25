@@ -1,6 +1,6 @@
 # `@picco-agent/plugin-cron`
 
-Cron scheduler plugin for picco. The agent manages YAML job files itself via `cron_*` tools (`cron_list`, `cron_add`, `cron_update`, `cron_remove`, `cron_run`). Jobs run in the agent's configured sandbox.
+Cron scheduler plugin for picco. The agent manages YAML job files itself via `cron_*` tools (`cron_list`, `cron_details`, `cron_add`, `cron_update`, `cron_remove`, `cron_run`). Jobs run in the agent's configured sandbox.
 
 ## Install
 
@@ -21,7 +21,7 @@ const agent = createAgent({
   plugins: [
     cron({
       jobDir: "./cron",
-      // Optional: wire run outcomes to your own log or store.
+      // Optional: observe outcomes after private run history has been saved.
       onRunComplete: (run) => console.log(run.jobId, run.status),
     }),
   ],

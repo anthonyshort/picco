@@ -241,6 +241,29 @@ configuration it started with. Independent agent runs receive unique sessions.
 Their workers are closed after success, failure or timeout, before completion is
 reported. Session files remain available for inspection.
 
+## Inspect scheduled work
+
+The cron plugin provides `cron_list` for a bounded overview and `cron_details` for
+one job's current definition, active executions and persisted output/errors:
+
+```text
+cron_list({ includeDisabled: true, limit: 20 })
+cron_details({ id: "weekly-digest", recentRunsLimit: 10 })
+```
+
+Private run history survives restart, including removed jobs. Records left running
+by the previous process become interrupted, not active. Capacity skips have
+separate records and never count as started work. History retains up to 1,000
+records for 30 days, with output capped at 8,192 characters by default; configure
+these bounds with `cron({ history: { maxRecords, retentionDays, maxOutputChars } })`.
+
+Historical definition snapshots exclude prompt and command bodies. They record
+job model overrides when available, rather than guessing inherited runtime model
+metadata. Completion follows execution finalisation and ephemeral worker cleanup;
+`onRunComplete` observes the saved result and does not own critical cleanup.
+A successful run still does not prove a domain action or notification succeeded;
+inspect the owning plugin's evidence.
+
 ## Send notifications
 
 Use the notifications plugin for unattended updates, such as a completed cron run. Configure named destinations with transport adapters; the agent chooses a destination without supplying a recipient or credentials:
