@@ -251,11 +251,13 @@ cron_list({ includeDisabled: true, limit: 20 })
 cron_details({ id: "weekly-digest", recentRunsLimit: 10 })
 ```
 
-Private run history survives restart, including removed jobs. Records left running
-by the previous process become interrupted, not active. Capacity skips have
-separate records and never count as started work. History retains up to 1,000
-records for 30 days, with output capped at 8,192 characters by default; configure
-these bounds with `cron({ history: { maxRecords, retentionDays, maxOutputChars } })`.
+The plugin saves run metadata and bounded output in its private `runs.sqlite` database, so history survives restart and job removal. Records left running by the previous process become interrupted because the scheduler cannot prove what completed before it stopped. Capacity skips have separate records and never count as started work.
+
+History keeps up to 1,000 records for at most 30 days, with output capped at 8,192 characters by default. The first limit reached removes old completed records: one run every five minutes fills 1,000 records in about 3.5 days. Configure these bounds with `cron({ history: { maxRecords, retentionDays, maxOutputChars } })`. This is a summary history, so keep full reports or logs in your workflow’s files.
+
+SQLite handles transactions, retention and paginated lookups without rewriting the whole history. One scheduler holds the database lock until its active work stops; a second scheduler cannot open the same file and interrupt its runs. Use the cron tools to inspect history while the scheduler runs. This plugin requires Node 22.13 or newer for the built-in SQLite driver.
+
+The earlier JSON history format was never released. This change uses a new database file and leaves any existing `runs.json` untouched rather than importing or deleting it.
 
 Historical definition snapshots exclude prompt and command bodies. They record
 job model overrides when available, rather than guessing inherited runtime model

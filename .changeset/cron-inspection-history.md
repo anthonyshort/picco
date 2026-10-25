@@ -2,4 +2,4 @@
 "@picco-agent/plugin-cron": minor
 ---
 
-Add job details, bounded persistent run history, live execution correlation and restart interruption recovery to the stock cron plugin.
+Add job details and bounded SQLite run history with paginated lookups, live execution correlation and restart interruption recovery. The cron plugin requires Node 22.13 or newer.

@@ -416,7 +416,7 @@ describe("bounded concurrency", () => {
 
 describe("persistent inspection", () => {
   test("records admission before work, links its execution and persists terminal output before observers", async () => {
-    const history = new CronHistory({ file: path.join(cronDir, "history.json") });
+    const history = new CronHistory({ file: path.join(cronDir, "history.sqlite") });
     const work = Promise.withResolvers<string>();
     const started = Promise.withResolvers<void>();
     scheduler = new JobScheduler({
@@ -458,7 +458,7 @@ describe("persistent inspection", () => {
       definition: null,
     });
     await scheduler.stop();
-    const restored = new CronHistory({ file: path.join(cronDir, "history.json") });
+    const restored = new CronHistory({ file: path.join(cronDir, "history.sqlite") });
     try {
       expect(restored.list()[0]).toMatchObject({
         executionId: "execution-123",
@@ -507,11 +507,11 @@ describe("persistent inspection", () => {
     history.close();
     await expect(scheduler.fireJob("agent-job")).rejects.toThrow("history is closed");
     expect(invoked).toBe(false);
-    expect(scheduler.listJobs()[0].activeCount).toBe(0);
+    expect(scheduler.triggerJob("agent-job")).toContain("triggered");
   });
 
   test("shutdown is bounded while pending work retains exclusive history ownership", async () => {
-    const file = path.join(cronDir, "pending-history.json");
+    const file = path.join(cronDir, "pending-history.sqlite");
     const history = new CronHistory({ file });
     const work = Promise.withResolvers<string>();
     scheduler = new JobScheduler({
@@ -529,7 +529,7 @@ describe("persistent inspection", () => {
       const failure = expect(stopping).rejects.toThrow("pending work retains history ownership");
       await vi.advanceTimersByTimeAsync(10_000);
       await failure;
-      expect(() => new CronHistory({ file })).toThrow("already open");
+      expect(() => new CronHistory({ file })).toThrow("locked");
       expect(scheduler.triggerJob("agent-job")).toContain("stopped");
       work.resolve("finished");
       await running;

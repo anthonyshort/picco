@@ -180,7 +180,7 @@ export class JobScheduler {
       runningCount: [...this.active.values()].filter((run) => run.jobId === job.id).length,
       lastRun: job.execution.lastRun,
       fireCount: job.execution.fireCount,
-      latestRun: this.history.list(job.id)[0],
+      latestRun: this.history.list(job.id, 1)[0],
     }));
   }
 
@@ -189,18 +189,19 @@ export class JobScheduler {
    */
   details(id: string, limit = 10, offset = 0) {
     const definition = this.jobs.get(id)?.config;
-    const recentRuns = this.history.list(id);
+    const recentRuns = this.history.list(id, limit, offset);
+    const totalRuns = this.history.count(id);
     const activeRuns = [...this.active.values()].filter((run) => run.jobId === id);
     return {
-      found: Boolean(definition || recentRuns.length || activeRuns.length),
+      found: Boolean(definition || totalRuns || activeRuns.length),
       id,
       scheduled: Boolean(definition),
       definition: definition ? structuredClone(definition) : null,
       current: this.listJobs().find((job) => job.id === id) ?? null,
       activeRuns: activeRuns.map((run) => structuredClone(run)),
-      recentRuns: recentRuns.slice(offset, offset + limit),
-      totalRuns: recentRuns.length,
-      nextOffset: offset + limit < recentRuns.length ? offset + limit : null,
+      recentRuns,
+      totalRuns,
+      nextOffset: offset + limit < totalRuns ? offset + limit : null,
     };
   }
 
@@ -208,7 +209,7 @@ export class JobScheduler {
    * List retained history without interpreting it as current process activity.
    */
   recentRuns(limit = 20, offset = 0): JobRunRecord[] {
-    return this.history.list().slice(offset, offset + limit);
+    return this.history.list(undefined, limit, offset);
   }
 
   /**
@@ -509,14 +510,7 @@ export class JobScheduler {
   private buildLoadedJob(config: JobConfig): ScheduledJob {
     let execution = this.executions.get(config.id);
     if (!execution) {
-      const completed = this.history
-        .list(config.id)
-        .filter((run) => run.status === "success" || run.status === "error");
-      execution = {
-        activeCount: 0,
-        lastRun: completed[0]?.startedAt ?? null,
-        fireCount: completed.length,
-      };
+      execution = { activeCount: 0, ...this.history.completed(config.id) };
       this.executions.set(config.id, execution);
     }
     return {

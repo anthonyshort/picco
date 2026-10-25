@@ -203,10 +203,7 @@ export function buildCronTools(deps: () => CronDeps): Tool[] {
         "Inspect a current or historical cron job: current definition, actual active executions and persisted outcomes with bounded output/errors. This does not start work.",
       input: z
         .object({
-          id: z
-            .string()
-            .regex(/^[a-zA-Z0-9_-]+$/)
-            .max(200),
+          id: z.string().regex(/^[a-zA-Z0-9_-]+$/),
           recentRunsLimit: z.number().int().min(1).max(100).optional(),
           offset: z.number().int().min(0).max(10_000).optional(),
         })

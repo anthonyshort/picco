@@ -62,7 +62,7 @@ export function cron(options: CronOptions = {}): Plugin {
         });
 
       const history = new CronHistory({
-        file: ctx.filePath("runs.json"),
+        file: ctx.filePath("runs.sqlite"),
         history: options.history,
       });
       const scheduler = new JobScheduler({

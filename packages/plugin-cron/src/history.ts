@@ -1,30 +1,15 @@
-import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import * as z from "zod";
 
-/**
- * Bound the persisted snapshot before parsing untrusted or damaged state.
- */
-const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
 /**
  * Hard caps bound validated configuration and persisted values consistently.
  */
 const MAX_RECORDS = 10_000;
 const MAX_OUTPUT_CHARS = 16_384;
 /**
- * History configuration also bounds in-memory scheduler use.
+ * Bound stored history and the scheduler’s default query page.
  */
 const HistoryOptionsSchema = z.object({
   maxRecords: z.number().int().min(1).max(MAX_RECORDS).default(1_000),
@@ -47,7 +32,7 @@ const DefinitionSnapshotSchema = z.object({
  */
 export const JobRunRecordSchema = z.object({
   id: z.string().uuid(),
-  jobId: z.string().min(1).max(200),
+  jobId: z.string().min(1),
   startedAt: z.iso.datetime(),
   finishedAt: z.iso.datetime().optional(),
   durationMs: z.number().nonnegative(),
@@ -76,68 +61,97 @@ interface HistoryStoreOptions {
   history?: CronHistoryOptions;
 }
 /**
- * Atomic snapshots make each persisted transition visible in full.
- */
-const HistoryFileSchema = z.object({
-  version: z.literal(1),
-  runs: z.array(JobRunRecordSchema).max(MAX_RECORDS),
-});
-
-/**
- * Own one bounded history snapshot. A file-backed store holds an exclusive process lock.
+ * Store run metadata in one database, with one scheduler owning it until close.
  */
 export class CronHistory {
-  private runs: JobRunRecord[] = [];
+  private readonly database: DatabaseSync;
   private readonly options: z.output<typeof HistoryOptionsSchema>;
-  private readonly file?: string;
-  private readonly lock?: string;
   private closed = false;
 
   constructor(opts: HistoryStoreOptions = {}) {
     this.options = HistoryOptionsSchema.parse(opts.history ?? {});
-    this.file = opts.file;
-    if (!this.file) return;
-    mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
-    this.lock = `${this.file}.lock`;
-    acquireLock(this.lock);
+    if (opts.file) mkdirSync(path.dirname(opts.file), { recursive: true, mode: 0o700 });
+    this.database = new DatabaseSync(opts.file ?? ":memory:");
     try {
-      if (existsSync(this.file)) {
-        if (statSync(this.file).size > MAX_HISTORY_BYTES)
-          throw new Error("Cron history exceeds its size limit");
-        this.runs = HistoryFileSchema.parse(JSON.parse(readFileSync(this.file, "utf8"))).runs;
-      }
+      if (opts.file) chmodSync(opts.file, 0o600);
+      this.database.exec(`
+        PRAGMA locking_mode = EXCLUSIVE;
+        BEGIN EXCLUSIVE;
+        CREATE TABLE IF NOT EXISTS runs (
+          id TEXT PRIMARY KEY,
+          jobId TEXT NOT NULL,
+          startedAt TEXT NOT NULL,
+          finishedAt TEXT,
+          durationMs REAL NOT NULL,
+          status TEXT NOT NULL,
+          definition TEXT NOT NULL,
+          executionId TEXT,
+          output TEXT,
+          error TEXT,
+          reason TEXT,
+          outputTruncated INTEGER,
+          finalisationErrors TEXT
+        );
+        CREATE INDEX IF NOT EXISTS runs_started ON runs(startedAt DESC);
+        CREATE INDEX IF NOT EXISTS runs_job_started ON runs(jobId, startedAt DESC);
+      `);
       const now = new Date().toISOString();
-      this.runs = this.runs.map((run) =>
-        run.status === "running"
-          ? {
-              ...run,
-              status: "interrupted" as const,
-              finishedAt: now,
-              durationMs: Math.max(0, Date.parse(now) - Date.parse(run.startedAt)),
-              reason:
-                "The previous scheduler stopped before recording completion; external outcomes may be unknown.",
-            }
-          : run,
-      );
-      this.persist(this.runs);
+      this.database
+        .prepare(`
+        UPDATE runs SET status = 'interrupted', finishedAt = ?,
+          durationMs = MAX(0, (julianday(?) - julianday(startedAt)) * 86400000),
+          reason = 'The previous scheduler stopped before recording completion; external outcomes may be unknown.'
+        WHERE status = 'running'
+      `)
+        .run(now, now);
+      this.prune();
+      this.database.exec("COMMIT");
     } catch (err) {
-      this.close();
+      this.database.close();
       throw err;
     }
   }
 
   /**
-   * Return newest records first; callers cannot mutate the stored snapshot.
+   * Read only the requested page, newest first, optionally restricted to one job.
    */
-  list(jobId?: string): JobRunRecord[] {
-    return this.runs
-      .filter((run) => !jobId || run.jobId === jobId)
-      .map((run) => structuredClone(run))
-      .reverse();
+  list(jobId?: string, limit = this.options.maxRecords, offset = 0): JobRunRecord[] {
+    const query = this.database.prepare(`
+      SELECT * FROM runs ${jobId === undefined ? "" : "WHERE jobId = ?"}
+      ORDER BY startedAt DESC, rowid DESC LIMIT ? OFFSET ?
+    `);
+    const rows = jobId === undefined ? query.all(limit, offset) : query.all(jobId, limit, offset);
+    return rows.map(readRun);
   }
 
   /**
-   * Commit a run transition before it becomes observable to callers or starts work.
+   * Count retained runs without loading their output or definition snapshots.
+   */
+  count(jobId?: string): number {
+    const query = this.database.prepare(
+      `SELECT count(*) AS count FROM runs ${jobId === undefined ? "" : "WHERE jobId = ?"}`,
+    );
+    return z
+      .object({ count: z.number() })
+      .parse(jobId === undefined ? query.get() : query.get(jobId)).count;
+  }
+
+  /**
+   * Restore completion counters without treating skipped or interrupted runs as completed work.
+   */
+  completed(jobId: string) {
+    return z.object({ fireCount: z.number(), lastRun: z.string().nullable() }).parse(
+      this.database
+        .prepare(`
+        SELECT count(*) AS fireCount, max(startedAt) AS lastRun FROM runs
+        WHERE jobId = ? AND status IN ('success', 'error')
+      `)
+        .get(jobId),
+    );
+  }
+
+  /**
+   * Commit a run transition and retention changes before starting work or reporting completion.
    */
   save(input: JobRunRecord): void {
     if (this.closed) throw new Error("Cron history is closed");
@@ -150,86 +164,94 @@ export class CronHistory {
         (input.output?.length ?? 0) > this.options.maxOutputChars ||
         (input.error?.length ?? 0) > this.options.maxOutputChars,
     });
-    const existing = this.runs.findIndex((entry) => entry.id === run.id);
-    const next = this.runs.slice();
-    if (existing < 0) next.push(run);
-    else next[existing] = run;
-    this.persist(next);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database
+        .prepare(`
+        INSERT INTO runs (
+          id, jobId, startedAt, finishedAt, durationMs, status, definition,
+          executionId, output, error, reason, outputTruncated, finalisationErrors
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          jobId = excluded.jobId, startedAt = excluded.startedAt,
+          finishedAt = excluded.finishedAt, durationMs = excluded.durationMs,
+          status = excluded.status, definition = excluded.definition,
+          executionId = excluded.executionId, output = excluded.output,
+          error = excluded.error, reason = excluded.reason,
+          outputTruncated = excluded.outputTruncated, finalisationErrors = excluded.finalisationErrors
+      `)
+        .run(
+          run.id,
+          run.jobId,
+          run.startedAt,
+          run.finishedAt ?? null,
+          run.durationMs,
+          run.status,
+          JSON.stringify(run.definition),
+          run.executionId ?? null,
+          run.output ?? null,
+          run.error ?? null,
+          run.reason ?? null,
+          run.outputTruncated === undefined ? null : Number(run.outputTruncated),
+          run.finalisationErrors === undefined ? null : JSON.stringify(run.finalisationErrors),
+        );
+      this.prune();
+      this.database.exec("COMMIT");
+    } catch (err) {
+      this.database.exec("ROLLBACK");
+      throw err;
+    }
   }
 
   /**
-   * Release exclusive ownership after active runs and completion reporting have stopped.
+   * Close after active work settles; SQLite releases ownership even after a process crash.
    */
   close(): void {
     if (this.closed) return;
+    this.database.close();
     this.closed = true;
-    if (this.lock) unlinkSync(this.lock);
   }
 
   /**
-   * Prune terminal records while retaining active work, then atomically replace the snapshot.
+   * Keep running work while bounding completed history by age and record count.
    */
-  private persist(input: JobRunRecord[]): void {
-    const cutoff = Date.now() - this.options.retentionDays * 86_400_000;
-    const retained = input.filter(
-      (run) => run.status === "running" || Date.parse(run.finishedAt ?? run.startedAt) >= cutoff,
-    );
-    const active = retained.filter((run) => run.status === "running");
-    if (active.length > this.options.maxRecords)
+  private prune(): void {
+    const cutoff = new Date(Date.now() - this.options.retentionDays * 86_400_000).toISOString();
+    this.database
+      .prepare(`
+      DELETE FROM runs WHERE status != 'running' AND coalesce(finishedAt, startedAt) < ?
+    `)
+      .run(cutoff);
+    const { count } = z
+      .object({ count: z.number() })
+      .parse(
+        this.database.prepare("SELECT count(*) AS count FROM runs WHERE status = 'running'").get(),
+      );
+    if (count > this.options.maxRecords)
       throw new Error("Cron history active-record capacity reached");
-    const keep = new Set(
-      retained
-        .filter((run) => run.status !== "running")
-        .slice(-(this.options.maxRecords - active.length))
-        .map((run) => run.id),
-    );
-    if (active.length === this.options.maxRecords) keep.clear();
-    const next = retained.filter((run) => run.status === "running" || keep.has(run.id));
-    if (this.file) {
-      const text = JSON.stringify({ version: 1, runs: next }) + "\n";
-      if (Buffer.byteLength(text) > MAX_HISTORY_BYTES)
-        throw new Error("Cron history exceeds its size limit");
-      const temporary = `${this.file}.${randomUUID()}.tmp`;
-      try {
-        const descriptor = openSync(temporary, "wx", 0o600);
-        try {
-          writeFileSync(descriptor, text);
-          fsyncSync(descriptor);
-        } finally {
-          closeSync(descriptor);
-        }
-        renameSync(temporary, this.file);
-      } finally {
-        if (existsSync(temporary)) unlinkSync(temporary);
-      }
-    }
-    this.runs = next;
+    this.database
+      .prepare(`
+      DELETE FROM runs WHERE status != 'running' AND id NOT IN (
+        SELECT id FROM runs WHERE status != 'running'
+        ORDER BY startedAt DESC, rowid DESC LIMIT ?
+      )
+    `)
+      .run(this.options.maxRecords - count);
   }
 }
 
 /**
- * Refuse a second live scheduler; reclaim only locks whose owning process has exited.
+ * Decode the two structured columns and SQLite nulls before validating the run shape.
  */
-function acquireLock(file: string): void {
-  if (existsSync(file)) {
-    const pid = z
-      .number()
-      .int()
-      .positive()
-      .safe()
-      .parse(Number(readFileSync(file, "utf8")));
-    try {
-      process.kill(pid, 0);
-      throw new Error("Cron history is already open by a live scheduler");
-    } catch (err) {
-      if (!(err instanceof Error && "code" in err && err.code === "ESRCH")) throw err;
-      unlinkSync(file);
-    }
-  }
-  const descriptor = openSync(file, "wx", 0o600);
-  try {
-    writeFileSync(descriptor, String(process.pid));
-  } finally {
-    closeSync(descriptor);
-  }
+function readRun(input: unknown): JobRunRecord {
+  const row = z.record(z.string(), z.unknown()).parse(input);
+  return JobRunRecordSchema.parse({
+    ...Object.fromEntries(Object.entries(row).map(([key, value]) => [key, value ?? undefined])),
+    definition: JSON.parse(z.string().parse(row.definition)),
+    finalisationErrors:
+      row.finalisationErrors === null
+        ? undefined
+        : JSON.parse(z.string().parse(row.finalisationErrors)),
+    outputTruncated: row.outputTruncated === null ? undefined : Boolean(row.outputTruncated),
+  });
 }
