@@ -512,7 +512,7 @@ describe("createAgent", () => {
 
       const spawn = runtime.spawns[0]!;
       expect(spawn.spec.bridge.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/call$/);
-      expect(spawn.spec.tools!.map((t) => t.name)).toEqual(["get_weather"]);
+      expect(spawn.spec.tools!.map((t) => t.name)).toEqual(["get_weather", "reload"]);
       // The token is a secret: it rides bridge.token (→ bridge.json), never the (argv-bound) pi config.
       expect(JSON.stringify(spawn.spec.pi)).not.toContain(spawn.spec.bridge.token);
 
@@ -530,7 +530,7 @@ describe("createAgent", () => {
       );
     });
 
-    test("no tools → empty tool manifest, no mcp servers", async () => {
+    test("the default reload tool is available without configured tools", async () => {
       const { agent, runtime } = agentWith({});
       await agent.start({ handleSignals: false });
 
@@ -540,7 +540,7 @@ describe("createAgent", () => {
       // The bridge always runs (session-scoped tools may appear later), but
       // the manifest tells the worker there is nothing to register.
       expect(spec.bridge.url).toMatch(/\/call$/);
-      expect(spec.tools).toEqual([]);
+      expect(spec.tools?.map((entry) => entry.name)).toEqual(["reload"]);
       expect(spec.pi.mcpServers).toBeUndefined();
     });
 

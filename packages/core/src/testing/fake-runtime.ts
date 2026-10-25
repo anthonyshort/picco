@@ -23,6 +23,10 @@ export interface FakeRuntimeProcessOptions {
    */
   handlePrompt?: boolean;
   /**
+   * Fail the bundled resource reload command without a model request.
+   */
+  reloadError?: boolean;
+  /**
    * Simulate a crash: the process dies when it receives a prompt.
    */
   dieOnPrompt?: boolean;
@@ -153,6 +157,24 @@ export class FakeRuntimeProcess implements RuntimeProcess {
 
     switch (msg.type) {
       case "prompt": {
+        if (msg.message === "/picco-reload") {
+          this.prompts.push(String(msg.message));
+          if (this.behavior.reloadError)
+            this.push({
+              type: "extension_error",
+              extensionPath: "command:picco-reload",
+              event: "command",
+              error: "bad resource fixture",
+            });
+          this.push({
+            type: "response",
+            command: "prompt",
+            id,
+            success: true,
+            data: { disposition: "handled" },
+          });
+          return;
+        }
         if (this.behavior.dieOnPrompt) {
           this.die(1, null);
           return;
@@ -182,6 +204,17 @@ export class FakeRuntimeProcess implements RuntimeProcess {
         this.push({ type: "agent_settled" });
         return;
       }
+      case "get_commands":
+        this.push({
+          type: "response",
+          command: "get_commands",
+          id,
+          success: true,
+          data: {
+            commands: [{ name: "picco-reload", description: "Reload", source: "extension" }],
+          },
+        });
+        return;
       case "get_last_assistant_text":
         this.push({
           type: "response",

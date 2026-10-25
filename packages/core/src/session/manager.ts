@@ -7,6 +7,7 @@ import {
   type ExecutionFinalisation,
   type ExecutionOutcome,
 } from "./execution.js";
+import type { ReloadOperation } from "./reload.js";
 import { mkdir } from "node:fs/promises";
 import { RpcSession } from "./rpc.js";
 import { silentLogger } from "../utils/logger.js";
@@ -186,6 +187,9 @@ interface Slot {
    * (eviction, crash, restart) never set it, so they resume.
    */
   freshNextSpawn?: boolean;
+  ephemeral?: boolean;
+  reload?: ReloadOperation;
+  reloadDone?: () => void;
   released?: boolean;
   closing?: boolean;
   quarantined?: boolean;
@@ -275,14 +279,20 @@ export class SessionManager {
     const { controller } = execution;
     void this.enqueue(slot, async () => {
       if (opts?.user) slot.currentUser = opts.user;
-      await this.execute(execution, slot, async () => {
-        const live = await this.ensureLive(slot, opts?.session);
-        live.lastActiveAt = new Date();
-        const result = await this.driveTurn(controller, live.rpc, prompt, opts?.timeoutMs);
-        live.turns++;
-        live.lastActiveAt = new Date();
-        return result;
-      });
+      slot.ephemeral ??= opts?.session?.ephemeral ?? false;
+      await this.execute(
+        execution,
+        slot,
+        async () => {
+          const live = await this.ensureLive(slot, opts?.session);
+          live.lastActiveAt = new Date();
+          const result = await this.driveTurn(controller, live.rpc, prompt, opts?.timeoutMs);
+          live.turns++;
+          live.lastActiveAt = new Date();
+          return result;
+        },
+        Boolean(slot.ephemeral),
+      );
     });
 
     return controller.turn;
@@ -365,6 +375,7 @@ export class SessionManager {
       queueTail: Promise.resolve(),
       pending: 0,
     };
+    slot.ephemeral = true;
     const execution = this.createExecution(slot);
     const { controller } = execution;
     void (async () => {
@@ -523,6 +534,7 @@ export class SessionManager {
     let primary: Error | undefined;
     const errors: Error[] = [];
     try {
+      await this.performReload(slot);
       if (execution.abort.signal.aborted) throw execution.abort.signal.reason;
       result = await Promise.race([operation(), execution.cancelled]);
     } catch (err) {
@@ -571,6 +583,7 @@ export class SessionManager {
         quarantined = true;
       }
     }
+    if (!close && !primary && !errors.length) await this.performReload(slot);
     if (close || primary || errors.length || slot.closing || this.stopped) {
       try {
         await this.killLive(slot, !quarantined);
@@ -604,6 +617,56 @@ export class SessionManager {
         executionId: execution.ref.id,
         durationMs: Date.now() - executionStartedAt,
       });
+    }
+  }
+
+  /**
+   * Request a serialised resource reload without starting a model turn.
+   */
+  requestReload(ref: SessionRef): ReloadOperation {
+    const slot = this.slots.get(fullKey(ref.source, ref.key));
+    if (slot?.reload?.status === "scheduled") return slot.reload;
+    const operation: ReloadOperation = {
+      id: randomUUID(),
+      status: !slot?.live || slot.ephemeral ? "not-needed" : "scheduled",
+      completed: Promise.resolve(),
+    };
+    if (!slot) return operation;
+    slot.reload = operation;
+    if (operation.status === "not-needed") return operation;
+    operation.completed = new Promise<void>((resolve) => {
+      slot.reloadDone = resolve;
+    });
+    void this.enqueue(slot, () => this.performReload(slot));
+    return operation;
+  }
+
+  /**
+   * Consume a pending reload before any later queued prompt.
+   */
+  private async performReload(slot: Slot): Promise<void> {
+    const operation = slot.reload;
+    if (!operation || operation.status !== "scheduled") return;
+    const complete = slot.reloadDone;
+    try {
+      if (!slot.live || this.stopped) operation.status = "interrupted";
+      else {
+        await slot.live.rpc.reload();
+        if (operation.status === "scheduled") operation.status = "completed";
+      }
+    } catch (err) {
+      if (operation.status !== "scheduled") return;
+      operation.status = "failed";
+      operation.error = "Resource reload failed; inspect session diagnostics.";
+      this.logger.error("resource reload failed", {
+        ...slot.ref,
+        reloadId: operation.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await this.killLive(slot);
+    } finally {
+      complete?.();
+      if (slot.reload === operation) slot.reloadDone = undefined;
     }
   }
 
@@ -662,6 +725,8 @@ export class SessionManager {
    */
   private handle(slot: Slot): Session {
     return {
+      reload: () => this.requestReload(slot.ref),
+      reloadStatus: () => slot.reload,
       key: slot.ref.key,
       cwd: slot.live?.cwd ?? this.defaultCwd(slot.ref),
       run: (prompt, opts) => this.run(slot.ref.source, slot.ref.key, prompt, opts),
@@ -688,6 +753,7 @@ export class SessionManager {
    * call it directly on their transient slot).
    */
   private async ensureLive(slot: Slot, opts?: SessionOptions): Promise<LiveSession> {
+    slot.ephemeral ??= opts?.ephemeral ?? false;
     if (slot.termination) await slot.termination;
     if (this.stopped) throw new Error("Session manager is stopped");
     if (slot.quarantined)
@@ -823,6 +889,11 @@ export class SessionManager {
   private async killLive(slot: Slot, release = true): Promise<void> {
     if (slot.termination) return slot.termination;
     this.opts.revokeSession?.(slot.ref);
+    if (slot.reload?.status === "scheduled") {
+      slot.reload.status = "interrupted";
+      slot.reloadDone?.();
+      slot.reloadDone = undefined;
+    }
     const live = slot.live;
     if (!live) return;
     slot.live = null;

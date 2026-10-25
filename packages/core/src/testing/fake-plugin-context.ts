@@ -202,6 +202,8 @@ export function createFakePluginContext(opts: FakePluginContextOptions = {}): Fa
    */
   function handle(state: FakeSessionState): Session {
     return {
+      reload: () => ({ id: "fake-reload", status: "completed", completed: Promise.resolve() }),
+      reloadStatus: () => undefined,
       key: state.key,
       cwd: state.cwd,
       run: (prompt: string, turnOpts?: TurnOptions) =>

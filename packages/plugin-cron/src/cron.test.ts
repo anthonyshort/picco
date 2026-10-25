@@ -114,7 +114,7 @@ describe("cron plugin", () => {
         prompt: "say hello",
         user: undefined,
         // No model/thinking on the job — nothing overrides the agent-wide pi config.
-        session: { pi: {} },
+        session: { ephemeral: true, pi: {} },
       },
     ]);
   });
@@ -138,7 +138,7 @@ describe("cron plugin", () => {
 
     await vi.waitFor(() => expect(runs).toHaveLength(1));
     expect(ctx.turns[0]).toMatchObject({
-      session: { pi: { model: "anthropic/claude-sonnet-4-5", thinking: "high" } },
+      session: { ephemeral: true, pi: { model: "anthropic/claude-sonnet-4-5", thinking: "high" } },
     });
   });
 

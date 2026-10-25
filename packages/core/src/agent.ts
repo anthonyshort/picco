@@ -11,6 +11,7 @@ import { createLogger, scopeLogger } from "./utils/logger.js";
 import { SessionManager } from "./session/manager.js";
 import type { Tool } from "./tools/tool.js";
 import type { Turn } from "./session/turn.js";
+import { tool as defineTool } from "./tools/tool.js";
 import type {
   AgentConfig,
   AgentHandle,
@@ -90,6 +91,28 @@ export function createAgent(config: AgentConfig): AgentHandle {
   const commands = collectCommands(plugins);
 
   const tools = collectTools(config, plugins);
+  addTool(
+    tools,
+    defineTool({
+      name: "reload",
+      description:
+        "Reload this conversation's skills, extensions, prompts and instructions after this response finishes. Returns scheduled; use action status later to check. Does not restart the server or install packages.",
+      input: z.object({ action: z.enum(["reload", "status"]).default("reload") }).strict(),
+      execute({ action }, ctx) {
+        if (ctx.caller.kind !== "session") throw new Error("Reload requires a session");
+        const session = ensureManager().namespace(ctx.caller.ref.source).get(ctx.caller.ref.key);
+        if (!session) return JSON.stringify({ status: "not-needed" });
+        const operation = action === "status" ? session.reloadStatus() : session.reload();
+        return JSON.stringify(
+          operation
+            ? { id: operation.id, status: operation.status, error: operation.error }
+            : { status: "never-requested" },
+        );
+      },
+    }),
+    "Picco",
+  );
+
   let manager: SessionManager | null = null;
   let bridge: ToolBridge | null = null;
   let started = false;
