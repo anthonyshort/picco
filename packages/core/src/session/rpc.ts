@@ -1,3 +1,4 @@
+import * as z from "zod";
 import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
 import { parseJsonl, JsonlWriter, type JsonObject } from "./jsonl.js";
 import { silentLogger } from "../utils/logger.js";
@@ -5,6 +6,28 @@ import type { Logger, RuntimeProcess } from "../types.js";
 import type { TurnEvent } from "./turn.js";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * Structured pi-subagents tool metadata exposed by Pi's existing RPC events.
+ */
+const SubagentArgsSchema = z.object({
+  subagent_type: z.string().optional(),
+  model: z.string().optional(),
+});
+const SubagentResultSchema = z.object({
+  details: z
+    .object({
+      agentId: z.string().optional(),
+      modelName: z.string().optional(),
+      status: z.string().optional(),
+      error: z.string().optional(),
+    })
+    .optional(),
+  content: z
+    .array(z.object({ type: z.string(), text: z.string().optional() }))
+    .max(100)
+    .optional(),
+});
 
 interface PendingRequest {
   resolve: (msg: JsonObject) => void;
@@ -275,6 +298,15 @@ export class RpcSession {
       const toolCallId = String(msg.toolCallId ?? "");
       const tool = String(msg.toolName ?? "?");
       this.logger.log("tool start", { key: this.key, tool, toolCallId });
+      if (tool === "Agent") {
+        const args = SubagentArgsSchema.safeParse(msg.args);
+        this.logger.log("subagent start", {
+          key: this.key,
+          toolCallId,
+          subagentType: args.data?.subagent_type,
+          requestedModel: args.data?.model,
+        });
+      }
       this.emit({ type: "tool_start", tool, toolCallId });
       return;
     }
@@ -284,6 +316,7 @@ export class RpcSession {
       const tool = String(msg.toolName ?? "?");
       const isError = Boolean(msg.isError);
       this.logger.log("tool done", { key: this.key, tool, error: isError ? "yes" : "no" });
+      if (tool === "Agent") this.logSubagentResult(toolCallId, msg.result, isError);
       this.emit({ type: "tool_end", tool, toolCallId, isError });
       return;
     }
@@ -306,6 +339,26 @@ export class RpcSession {
         key: this.key,
         turn: Number(msg.turnIndex ?? 0),
       });
+    }
+  }
+
+  /**
+   * A subagent can fail while the outer Agent tool succeeds; use its reported status and error.
+   */
+  private logSubagentResult(toolCallId: string, result: unknown, isError: boolean): void {
+    const parsed = SubagentResultSchema.safeParse(result);
+    const details = parsed.data?.details;
+    const fields = { key: this.key, toolCallId, ...details };
+    if (isError || details?.status === "error" || details?.error) {
+      const error =
+        details?.error ??
+        parsed.data?.content
+          ?.filter((item) => item.type === "text")
+          .map((item) => item.text ?? "")
+          .join("\n");
+      this.logger.error("subagent failed", { ...fields, error });
+    } else {
+      this.logger.log("subagent result", fields);
     }
   }
 

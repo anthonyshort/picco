@@ -261,7 +261,7 @@ export function agentmail(options: AgentMailOptions): Plugin {
   }
   const client = new AgentMailClient({ apiKey });
   const port = options.port ?? createAgentMailPort(client, inboxId);
-  const source = options.source ?? createWebsocketEmailSource(client, inboxId);
+  let source = options.source;
   const seen = new Set<string>();
   let ctx: PluginContext | null = null;
   let retryTimer: NodeJS.Timeout | null = null;
@@ -316,6 +316,7 @@ export function agentmail(options: AgentMailOptions): Plugin {
    * keep working over HTTP) while the listener heals itself.
    */
   async function startSource(pluginCtx: PluginContext): Promise<void> {
+    source ??= createWebsocketEmailSource(client, inboxId, pluginCtx.logger);
     try {
       await source.start(handleInbound);
     } catch (err) {
@@ -415,7 +416,7 @@ export function agentmail(options: AgentMailOptions): Plugin {
       stopped = true;
       if (retryTimer) clearTimeout(retryTimer);
       retryTimer = null;
-      source.stop();
+      source?.stop();
     },
   };
 }

@@ -3,7 +3,7 @@ import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import * as z from "zod";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
-import { createLogger, THINKING_LEVELS } from "@picco-agent/core";
+import { createLogger, THINKING_LEVELS, type Logger } from "@picco-agent/core";
 import { assertValidSchedule, validateCronExpression } from "./schedule.js";
 
 /**
@@ -74,8 +74,6 @@ export type JobConfigUpdate = Partial<
   Omit<AgentJobConfig, "id" | "type"> & Omit<ScriptJobConfig, "id" | "type">
 >;
 
-const logger = createLogger("job-loader");
-
 /**
  * Loads job configs from YAML files.
  */
@@ -84,7 +82,10 @@ export class JobLoader {
 
   private configs = new Map<string, JobConfig>();
 
-  constructor(jobDir: string) {
+  constructor(
+    jobDir: string,
+    private readonly logger: Logger = createLogger("job-loader"),
+  ) {
     this.jobDir = jobDir;
 
     mkdirSync(this.jobDir, { recursive: true });
@@ -110,7 +111,7 @@ export class JobLoader {
           const result = JobConfigSchema.safeParse(parsed);
 
           if (!result.success) {
-            logger.warning(`skipping ${file} — invalid job config: ${result.error.message}`);
+            this.logger.warning(`skipping ${file} — invalid job config: ${result.error.message}`);
             continue;
           }
 
@@ -118,7 +119,7 @@ export class JobLoader {
 
           const check = validateCronExpression(config.schedule);
           if (!check.valid) {
-            logger.warning(
+            this.logger.warning(
               `skipping ${file} — invalid schedule "${config.schedule}": ${check.error}`,
             );
             continue;
@@ -126,11 +127,14 @@ export class JobLoader {
 
           configs.set(config.id, config);
         } catch (err) {
-          logger.error(`failed to read ${file}`, err);
+          this.logger.error(`failed to read ${file}`, err);
         }
       }
     } catch (err) {
-      logger.error("failed to read jobs directory — all jobs suspended until the next reload", err);
+      this.logger.error(
+        "failed to read jobs directory — all jobs suspended until the next reload",
+        err,
+      );
     }
 
     this.configs = configs;

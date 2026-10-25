@@ -1,10 +1,8 @@
 import { Cron as Croner } from "croner";
 import type { Cron } from "croner";
 import isEqual from "fast-deep-equal";
-import { createLogger, errorMessage, type ThinkingLevel } from "@picco-agent/core";
+import { createLogger, errorMessage, type ThinkingLevel, type Logger } from "@picco-agent/core";
 import type { JobConfig, JobConfigInput, JobConfigUpdate, JobLoader } from "./loader.js";
-
-const logger = createLogger("job-scheduler");
 
 const DEFAULT_SCRIPT_TIMEOUT = 300; // seconds
 
@@ -91,6 +89,7 @@ export type RunScript = (opts: {
 export type OnRunComplete = (run: JobRun) => void | Promise<void>;
 
 export interface JobSchedulerOptions {
+  logger?: Logger;
   loader: JobLoader;
   runAgent: RunAgent;
   runScript: RunScript;
@@ -105,12 +104,14 @@ export interface JobSchedulerOptions {
 export class JobScheduler {
   private jobs = new Map<string, ScheduledJob>();
   private executions = new Map<string, JobExecutionState>();
+  private readonly logger: Logger;
   private readonly loader: JobLoader;
   private readonly runAgent: RunAgent;
   private readonly runScript: RunScript;
   private readonly onRunComplete: OnRunComplete;
 
   constructor(options: JobSchedulerOptions) {
+    this.logger = options.logger ?? createLogger("job-scheduler");
     this.loader = options.loader;
     this.runAgent = options.runAgent;
     this.runScript = options.runScript;
@@ -187,7 +188,7 @@ export class JobScheduler {
       return `Job "${id}" skipped — concurrency limit ${job.config.maxConcurrentRuns} reached.`;
     }
     this.fireJob(id).catch((err) => {
-      logger.error(`triggered run failed for ${id}`, err);
+      this.logger.error(`triggered run failed for ${id}`, err);
     });
     return `Job "${id}" triggered — running in the background.`;
   }
@@ -217,13 +218,13 @@ export class JobScheduler {
         // New job — build and arm if enabled
         this.jobs.set(id, this.buildLoadedJob(config));
         if (config.enabled) this.startJobTimer(id);
-        logger.log(`loaded ${id}`);
+        this.logger.log(`loaded ${id}`);
       } else if (!isEqual(prevConfig, config)) {
         // Changed — disarm old, build new, arm if enabled
         this.stopJobTimer(id);
         this.jobs.set(id, this.buildLoadedJob(config));
         if (config.enabled) this.startJobTimer(id);
-        logger.log(`reloaded ${id}`);
+        this.logger.log(`reloaded ${id}`);
       }
     }
 
@@ -232,7 +233,7 @@ export class JobScheduler {
       if (!newConfigs.has(id)) {
         this.stopJobTimer(id);
         this.jobs.delete(id);
-        logger.log(`removed job ${id}`);
+        this.logger.log(`removed job ${id}`);
       }
     }
   }
@@ -249,7 +250,7 @@ export class JobScheduler {
     const config = job.config;
     const execution = job.execution;
     if (execution.activeCount >= config.maxConcurrentRuns) {
-      logger.log(`${job.id} skipped (concurrency limit reached)`);
+      this.logger.log(`${job.id} skipped (concurrency limit reached)`);
       return;
     }
 
@@ -257,7 +258,7 @@ export class JobScheduler {
     const startedAt = new Date(startedMs).toISOString();
     execution.activeCount++;
 
-    logger.log(`Starting ${job.id} (${job.config.type})`);
+    this.logger.log(`Starting ${job.id} (${job.config.type})`);
 
     const run: JobRun = { jobId: job.id, startedAt, durationMs: 0, status: "success" };
 
@@ -266,17 +267,17 @@ export class JobScheduler {
     } catch (err) {
       run.status = "error";
       run.error = errorMessage(err);
-      logger.error(`error ${job.id}`, err);
+      this.logger.error(`error ${job.id}`, err);
     } finally {
       run.durationMs = Date.now() - startedMs;
-      logger.log(`${job.id} — duration=${(run.durationMs / 1000).toFixed(1)}s`);
+      this.logger.log(`${job.id} — duration=${(run.durationMs / 1000).toFixed(1)}s`);
       execution.lastRun = startedAt;
       execution.fireCount++;
 
       try {
         await this.onRunComplete(run);
       } catch (err) {
-        logger.error(`onRunComplete failed for ${job.id}`, err);
+        this.logger.error(`onRunComplete failed for ${job.id}`, err);
       } finally {
         execution.activeCount--;
       }
@@ -318,7 +319,7 @@ export class JobScheduler {
       job.cron?.stop();
       job.cron = new Croner(job.config.schedule, () => this.fireJob(id));
     } catch (err) {
-      logger.error(`failed to start job ${id}`, err);
+      this.logger.error(`failed to start job ${id}`, err);
     }
   }
 
