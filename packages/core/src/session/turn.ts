@@ -1,7 +1,13 @@
+import type { ExecutionRef } from "./execution.js";
+
 /**
  * The outcome of a completed turn.
  */
 export interface TurnResult {
+  /**
+   * Trusted execution identity, when produced by a session manager.
+   */
+  executionId?: string;
   /**
    * Final assistant message.
    */
@@ -29,6 +35,10 @@ export type TurnEvent =
  * and safe to iterate from multiple consumers — each sees the full stream from the start.
  */
 export interface Turn extends Promise<TurnResult> {
+  /**
+   * Available immediately, including while the execution is queued.
+   */
+  readonly execution?: ExecutionRef;
   events: AsyncIterable<TurnEvent>;
   abort(reason?: string): void;
 }

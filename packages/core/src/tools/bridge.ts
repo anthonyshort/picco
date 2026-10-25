@@ -1,3 +1,4 @@
+import type { ExecutionRef } from "../session/execution.js";
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import * as z from "zod";
@@ -32,6 +33,18 @@ export interface ToolBridgeOptions {
   tools: Map<string, Tool>;
   logger?: Logger;
   currentUser?: CurrentUserResolver;
+  /**
+   * When configured, tools require a running execution and inherit its trusted identity.
+   */
+  executionContext?: (ref: SessionRef) => BridgeExecutionContext | undefined;
+}
+
+/**
+ * Execution ownership is pinned before an admitted request starts reading its body.
+ */
+interface BridgeExecutionContext {
+  execution: ExecutionRef;
+  signal: AbortSignal;
 }
 
 /**
@@ -57,6 +70,8 @@ export class ToolBridge {
   private readonly tools: Map<string, Tool>;
   private readonly logger: Logger;
   private readonly currentUser?: CurrentUserResolver;
+  private readonly executionContext?: ToolBridgeOptions["executionContext"];
+  private readonly pendingCalls = new Map<string, Set<Promise<void>>>();
   private readonly tokens = new Map<string, TokenEntry>();
   private httpServer: Server | null = null;
   private boundPort = 0;
@@ -65,6 +80,7 @@ export class ToolBridge {
     this.tools = opts.tools;
     this.logger = opts.logger ?? silentLogger();
     this.currentUser = opts.currentUser;
+    this.executionContext = opts.executionContext;
   }
 
   /**
@@ -158,7 +174,25 @@ export class ToolBridge {
       res.writeHead(405, { Allow: "POST" }).end();
       return;
     }
-    await this.handleCall(req, res, entry);
+    const execution = this.executionContext?.(entry.caller.ref);
+    if (this.executionContext && (!execution || execution.signal.aborted)) {
+      res.writeHead(409).end("No running execution owns this tool call");
+      return;
+    }
+    const pending = this.handleCall(req, res, token, entry, execution);
+    const id = execution?.execution.id;
+    if (id) {
+      const calls = this.pendingCalls.get(id) ?? new Set<Promise<void>>();
+      this.pendingCalls.set(id, calls);
+      calls.add(pending);
+      void pending
+        .finally(() => {
+          calls.delete(pending);
+          if (!calls.size) this.pendingCalls.delete(id);
+        })
+        .catch(() => {});
+    }
+    await pending;
   }
 
   /**
@@ -169,11 +203,13 @@ export class ToolBridge {
   private async handleCall(
     req: IncomingMessage,
     res: ServerResponse,
+    token: string,
     entry: TokenEntry,
+    execution?: BridgeExecutionContext,
   ): Promise<void> {
     let parsed: z.infer<typeof CallSchema>;
     try {
-      const body = await readBody(req);
+      const body = await readBody(req, execution?.signal);
       // Loopback-only from the trusted worker, so the body is uncapped; a surprisingly large one is
       // worth a warning as an observability signal, not a hard limit.
       const bytes = Buffer.byteLength(body);
@@ -187,7 +223,23 @@ export class ToolBridge {
       }
       parsed = result.data;
     } catch {
-      res.writeHead(400).end("invalid JSON body");
+      if (execution?.signal.aborted) res.destroy();
+      else res.writeHead(400).end("invalid JSON body");
+      return;
+    }
+    if (this.tokens.get(token) !== entry) {
+      res.writeHead(401).end();
+      return;
+    }
+    const current = this.executionContext?.(entry.caller.ref);
+    if (
+      this.executionContext &&
+      (!current ||
+        current.execution.id !== execution?.execution.id ||
+        execution?.signal.aborted ||
+        current.signal.aborted)
+    ) {
+      res.writeHead(409).end("The tool call's owning execution has ended");
       return;
     }
     // Agent-wide tools are shared by every session; sessionTools are scoped to this token. A name
@@ -195,18 +247,28 @@ export class ToolBridge {
     // agent-wide one.
     const tool = this.tools.get(parsed.tool) ?? entry.sessionTools.get(parsed.tool);
     const { caller } = entry;
-    const result = tool
-      ? await this.runTool(tool, parsed.args, {
+    const operation = tool
+      ? this.runTool(tool, parsed.args, {
           logger: this.logger,
           caller,
           // Resolved per call: the sticky pin may change between turns.
           user: this.currentUser?.(caller.ref),
+          execution: execution?.execution,
+          signal: execution?.signal,
         })
       : {
           content: [{ type: "text" as const, text: `Error: unknown tool "${parsed.tool}"` }],
           isError: true,
         };
+    const result = await operation;
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(result));
+  }
+
+  /**
+   * Await admitted requests, including body reads, before critical ownership can be released.
+   */
+  async settleExecution(id: string): Promise<void> {
+    await Promise.allSettled(this.pendingCalls.get(id) ?? []);
   }
 
   /**
@@ -263,8 +325,15 @@ function toContent(result: ToolResult): ContentBlock[] {
  * Collect a request body as a UTF-8 string. Buffers the raw chunks and decodes once — decoding each
  * chunk on its own would corrupt a multi-byte character split across a chunk boundary.
  */
-async function readBody(req: IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk);
-  return Buffer.concat(chunks).toString("utf8");
+async function readBody(req: IncomingMessage, signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) throw new Error("Tool request owner has ended");
+  const abort = () => req.destroy(new Error("Tool request owner has ended"));
+  signal?.addEventListener("abort", abort, { once: true });
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk);
+    return Buffer.concat(chunks).toString("utf8");
+  } finally {
+    signal?.removeEventListener("abort", abort);
+  }
 }

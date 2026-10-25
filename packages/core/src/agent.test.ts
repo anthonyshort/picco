@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import * as z from "zod";
 import { FakeRuntime, type FakeSpawn } from "./testing/index.js";
 import { createAgent } from "./agent.js";
@@ -499,10 +499,16 @@ describe("createAgent", () => {
         input: z.object({ city: z.string() }),
         execute: () => "sunny",
       });
-      const { agent, runtime } = agentWith({ name: "test-agent", tools: [weather] });
+      const gate = Promise.withResolvers<string>();
+      const { agent, runtime } = agentWith({
+        name: "test-agent",
+        tools: [weather],
+        runtime: new FakeRuntime({ reply: () => gate.promise }),
+      });
       await agent.start({ handleSignals: false });
 
-      await agent.sessions.run("k1", "hi");
+      const turn = agent.sessions.run("k1", "hi");
+      await vi.waitFor(() => expect(runtime.spawns).toHaveLength(1));
 
       const spawn = runtime.spawns[0]!;
       expect(spawn.spec.bridge.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/call$/);
@@ -517,6 +523,11 @@ describe("createAgent", () => {
         content: [{ type: "text", text: "sunny" }],
         isError: false,
       });
+      gate.resolve("done");
+      await turn;
+      expect((await callBridge(bridgeOf(spawn), "get_weather", { city: "Sydney" })).status).toBe(
+        409,
+      );
     });
 
     test("no tools → empty tool manifest, no mcp servers", async () => {
@@ -546,18 +557,25 @@ describe("createAgent", () => {
           return "ok";
         },
       });
-      const { agent, runtime } = agentWith({ tools: [whoami] });
+      const gate = Promise.withResolvers<string>();
+      const { agent, runtime } = agentWith({
+        tools: [whoami],
+        runtime: new FakeRuntime({ reply: () => gate.promise }),
+      });
       await agent.start({ handleSignals: false });
 
       // The turn pins the sender; the pin is sticky, so a bridge call with
       // this session's token — as the worker makes mid-turn — sees the user.
-      await agent.sessions.run("k1", "hi", { user: { source: "telegram", id: "123" } });
+      const turn = agent.sessions.run("k1", "hi", { user: { source: "telegram", id: "123" } });
+      await vi.waitFor(() => expect(runtime.spawns).toHaveLength(1));
       const res = await callBridge(bridgeOf(runtime.spawns[0]!), "whoami", {});
 
       expect(res.status).toBe(200);
       // ctx.token exists only for connector tools (the adapter's wrapper
       // injects it) — the kernel never sets it on plugin tools.
       expect(seen).toEqual([{ user: { source: "telegram", id: "123" }, token: undefined }]);
+      gate.resolve("done");
+      await turn;
     });
 
     test("one-shot runs bind tools and revoke the token at teardown", async () => {

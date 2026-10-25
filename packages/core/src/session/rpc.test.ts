@@ -126,4 +126,36 @@ describe("RpcSession", () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(await deadSession.stats()).toBeNull();
   });
+  test("rejects provider failure and abort instead of returning stale assistant text", async () => {
+    for (const stopReason of ["error", "aborted"]) {
+      const proc = new FakeRuntimeProcess({
+        reply: () => "stale text",
+        eventsFor: () => [
+          {
+            type: "message_end",
+            message: { role: "assistant", stopReason, errorMessage: "secret provider payload" },
+          },
+        ],
+      });
+      const rpc = new RpcSession("failure", proc);
+      await expect(rpc.prompt("hi")).rejects.toThrow(
+        stopReason === "error" ? "provider request failed" : "aborted",
+      );
+      expect(proc.requests.some((request) => request.type === "get_last_assistant_text")).toBe(
+        false,
+      );
+      await proc.kill();
+    }
+  });
+
+  test("a recovered provider attempt can still complete successfully", async () => {
+    const proc = new FakeRuntimeProcess({
+      eventsFor: () => [
+        { type: "message_end", message: { role: "assistant", stopReason: "error" } },
+        { type: "message_end", message: { role: "assistant", stopReason: "stop" } },
+      ],
+    });
+    expect(await new RpcSession("recovered", proc).prompt("hello")).toBe("echo: hello");
+    await proc.kill();
+  });
 });
