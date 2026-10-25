@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
+import { GrammyError, HttpError } from "grammy";
 import { silentLogger } from "@picco-agent/core";
 import {
   createFakePluginContext,
@@ -184,6 +185,49 @@ describe("telegram message handler", () => {
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("Something went wrong");
   });
+
+  test.each([
+    {
+      kind: "API",
+      failure: new GrammyError(
+        "private-error",
+        { ok: false, error_code: 429, description: "private-description" },
+        "sendMessage",
+        { text: "private-payload" },
+      ),
+      fields: { category: "telegram_api", statusCode: 429 },
+    },
+    {
+      kind: "network",
+      failure: new HttpError("private-error", { cause: "private-network-cause" }),
+      fields: { category: "network" },
+    },
+  ])(
+    "keeps safe $kind failure details when fallback delivery succeeds",
+    async ({ failure, fields }) => {
+      const { handler, message, ctx } = setup({ reply: () => "private-answer" });
+      const logger = { log: vi.fn(), warning: vi.fn(), error: vi.fn() };
+      ctx.logger = logger;
+      const reply = vi.fn().mockRejectedValueOnce(failure).mockResolvedValueOnce(undefined);
+
+      await handler(message({ reply }));
+
+      expect(reply.mock.calls.map(([text]) => text)).toEqual([
+        "private-answer",
+        "Something went wrong handling that. Check the server logs.",
+      ]);
+      const context = logger.log.mock.calls.find(([event]) => event === "request.received")![1];
+      expect(context).toEqual({
+        source: "telegram",
+        key: "1-general",
+        requestId: expect.any(String),
+      });
+      expect(logger.error).toHaveBeenCalledWith("response.failed", { ...context, ...fields });
+      expect(JSON.stringify([...logger.log.mock.calls, ...logger.error.mock.calls])).not.toContain(
+        "private-",
+      );
+    },
+  );
 
   test("renders live tool status from turn events and removes it before replying", async () => {
     const { handler, message, replies, statusLines, statusRemoved } = setup({

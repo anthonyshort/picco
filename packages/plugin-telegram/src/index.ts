@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { Bot } from "grammy";
+import { Bot, GrammyError, HttpError } from "grammy";
 import * as z from "zod";
 import { tool, type Tool } from "@picco-agent/core";
 import type { Plugin, PluginContext, SessionIdentity } from "@picco-agent/core";
@@ -238,8 +238,15 @@ export function createMessageHandler(
         for (const part of chunks) await reply(part);
         ctx.logger.log("response.sent", { ...context, chunks: chunks.length });
       }
-    } catch {
-      ctx.logger.error("response.failed", context);
+    } catch (err) {
+      ctx.logger.error("response.failed", {
+        ...context,
+        ...(err instanceof GrammyError
+          ? { category: "telegram_api", statusCode: err.error_code }
+          : err instanceof HttpError
+            ? { category: "network" }
+            : {}),
+      });
       await reply("Something went wrong handling that. Check the server logs.");
     } finally {
       clearInterval(typing);
