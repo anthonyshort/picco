@@ -4,4 +4,4 @@
 "@picco-agent/plugin-agentmail": patch
 ---
 
-Accept a host logger for Picco and its plugins, and log Pi session models and outcomes through the existing worker stderr stream without patching pi-subagents.
+Accept a host logger for Picco and its plugins, and log direct subagent calls, reported models and errors from existing Pi RPC events.
