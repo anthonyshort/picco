@@ -17,21 +17,20 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 /**
- * The structured logger the kernel hands to plugins and internal components. Every line carries a
- * timestamp and a scope tag; `data` is appended as trailing detail.
+ * Host-owned logger passed to plugins and internal components. The host chooses formatting,
+ * destinations and retention; Picco binds scope fields without owning the logger lifecycle.
  */
 export interface Logger {
   /**
-   * Log an informational line. `data` renders as trailing `key=value` pairs.
+   * Log an informational event and structured fields.
    */
   log(message: string, data?: Record<string, unknown>): void;
   /**
-   * Log a warning line. `data` renders as trailing `key=value` pairs.
+   * Log a warning event and structured fields.
    */
   warning(message: string, data?: Record<string, unknown>): void;
   /**
-   * Log an error line. `data` accepts anything — an Error renders as its message, other values
-   * render as detail.
+   * Log an error event. Plugins control any content they explicitly attach.
    */
   error(message: string, data?: unknown): void;
 }
@@ -598,6 +597,11 @@ export interface SessionToolSpec {
 }
 
 export interface AgentConfig {
+  /**
+   * Host-owned logging destination. Picco never flushes or closes it.
+   */
+  logger?: Logger;
+
   /**
    * Display name for logs. The agent's name also scopes its on-disk state: two agents can point at
    * the same dataDir root without their sessions/runs/plugin data colliding.

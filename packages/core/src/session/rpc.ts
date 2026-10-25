@@ -3,7 +3,6 @@ import { parseJsonl, JsonlWriter, type JsonObject } from "./jsonl.js";
 import { silentLogger } from "../utils/logger.js";
 import type { Logger, RuntimeProcess } from "../types.js";
 import type { TurnEvent } from "./turn.js";
-import { readSubagentDiagnostic } from "./subagent-diagnostics.js";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -229,12 +228,6 @@ export class RpcSession {
    * Dispatch one stdout message: responses, agent_settled, live progress events.
    */
   private handleMessage(msg: JsonObject): void {
-    const diagnostic = readSubagentDiagnostic(msg);
-    if (diagnostic) {
-      const fields = { key: this.key, ...diagnostic };
-      if (diagnostic.status === "error") this.logger.error("subagent.failed", fields);
-      else this.logger.log(`subagent.${diagnostic.event}`, fields);
-    }
     // Responses correlate to a pending request by id
     if (msg.type === "response") {
       const req = typeof msg.id === "string" ? this.pending.get(msg.id) : undefined;

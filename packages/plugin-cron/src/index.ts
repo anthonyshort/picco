@@ -54,7 +54,7 @@ export function cron(options: CronOptions = {}): Plugin {
 
     async start(ctx: PluginContext) {
       const dir = options.jobDir ?? ctx.filePath();
-      const loader = new JobLoader(dir);
+      const loader = new JobLoader(dir, ctx.logger);
 
       const onRunComplete =
         options.onRunComplete ??
@@ -67,6 +67,7 @@ export function cron(options: CronOptions = {}): Plugin {
         });
 
       const scheduler = new JobScheduler({
+        logger: ctx.logger,
         loader,
         runAgent: async ({ jobId, prompt, model, thinking, timeoutMs }) => {
           const key = `${jobId}/${generateTimestamp()}-${randomUUID()}`;

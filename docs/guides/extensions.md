@@ -49,31 +49,3 @@ See [bwrap extensions](./runtimes/bwrap.md#load-extensions) for the sandbox conf
 
 Everything loaded as an extension executes inside the session's trust boundary. Review third-party
 extensions before installing them and do not include host credentials in their files.
-
-## Log subagent models and errors
-
-Picco automatically loads its bundled `subagent-logging` Pi extension. It logs the selected
-provider/model when a child session is created, then its outcome and any reported error.
-Child IDs, parent IDs and the root Pi session ID connect nested work to its conversation.
-
-```text
-subagent.started agentId=child-1 model=provider/model status=running
-subagent.finished agentId=child-1 model=provider/model status=completed
-subagent.failed agentId=child-2 model=other/model status=error error=401 Authentication failed
-```
-
-This requires the included [pi-subagents 0.22.0 patch](../../patches/@tintinweb__pi-subagents@0.22.0.patch).
-In a pnpm application that already installs that version, apply it with:
-
-```sh
-pnpm patch @tintinweb/pi-subagents@0.22.0 --edit-dir /tmp/pi-subagents
-git -C /tmp/pi-subagents apply /absolute/path/to/picco/patches/@tintinweb__pi-subagents@0.22.0.patch
-pnpm patch-commit /tmp/pi-subagents
-```
-
-Load the patched extension through `pi.extensions` as a local file or bundle. An `npm:` entry
-in `pi.packages` installs a separate, unpatched copy.
-
-Errors are logged as reported by pi-subagents, without interpreting their wording. Prompts and
-successful response content are not included. Transcript storage and persistence are unchanged.
-Early startup failures and process crashes may not produce paired start/finish events.

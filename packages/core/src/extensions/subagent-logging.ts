@@ -1,19 +1,43 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { SubagentDiagnosticSchema } from "../session/subagent-diagnostics.js";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /**
- * Forward subagent models and outcomes to Picco, including the reported error on failure.
+ * Send Pi session models and outcomes through the worker's existing stderr log stream.
  */
 export default function subagentLogging(pi: ExtensionAPI): void {
-  let rootSessionId: string | undefined;
+  let stopReason: string | null = null;
+
   pi.on("session_start", (_event, ctx) => {
-    rootSessionId = ctx.sessionManager.getSessionId();
+    logSession("pi.session.started", ctx);
   });
-  const unsubscribe = pi.events.on("subagents:diagnostic", (value: unknown) => {
-    const parsed = SubagentDiagnosticSchema.safeParse(value);
-    if (parsed.success && rootSessionId) {
-      pi.appendEntry("picco:subagent", { ...parsed.data, rootSessionId });
+  pi.on("agent_start", () => {
+    stopReason = null;
+  });
+  pi.on("message_end", (event, ctx) => {
+    const message = event.message;
+    if (message.role !== "assistant") return;
+    stopReason = message.stopReason;
+    if (message.stopReason === "error") {
+      logSession("pi.model.failed", ctx, {
+        model: `${message.provider}/${message.model}`,
+        error: message.errorMessage,
+      });
     }
   });
-  pi.on("session_shutdown", () => unsubscribe());
+  pi.on("agent_settled", (_event, ctx) => {
+    logSession("pi.session.settled", ctx, { stopReason });
+  });
+}
+
+/**
+ * Keep stdout reserved for Pi's RPC protocol.
+ */
+function logSession(event: string, ctx: ExtensionContext, fields?: Record<string, unknown>): void {
+  console.error(
+    JSON.stringify({
+      event,
+      sessionId: ctx.sessionManager.getSessionId(),
+      model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null,
+      ...fields,
+    }),
+  );
 }

@@ -1,8 +1,6 @@
 import { AgentMailClient } from "agentmail";
 import { WebSocket as WsWebSocket } from "ws";
-import { createLogger } from "@picco-agent/core";
-
-const logger = createLogger("agentmail");
+import { createLogger, type Logger } from "@picco-agent/core";
 
 export interface SendInput {
   to: string | string[];
@@ -161,12 +159,13 @@ export function createAgentMailPort(client: AgentMailClient, inboxId: string): A
 export function createWebsocketEmailSource(
   client: AgentMailClient,
   inboxId: string,
+  logger: Logger = createLogger("agentmail"),
 ): EmailEventSource {
   let socket: Awaited<ReturnType<AgentMailClient["websockets"]["connect"]>> | undefined;
 
   return {
     async start(onEmail) {
-      patchWsBinaryType();
+      patchWsBinaryType(logger);
       socket = await client.websockets.connect();
 
       const subscribe = () => {
@@ -236,7 +235,7 @@ export function matchesAllowlist(address: string, allowlist: string[]): boolean 
  * binaryType only affects binary frames.
  */
 let wsPatched = false;
-function patchWsBinaryType(): void {
+function patchWsBinaryType(logger: Logger): void {
   if (wsPatched) return;
   wsPatched = true;
   try {
