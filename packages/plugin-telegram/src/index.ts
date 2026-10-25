@@ -1,10 +1,14 @@
 import { Bot } from "grammy";
+import path from "node:path";
 import * as z from "zod";
 import { tool, type Tool } from "@picco-agent/core";
 import type { Plugin, PluginContext, SessionIdentity } from "@picco-agent/core";
 
 import { TELEGRAM_MAX } from "./limits.js";
-import { createNotificationTool } from "./notification.js";
+import { createNotificationTool, createDeliveryTool, createNotifications } from "./notification.js";
+import type { NotificationInput, NotificationResult } from "./notification.js";
+import { DeliveryStore } from "./delivery-store.js";
+export type { NotificationInput, NotificationResult } from "./notification.js";
 const TYPING_REFRESH_MS = 4000;
 
 /**
@@ -66,6 +70,26 @@ export interface TelegramOptions {
    * Enable telegram_notify for this fixed recipient, which must also be in allowlist.
    */
   notificationChatId?: number;
+  /**
+   * Bound notification transport time (default 15 seconds).
+   */
+  notificationTimeoutMs?: number;
+  /**
+   * Maximum retained delivery records (default 10,000); unresolved records never expire.
+   */
+  maxDeliveryRecords?: number;
+  /**
+   * Retain confirmed/rejected receipts for this many days (default 30).
+   */
+  deliveryRetentionDays?: number;
+}
+
+/**
+ * Host notifications share the same ledger as the model tools; available after start.
+ */
+export interface TelegramPlugin extends Plugin {
+  notify(input: NotificationInput): Promise<NotificationResult>;
+  delivery(deliveryId: string): NotificationResult | undefined;
 }
 
 /**
@@ -289,7 +313,7 @@ async function handleCommand(
 /**
  * Create the Telegram plugin: long-polling bot and message routing.
  */
-export function telegram(options: TelegramOptions): Plugin {
+export function telegram(options: TelegramOptions): TelegramPlugin {
   const chatId = options.notificationChatId;
   if (
     chatId !== undefined &&
@@ -297,26 +321,63 @@ export function telegram(options: TelegramOptions): Plugin {
   ) {
     throw new Error("Telegram notificationChatId must be a nonzero safe integer in allowlist");
   }
-  const bot = new Bot(options.botToken);
+  const deliveryOptions = z
+    .object({
+      timeoutMs: z.number().int().min(1).max(60_000),
+      maxRecords: z.number().int().min(1).max(100_000),
+      retentionDays: z.number().int().min(1).max(3650),
+    })
+    .parse({
+      timeoutMs: options.notificationTimeoutMs ?? 15_000,
+      maxRecords: options.maxDeliveryRecords ?? 10_000,
+      retentionDays: options.deliveryRetentionDays ?? 30,
+    });
+  const bot = new Bot(options.botToken, {
+    client: { timeoutSeconds: deliveryOptions.timeoutMs / 1000 },
+  });
+  let deliveryFile: string | undefined;
+  let notifications: ReturnType<typeof createNotifications> | undefined;
+  function ensureNotifications() {
+    if (!notifications) throw new Error("Telegram notifications are not started");
+    return notifications;
+  }
 
   return {
     name: "telegram",
     tools:
       chatId === undefined
         ? []
-        : [
-            createNotificationTool(chatId, (recipient, text) =>
-              bot.api.sendMessage(recipient, text, { link_preview_options: { is_disabled: true } }),
-            ),
-          ],
+        : [createNotificationTool(ensureNotifications), createDeliveryTool(ensureNotifications)],
 
+    resolve(ctx) {
+      deliveryFile = path.join(ctx.dataDir, "plugins", "telegram", "deliveries.sqlite");
+    },
+    notify(input) {
+      return ensureNotifications().notify(input);
+    },
+    delivery(deliveryId) {
+      return ensureNotifications().delivery(deliveryId);
+    },
     async start(ctx: PluginContext) {
-      const handle = createMessageHandler(ctx, options);
-
       const contributed = ctx.commands.list();
       const reserved = new Set(["new", "context"]);
       const collision = contributed.find((command) => reserved.has(command.name));
       if (collision) throw new Error(`Telegram command "/${collision.name}" is reserved`);
+
+      if (chatId !== undefined) {
+        notifications = createNotifications(
+          chatId,
+          new DeliveryStore(deliveryFile ?? ctx.filePath("deliveries.sqlite"), {
+            maxRecords: deliveryOptions.maxRecords,
+            retentionMs: deliveryOptions.retentionDays * 86_400_000,
+          }),
+          (recipient, text) =>
+            bot.api.sendMessage(recipient, text, { link_preview_options: { is_disabled: true } }),
+          deliveryOptions.timeoutMs,
+        );
+      }
+      const handle = createMessageHandler(ctx, options);
+
       bot.api
         .setMyCommands([
           { command: "new", description: "Start a new conversation" },
@@ -370,7 +431,12 @@ export function telegram(options: TelegramOptions): Plugin {
     },
 
     async stop() {
-      await bot.stop();
+      try {
+        await bot.stop();
+      } finally {
+        await notifications?.stop();
+        notifications = undefined;
+      }
     },
   };
 }

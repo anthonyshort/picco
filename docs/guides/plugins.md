@@ -253,8 +253,35 @@ telegram({
 });
 ```
 
-This exposes `telegram_notify` to agent sessions. Its only input is `text`; the
-recipient must be in the allowlist and cannot be changed by the model. Messages
-are plain text and must fit in one Telegram message. Delivery is attempted once;
-an uncertain failure is reported without exposing the bot token. The consuming
-workflow decides when a notification is appropriate and prevents duplicate calls.
+This exposes `telegram_notify` and read-only `telegram_delivery` tools. The recipient
+must be allowlisted and cannot be changed by the model. Notification text must fit
+in one plain-text Telegram message.
+
+Reuse a key for the same notification intent:
+
+```text
+telegram_notify({ text: "Digest ready.", deduplicationKey: "digest:2026-10-26" })
+→ { deliveryId, status: "confirmed", messageId: 123, duplicate: false }
+
+telegram_delivery({ deliveryId })
+→ { deliveryId, status: "confirmed", messageId: 123, duplicate: true }
+```
+
+The plugin reserves keyed intents before sending and persists delivery evidence
+in its private data directory. Concurrent calls or repeats after restart return
+the existing state without sending again. Reusing a key with different text is
+an error. A provider rejection is distinct from uncertain delivery caused by a
+timeout or broken connection. Interrupted sends become uncertain after restart;
+they are never automatically retried.
+
+The host methods `gateway.notify(input)` and `gateway.delivery(id)` use the same
+ledger after startup. They allow workflows to derive keys from authoritative
+domain state. A model generating a new key creates a new intent, so arbitrary
+keys alone cannot enforce a domain's duplicate-prevention policy.
+
+Receipts exclude message text and credentials. Confirmed/rejected records expire
+after 30 days by default; unresolved records remain. The default capacity is
+10,000 records and new sends fail closed when full. Deduplication cannot be
+promised after a key's record expires. Telegram requires Node 22.13 or newer for
+the private SQLite ledger. The consuming workflow decides when to notify; empty
+queues and review outcomes are not Telegram concepts.
