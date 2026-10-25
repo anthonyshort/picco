@@ -4,6 +4,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 import * as z from "zod";
+import { observeSubagents } from "./subagents.js";
+
+export { SubagentDiagnosticSchema } from "./subagents.js";
 
 /**
  * The bridge config path: pi's agent directory + bridge.json. Resolved the same way pi resolves its
@@ -66,6 +69,7 @@ export type BridgeCallResult = z.infer<typeof BridgeCallResultSchema>;
  */
 export default function BridgeExtension(pi: ExtensionAPI) {
   const config = readBridgeConfig(DEFAULT_CONFIG_PATH);
+  observeSubagents(pi);
 
   for (const spec of config.tools) {
     pi.registerTool({

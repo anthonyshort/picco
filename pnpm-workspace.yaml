@@ -5,6 +5,3 @@ packages:
   - "scripts/smoke"
   - "scripts/smoke/extensions"
   - "scripts/smoke/fixtures/*"
-
-patchedDependencies:
-  '@tintinweb/pi-subagents@0.22.0': patches/@tintinweb__pi-subagents@0.22.0.patch

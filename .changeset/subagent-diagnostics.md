@@ -1,5 +1,6 @@
 ---
 "@picco-agent/core": patch
+"@picco-agent/bridge-extension": patch
 ---
 
-Log selected subagent identities, outcomes and transcript paths forwarded by a Pi diagnostic adapter.
+Log nested subagent identities and transcript paths through the bundled bridge extension, keeping patched pi-subagents output in the session workspace.

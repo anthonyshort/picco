@@ -209,7 +209,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
         }
         for (const plugin of plugins) await plugin.prepareAllSessions?.(info);
       },
-      setupSession: ({ ref, tools: sessionTools, pi: piOverride, env }) => {
+      setupSession: ({ ref, cwd, tools: sessionTools, pi: piOverride, env }) => {
         // Merge per-session pi overrides onto the agent-wide config, then resolve
         // the path-valued fields (packages are pi source strings — passed verbatim).
         const merged = mergePi(config.pi, piOverride);
@@ -250,7 +250,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
         // bridge field and written to bridge.json, never into the env.
         return {
           pi,
-          env: { ...env },
+          env: { PI_SUBAGENTS_OUTPUT_DIR: path.resolve(cwd, "subagent-transcripts"), ...env },
           tools: toolSpecs,
           bridgeToken: bridge!.issueToken(ref, sessionTools),
         };

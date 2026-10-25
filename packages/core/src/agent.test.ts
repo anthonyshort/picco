@@ -670,10 +670,11 @@ describe("createAgent", () => {
       await agent.sessions.run("k", "hi", { session: { env: { GH_TOKEN: "tok-abc" } } });
 
       const { spec } = runtime.spawns[0]!;
-      // The caller's per-session env is the only thing the host puts on spec.env — no kernel
-      // secret rides there; the bridge token rides the bridge field (→ bridge.json). Static
-      // credentials come from the ambient runtime env (local inherits it; bwrap forwards a list).
-      expect(spec.env).toEqual({ GH_TOKEN: "tok-abc" });
+      // The host supplies the transcript directory and caller env; bridge credentials stay separate.
+      expect(spec.env).toEqual({
+        PI_SUBAGENTS_OUTPUT_DIR: path.resolve(spec.cwd, "subagent-transcripts"),
+        GH_TOKEN: "tok-abc",
+      });
       expect(spec.bridge.token).toEqual(expect.any(String));
       expect(JSON.stringify(spec.env)).not.toContain(spec.bridge.token);
     });

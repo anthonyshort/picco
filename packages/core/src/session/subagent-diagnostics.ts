@@ -1,16 +1,5 @@
 import { z } from "zod";
-
-/**
- * Selected metadata emitted by the pinned pi-subagents debugging adapter.
- */
-export const SubagentDiagnosticSchema = z.object({
-  version: z.literal(1),
-  event: z.enum(["started", "finished"]),
-  agentId: z.string().min(1).max(128),
-  parentAgentId: z.string().min(1).max(128).nullable(),
-  status: z.string().min(1).max(64),
-  transcriptPath: z.string().min(1).max(4096).nullable(),
-});
+import { SubagentDiagnosticSchema } from "@picco-agent/bridge-extension";
 
 const EntrySchema = z.object({
   type: z.literal("entry_appended"),
