@@ -437,14 +437,22 @@ describe("SessionManager", () => {
 
   test("a throwing prepareSession fails the spawn (the turn rejects)", async () => {
     const runtime = new FakeRuntime();
+    const logger = { log: vi.fn(), warning: vi.fn(), error: vi.fn() };
     const sessions = manager(runtime, {
+      logger,
       prepareSession: () => {
         throw new Error("seed write failed");
       },
     }).namespace("telegram");
 
-    await expect(sessions.run("chat-1", "hi")).rejects.toThrow("seed write failed");
+    await expect(sessions.run("chat-1", "hi", { requestId: "prepare-request" })).rejects.toThrow(
+      "seed write failed",
+    );
     expect(runtime.spawns).toHaveLength(0);
+    expect(logger.error).toHaveBeenCalledWith(
+      "request.recovery_started",
+      expect.objectContaining({ requestId: "prepare-request", phase: "startup" }),
+    );
   });
 
   test("per-session env merges over the base env (bare-manager fallback)", async () => {

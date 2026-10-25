@@ -268,7 +268,9 @@ export class SessionManager {
             });
           slot.logger.error("request.recovery_started", {
             requestId,
-            ...(err instanceof RpcOperationError ? err.failure : classifyFailure(err, "model")),
+            ...(err instanceof RpcOperationError
+              ? err.failure
+              : classifyFailure(err, promptStarted ? "model" : "startup")),
             ...(err instanceof RpcOperationError && err.rpcCommand
               ? { rpcCommand: err.rpcCommand }
               : {}),
