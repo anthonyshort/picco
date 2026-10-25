@@ -497,7 +497,7 @@ describe("SubagentCoordinator", () => {
     expect(f.diagnostics.some((event) => event.event === "persistence.failed")).toBe(true);
     expect(f.diagnostics.some((event) => event.event === "agent.completed")).toBe(true);
     f.store.failWrites = false;
-    // The durable snapshot was last running; close honestly refuses an unfinished manifest.
+    // The last durable snapshot remains running after a failed terminal write.
     expect(f.store.records.get(record.id)?.status).toBe("running");
     await f.coordinator.close();
   });
