@@ -50,13 +50,19 @@ See [bwrap extensions](./runtimes/bwrap.md#load-extensions) for the sandbox conf
 Everything loaded as an extension executes inside the session's trust boundary. Review third-party
 extensions before installing them and do not include host credentials in their files.
 
-## Follow nested subagents
+## Log subagent models and errors
 
-Picco's bundled bridge forwards subagent start/finish events to its existing logs. Each event
-includes the child ID, parent ID and root Pi session ID. Finished events also include the
-transcript path when available.
+Picco automatically loads its bundled `subagent-logging` Pi extension. It logs the selected
+provider/model when a child session is created, then its outcome and any reported error.
+Child IDs, parent IDs and the root Pi session ID connect nested work to its conversation.
 
-This currently requires the included [pi-subagents 0.22.0 patch](../../patches/@tintinweb__pi-subagents@0.22.0.patch).
+```text
+subagent.started agentId=child-1 model=provider/model status=running
+subagent.finished agentId=child-1 model=provider/model status=completed
+subagent.failed agentId=child-2 model=other/model status=error error=401 Authentication failed
+```
+
+This requires the included [pi-subagents 0.22.0 patch](../../patches/@tintinweb__pi-subagents@0.22.0.patch).
 In a pnpm application that already installs that version, apply it with:
 
 ```sh
@@ -68,11 +74,6 @@ pnpm patch-commit /tmp/pi-subagents
 Load the patched extension through `pi.extensions` as a local file or bundle. An `npm:` entry
 in `pi.packages` installs a separate, unpatched copy.
 
-Picco sets `PI_SUBAGENTS_OUTPUT_DIR` to `<session workspace>/subagent-transcripts`, keeping the
-files outside the sandbox's temporary `/tmp`. Open the logged `transcriptPath` to inspect the
-conversation and follow `parentAgentId` to its owner. Transcripts contain private prompts, tool
-output and errors. The host owns file retention; workflow scripts also use this directory when
-enabled.
-
-Start events may have no transcript path yet. Early startup failures, queued cancellations and
-crashes do not always produce paired events, and transcript writes remain best-effort.
+Errors are logged as reported by pi-subagents, without interpreting their wording. Prompts and
+successful response content are not included. Transcript storage and persistence are unchanged.
+Early startup failures and process crashes may not produce paired start/finish events.

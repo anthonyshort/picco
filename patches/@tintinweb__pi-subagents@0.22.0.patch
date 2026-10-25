@@ -1,8 +1,7 @@
 diff --git a/src/index.ts b/src/index.ts
-index 6ab4e1f761c106673d13ba1bc42474e33c7ae5db..5a332aa253089be0dcfbdb54b077e6f4d2594899 100644
 --- a/src/index.ts
 +++ b/src/index.ts
-@@ -571,6 +571,14 @@ export default function (pi: ExtensionAPI) {
+@@ -571,6 +571,15 @@
  
    // Background completion: route through group join or send individual nudge
    const manager = new AgentManager((record) => {
@@ -12,49 +11,28 @@ index 6ab4e1f761c106673d13ba1bc42474e33c7ae5db..5a332aa253089be0dcfbdb54b077e6f4
 +      agentId: record.id,
 +      parentAgentId: record.parentAgentId ?? null,
 +      status: record.status,
-+      transcriptPath: record.outputFile ?? null,
++      model: record.invocation?.modelId ?? null,
++      error: record.error ?? null,
 +    });
      // Owned children — nested, or a workflow's — report only through their
      // owner: the parent's scoped tools, or the workflow's card, notification
      // and dialog. Keep them out of top-level lifecycle, transcript,
-@@ -617,6 +625,14 @@ export default function (pi: ExtensionAPI) {
-     // 'delivered' → group callback already fired
-     widget.update();
-   }, undefined, (record) => {
-+    pi.events.emit("subagents:diagnostic", {
-+      version: 1,
-+      event: "started",
-+      agentId: record.id,
-+      parentAgentId: record.parentAgentId ?? null,
-+      status: record.status,
-+      transcriptPath: record.outputFile ?? null,
-+    });
-     if (!isTopLevelAgent(record)) return;
-     // Agent-tool spawns refresh these surfaces in their tool handler, but RPC
-     // and scheduler spawns enter through the manager directly.
-diff --git a/src/output-file.ts b/src/output-file.ts
-index e336e84147f9857627e9997589c2cd55eb2fae6e..d41ebc07f7b5acdf69b62ab369824761f1030957 100644
---- a/src/output-file.ts
-+++ b/src/output-file.ts
-@@ -7,7 +7,7 @@
- 
- import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
- import { tmpdir } from "node:os";
--import { join } from "node:path";
-+import { isAbsolute, join } from "node:path";
- import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
- 
- /**
-@@ -46,7 +46,11 @@ export function encodeCwd(cwd: string): string {
-  */
- export function sessionTaskDir(cwd: string, sessionId: string): string {
-   const encoded = encodeCwd(cwd);
--  const root = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`);
-+  const configuredRoot = process.env.PI_SUBAGENTS_OUTPUT_DIR;
-+  if (configuredRoot && !isAbsolute(configuredRoot)) {
-+    throw new Error("PI_SUBAGENTS_OUTPUT_DIR must be an absolute path");
-+  }
-+  const root = configuredRoot ?? join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`);
-   mkdirSync(root, { recursive: true, mode: 0o700 });
-   // chmod is a no-op on Windows and throws on some Windows filesystems.
-   // On Unix we still want to enforce 0o700 past umask, so only swallow on Windows.
+diff --git a/src/agent-manager.ts b/src/agent-manager.ts
+--- a/src/agent-manager.ts
++++ b/src/agent-manager.ts
+@@ -858,6 +858,15 @@
+             }
+           }
+         }
++        pi.events.emit("subagents:diagnostic", {
++          version: 1,
++          event: "started",
++          agentId: id,
++          parentAgentId: record.parentAgentId ?? null,
++          status: record.status,
++          model: session.model ? `${session.model.provider}/${session.model.id}` : null,
++          error: null,
++        });
+         // Flush any steers that arrived before the session was ready
+         if (record.pendingSteers?.length) {
+           for (const msg of record.pendingSteers) {

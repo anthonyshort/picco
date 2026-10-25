@@ -39,19 +39,13 @@ export const DEFAULT_DATA_DIR = path.join(os.homedir(), ".picco");
 const DEFAULT_SCRIPT_TIMEOUT_MS = 300_000;
 
 /**
- * Core-owned extensions bundled with core, injected into every session as file-path extensions.
- * Each is a self-contained bundle (dependencies inlined) resolved from core's own dependencies, so
- * it loads in every runtime with no node_modules. To add another, publish a bundled package whose
- * default export (`.`) is its built bundle (see docs/guides/extensions.md), add it as a dependency
- * of core, and list its name here.
+ * Bundled Pi extension entry points injected into every session as self-contained files.
  */
-const BUNDLED_EXTENSIONS = ["@picco-agent/bridge-extension"];
+const BUNDLED_EXTENSIONS = ["@picco-agent/bridge-extension", "@picco-agent/core/subagent-logging"];
 
 /**
- * Resolve a bundled extension package to the absolute path of its built entry — its default export
- * (`.`), which for a bundled pi extension is the self-contained bundle. Realpathed so a jailing
- * runtime binds the real file, not a node_modules symlink. Throws at start() if the package is
- * missing or its bundle has not been built.
+ * Resolve a bundled Pi extension entry to a real file the runtime can mount. Missing packages or
+ * build output fail at startup.
  */
 function resolveBundledExtensionFile(name: string): string {
   let entry: string;
@@ -179,8 +173,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
     await runtime.check();
     await mkdir(paths.root, { recursive: true });
 
-    // Core's bundled extensions ride the extensions list as file paths — each
-    // resolved to the self-contained bundle its package declares in pi.extensions.
+    // Resolve the bundled extensions to files the runtime can mount.
     const bundledExtensionFiles = BUNDLED_EXTENSIONS.map(resolveBundledExtensionFile);
 
     // The tool bridge allows sessions to execute tools via HTTP
@@ -209,7 +202,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
         }
         for (const plugin of plugins) await plugin.prepareAllSessions?.(info);
       },
-      setupSession: ({ ref, cwd, tools: sessionTools, pi: piOverride, env }) => {
+      setupSession: ({ ref, tools: sessionTools, pi: piOverride, env }) => {
         // Merge per-session pi overrides onto the agent-wide config, then resolve
         // the path-valued fields (packages are pi source strings — passed verbatim).
         const merged = mergePi(config.pi, piOverride);
@@ -250,7 +243,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
         // bridge field and written to bridge.json, never into the env.
         return {
           pi,
-          env: { PI_SUBAGENTS_OUTPUT_DIR: path.resolve(cwd, "subagent-transcripts"), ...env },
+          env: { ...env },
           tools: toolSpecs,
           bridgeToken: bridge!.issueToken(ref, sessionTools),
         };

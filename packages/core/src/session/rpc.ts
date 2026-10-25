@@ -231,7 +231,9 @@ export class RpcSession {
   private handleMessage(msg: JsonObject): void {
     const diagnostic = readSubagentDiagnostic(msg);
     if (diagnostic) {
-      this.logger.log(`subagent.${diagnostic.event}`, { key: this.key, ...diagnostic });
+      const fields = { key: this.key, ...diagnostic };
+      if (diagnostic.status === "error") this.logger.error("subagent.failed", fields);
+      else this.logger.log(`subagent.${diagnostic.event}`, fields);
     }
     // Responses correlate to a pending request by id
     if (msg.type === "response") {

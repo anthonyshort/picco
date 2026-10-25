@@ -24,13 +24,17 @@
     "./testing": {
       "types": "./dist/testing/index.d.ts",
       "import": "./dist/testing/index.js"
+    },
+    "./subagent-logging": {
+      "types": "./dist/extensions/subagent-logging.d.ts",
+      "import": "./dist/extensions/subagent-logging.js"
     }
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "build": "rimraf dist && tsc -p tsconfig.build.json && esbuild ./src/extensions/subagent-logging.ts --bundle --outfile=./dist/extensions/subagent-logging.js --platform=node --format=esm --external:@earendil-works/pi-coding-agent",
     "prepare": "pnpm build"
   },
   "dependencies": {
