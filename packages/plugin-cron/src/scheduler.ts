@@ -1,10 +1,22 @@
+import { randomUUID } from "node:crypto";
+import { CronHistory, type JobRunRecord } from "./history.js";
 import { Cron as Croner } from "croner";
 import type { Cron } from "croner";
 import isEqual from "fast-deep-equal";
-import { createLogger, errorMessage, type ThinkingLevel, type Logger } from "@picco-agent/core";
+import {
+  createLogger,
+  errorMessage,
+  ExecutionFailure,
+  type ThinkingLevel,
+  type Logger,
+} from "@picco-agent/core";
 import type { JobConfig, JobConfigInput, JobConfigUpdate, JobLoader } from "./loader.js";
 
 const DEFAULT_SCRIPT_TIMEOUT = 300; // seconds
+/**
+ * Shutdown returns control while unresolved work retains its history lock.
+ */
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 /**
  * In-memory state for a loaded job, including its armed timer and run counters.
@@ -36,19 +48,36 @@ interface JobExecutionState {
  */
 export interface JobState {
   id: string;
+  description: string;
   type: JobConfig["type"];
   schedule: string;
   enabled: boolean;
   maxConcurrentRuns: number;
   activeCount: number;
+  /**
+   * Executions still awaiting their body/finalisation; observers can retain capacity afterward.
+   */
+  runningCount: number;
   lastRun: string | null;
   fireCount: number;
+  /**
+   * Latest retained trigger outcome, including interrupted or skipped work.
+   */
+  latestRun?: JobRunRecord;
 }
 
 /**
  * One completed run's outcome — handed to CronOptions.onRunComplete.
  */
 export interface JobRun {
+  /**
+   * Stable cron run identity, present on scheduler-generated reports.
+   */
+  id?: string;
+  /**
+   * Picco execution identity when the agent runner exposes one.
+   */
+  executionId?: string;
   jobId: string;
   startedAt: string;
   durationMs: number;
@@ -58,6 +87,10 @@ export interface JobRun {
    */
   output?: string;
   error?: string;
+  /**
+   * Critical cleanup failures reported by Picco, separate from the original model error.
+   */
+  finalisationErrors?: string[];
 }
 
 /**
@@ -70,6 +103,10 @@ export type RunAgent = (opts: {
   model?: string;
   thinking?: ThinkingLevel;
   timeoutMs?: number;
+  /**
+   * Associate a live model execution before awaiting its completion.
+   */
+  reportExecution?: (executionId: string) => void;
 }) => Promise<string>;
 
 /**
@@ -89,6 +126,10 @@ export type RunScript = (opts: {
 export type OnRunComplete = (run: JobRun) => void | Promise<void>;
 
 export interface JobSchedulerOptions {
+  /**
+   * Plugin-owned history; raw scheduler consumers may omit it for in-memory use.
+   */
+  history?: CronHistory;
   logger?: Logger;
   loader: JobLoader;
   runAgent: RunAgent;
@@ -98,12 +139,16 @@ export interface JobSchedulerOptions {
 
 /**
  * Arms croner timers for loaded jobs, fires them with bounded concurrency, and reports every
- * completed run to the injected onRunComplete hook. Keeps no state on disk; job execution is
- * injected (runAgent/runScript) so the scheduler stays decoupled from the agent runtime.
+ * completed run to the injected onRunComplete hook after persisting its outcome. Injected runners
+ * keep scheduling independent of the agent runtime.
  */
 export class JobScheduler {
   private jobs = new Map<string, ScheduledJob>();
   private executions = new Map<string, JobExecutionState>();
+  private readonly history: CronHistory;
+  private readonly active = new Map<string, JobRunRecord>();
+  private readonly pending = new Set<Promise<void>>();
+  private stopped = false;
   private readonly logger: Logger;
   private readonly loader: JobLoader;
   private readonly runAgent: RunAgent;
@@ -111,6 +156,7 @@ export class JobScheduler {
   private readonly onRunComplete: OnRunComplete;
 
   constructor(options: JobSchedulerOptions) {
+    this.history = options.history ?? new CronHistory();
     this.logger = options.logger ?? createLogger("job-scheduler");
     this.loader = options.loader;
     this.runAgent = options.runAgent;
@@ -119,20 +165,75 @@ export class JobScheduler {
   }
 
   /**
-   * List all loaded jobs as structured data (run stats are in-memory, counted since the process
-   * started).
+   * List current process activity with latest retained outcomes; completed counters are restored
+   * from bounded history at startup and are not lifetime totals.
    */
   listJobs(): JobState[] {
     return [...this.jobs.values()].map((job) => ({
       id: job.id,
+      description: job.config.description,
       type: job.config.type,
       schedule: job.config.schedule,
       enabled: job.config.enabled,
       maxConcurrentRuns: job.config.maxConcurrentRuns,
       activeCount: job.execution.activeCount,
+      runningCount: [...this.active.values()].filter((run) => run.jobId === job.id).length,
       lastRun: job.execution.lastRun,
       fireCount: job.execution.fireCount,
+      latestRun: this.history.list(job.id, 1)[0],
     }));
+  }
+
+  /**
+   * Inspect active work and retained runs, including jobs removed from the schedule.
+   */
+  details(id: string, limit = 10, offset = 0) {
+    const definition = this.jobs.get(id)?.config;
+    const recentRuns = this.history.list(id, limit, offset);
+    const totalRuns = this.history.count(id);
+    const activeRuns = [...this.active.values()].filter((run) => run.jobId === id);
+    return {
+      found: Boolean(definition || totalRuns || activeRuns.length),
+      id,
+      scheduled: Boolean(definition),
+      definition: definition ? structuredClone(definition) : null,
+      current: this.listJobs().find((job) => job.id === id) ?? null,
+      activeRuns: activeRuns.map((run) => structuredClone(run)),
+      recentRuns,
+      totalRuns,
+      nextOffset: offset + limit < totalRuns ? offset + limit : null,
+    };
+  }
+
+  /**
+   * List retained history without interpreting it as current process activity.
+   */
+  recentRuns(limit = 20, offset = 0): JobRunRecord[] {
+    return this.history.list(undefined, limit, offset);
+  }
+
+  /**
+   * Stop admission and wait for already-owned runs before releasing the history store.
+   */
+  async stop(): Promise<void> {
+    this.stopped = true;
+    this.stopAllTimers();
+    const settled = Promise.allSettled(this.pending).then(() => this.history.close());
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        settled,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(new Error("Cron shutdown timed out; pending work retains history ownership")),
+            SHUTDOWN_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**
@@ -183,8 +284,13 @@ export class JobScheduler {
   triggerJob(id: string): string {
     const job = this.jobs.get(id);
     if (!job) return `Job "${id}" not found.`;
-    if (!job.config.enabled) return `Job "${id}" is disabled.`;
+    if (this.stopped) return "Cron scheduler is stopped.";
+    if (!job.config.enabled) {
+      this.recordSkipped(job.config, "Job is disabled");
+      return `Job "${id}" is disabled.`;
+    }
     if (job.execution.activeCount >= job.config.maxConcurrentRuns) {
+      this.recordSkipped(job.config, "Concurrency limit reached");
       return `Job "${id}" skipped — concurrency limit ${job.config.maxConcurrentRuns} reached.`;
     }
     this.fireJob(id).catch((err) => {
@@ -243,56 +349,116 @@ export class JobScheduler {
    * no-op for an id that is no longer loaded (a timer can fire in the same tick its job is
    * removed).
    */
-  async fireJob(id: string): Promise<void> {
-    const job = this.jobs.get(id);
-    if (!job || !job.config.enabled) return;
+  fireJob(id: string): Promise<void> {
+    const operation = this.executeJob(id);
+    this.pending.add(operation);
+    void operation.finally(() => this.pending.delete(operation)).catch(() => {});
+    return operation;
+  }
 
-    const config = job.config;
+  /**
+   * Persist admission and terminal results independently of completion observers.
+   */
+  private async executeJob(id: string): Promise<void> {
+    const job = this.jobs.get(id);
+    if (this.stopped || !job || !job.config.enabled) return;
+    const config = structuredClone(job.config);
     const execution = job.execution;
     if (execution.activeCount >= config.maxConcurrentRuns) {
+      this.recordSkipped(config, "Concurrency limit reached");
       this.logger.log(`${job.id} skipped (concurrency limit reached)`);
       return;
     }
-
     const startedMs = Date.now();
-    const startedAt = new Date(startedMs).toISOString();
+    const record = this.createRecord(config, "running");
     execution.activeCount++;
-
-    this.logger.log(`Starting ${job.id} (${job.config.type})`);
-
-    const run: JobRun = { jobId: job.id, startedAt, durationMs: 0, status: "success" };
-
     try {
-      run.output = await this.runJobBody(config);
-    } catch (err) {
-      run.status = "error";
-      run.error = errorMessage(err);
-      this.logger.error(`error ${job.id}`, err);
-    } finally {
-      run.durationMs = Date.now() - startedMs;
-      this.logger.log(`${job.id} — duration=${(run.durationMs / 1000).toFixed(1)}s`);
-      execution.lastRun = startedAt;
+      this.history.save(record);
+      this.active.set(record.id, record);
+      this.logger.log(`Starting ${job.id} (${config.type})`);
+      const run: JobRun = {
+        id: record.id,
+        jobId: job.id,
+        startedAt: record.startedAt,
+        durationMs: 0,
+        status: "success",
+      };
+      try {
+        run.output = await this.runJobBody(config, (executionId) => {
+          record.executionId = executionId;
+          run.executionId = executionId;
+          this.history.save(record);
+        });
+      } catch (err) {
+        run.status = "error";
+        run.error = errorMessage(err);
+        if (err instanceof ExecutionFailure) {
+          run.finalisationErrors = err.finalisationErrors
+            .slice(0, 100)
+            .map((failure) => errorMessage(failure).slice(0, 1_000));
+        }
+        this.logger.error(`error ${job.id}`, err);
+      }
+      run.durationMs = Math.max(0, Date.now() - startedMs);
+      this.history.save({ ...record, ...run, id: record.id, finishedAt: new Date().toISOString() });
+      this.active.delete(record.id);
+      execution.lastRun = run.startedAt;
       execution.fireCount++;
-
+      this.logger.log(`${job.id} — duration=${(run.durationMs / 1000).toFixed(1)}s`);
       try {
         await this.onRunComplete(run);
       } catch (err) {
         this.logger.error(`onRunComplete failed for ${job.id}`, err);
-      } finally {
-        execution.activeCount--;
       }
+    } finally {
+      this.active.delete(record.id);
+      execution.activeCount--;
     }
+  }
+
+  /**
+   * Record a rejected trigger without running its body or incrementing completion counters.
+   */
+  private recordSkipped(config: JobConfig, reason: string): void {
+    const run = this.createRecord(config, "skipped");
+    this.history.save({ ...run, finishedAt: run.startedAt, reason });
+  }
+
+  /**
+   * Snapshot the selected configuration before a later edit can change its meaning.
+   */
+  private createRecord(config: JobConfig, status: JobRunRecord["status"]): JobRunRecord {
+    return {
+      id: randomUUID(),
+      jobId: config.id,
+      startedAt: new Date().toISOString(),
+      durationMs: 0,
+      status,
+      definition: {
+        description: config.description.slice(0, 1_000),
+        schedule: config.schedule.slice(0, 200),
+        type: config.type,
+        timeout: config.timeout,
+        ...(config.type === "agent"
+          ? { model: config.model?.slice(0, 500), thinking: config.thinking }
+          : {}),
+      },
+    };
   }
 
   /**
    * Dispatch to the injected runner for the job's type.
    */
-  private runJobBody(config: JobConfig): Promise<string> {
+  private runJobBody(
+    config: JobConfig,
+    reportExecution: (executionId: string) => void,
+  ): Promise<string> {
     switch (config.type) {
       case "agent":
         return this.runAgent({
           jobId: config.id,
           prompt: config.prompt,
+          reportExecution,
           model: config.model ?? undefined,
           thinking: config.thinking,
           timeoutMs: config.timeout ? config.timeout * 1_000 : undefined,
@@ -317,7 +483,11 @@ export class JobScheduler {
 
     try {
       job.cron?.stop();
-      job.cron = new Croner(job.config.schedule, () => this.fireJob(id));
+      job.cron = new Croner(job.config.schedule, () => {
+        void this.fireJob(id).catch((err) =>
+          this.logger.error(`scheduled run failed for ${id}`, err),
+        );
+      });
     } catch (err) {
       this.logger.error(`failed to start job ${id}`, err);
     }
@@ -340,7 +510,7 @@ export class JobScheduler {
   private buildLoadedJob(config: JobConfig): ScheduledJob {
     let execution = this.executions.get(config.id);
     if (!execution) {
-      execution = { activeCount: 0, lastRun: null, fireCount: 0 };
+      execution = { activeCount: 0, ...this.history.completed(config.id) };
       this.executions.set(config.id, execution);
     }
     return {

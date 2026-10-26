@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { silentLogger, type ToolContext } from "@picco-agent/core";
 import { JobLoader } from "./loader.js";
+import { CronHistory } from "./history.js";
 import { JobScheduler } from "./scheduler.js";
 import { buildCronTools, cronAdd, cronList, cronUpdate } from "./tools.js";
 
@@ -189,4 +190,85 @@ test("cron tools persist concurrency and omitted updates preserve the current li
   await loader.refresh();
   expect(loader.get("parallel")?.maxConcurrentRuns).toBe(2);
   expect(update.input.safeParse({ id: "parallel", maxConcurrentRuns: 11 }).success).toBe(false);
+});
+
+describe("cron_details", () => {
+  test("runs and inspects an accepted job ID longer than 200 characters", async () => {
+    const id = "a".repeat(201);
+    const file = path.join(cronDir, "runs.sqlite");
+    await scheduler.stop();
+    scheduler = new JobScheduler({
+      loader,
+      history: new CronHistory({ file }),
+      runAgent: async () => "finished",
+      runScript: async () => "unused",
+      onRunComplete: () => {},
+    });
+    try {
+      await scheduler.addJob({
+        id,
+        type: "agent",
+        description: "A job with a long ID",
+        schedule: "0 */5 * * * *",
+        enabled: true,
+        prompt: "Do the work",
+      });
+      await scheduler.fireJob(id);
+      const details = buildCronTools(() => ({ scheduler })).find(
+        (tool) => tool.name === "cron_details",
+      )!;
+      const result = JSON.parse(
+        String(await details.execute(details.input.parse({ id }), toolCtx)),
+      );
+      expect(result.recentRuns).toEqual([
+        expect.objectContaining({ jobId: id, status: "success", output: "finished" }),
+      ]);
+      await scheduler.stop();
+      const restored = new CronHistory({ file });
+      try {
+        expect(restored.list(id)[0]).toMatchObject({ jobId: id, status: "success" });
+      } finally {
+        restored.close();
+      }
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
+  test("inspects a removed job without executing it and applies bounded history pagination", async () => {
+    await cronAdd(scheduler, {
+      id: "historical",
+      description: "d",
+      schedule: "0 0 8 * * *",
+      type: "script",
+      command: "echo hi",
+    });
+    await scheduler.fireJob("historical");
+    await scheduler.fireJob("historical");
+    await scheduler.removeJob("historical");
+    const details = buildCronTools(() => ({ scheduler })).find(
+      (tool) => tool.name === "cron_details",
+    )!;
+    const output = JSON.parse(
+      String(
+        await details.execute(
+          details.input.parse({ id: "historical", recentRunsLimit: 1 }),
+          toolCtx,
+        ),
+      ),
+    );
+    expect(output).toMatchObject({
+      found: true,
+      scheduled: false,
+      activeRuns: [],
+      totalRuns: 2,
+      nextOffset: 1,
+    });
+    expect(output.recentRuns).toHaveLength(1);
+    expect(details.input.safeParse({ id: "historical", recentRunsLimit: 101 }).success).toBe(false);
+    expect(details.input.safeParse({ id: "../escape" }).success).toBe(false);
+    expect(cronList(scheduler)).toContain("historical");
+    const pastEnd = scheduler.details("historical", 1, 2);
+    expect(pastEnd).toMatchObject({ found: true, totalRuns: 2, recentRuns: [], nextOffset: null });
+  });
 });

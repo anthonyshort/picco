@@ -241,6 +241,31 @@ configuration it started with. Independent agent runs receive unique sessions.
 Their workers are closed after success, failure or timeout, before completion is
 reported. Session files remain available for inspection.
 
+## Inspect scheduled work
+
+The cron plugin provides `cron_list` for a bounded overview and `cron_details` for
+one job's current definition, active executions and persisted output/errors:
+
+```text
+cron_list({ includeDisabled: true, limit: 20 })
+cron_details({ id: "weekly-digest", recentRunsLimit: 10 })
+```
+
+The plugin saves run metadata and bounded output in its private `runs.sqlite` database, so history survives restart and job removal. Records left running by the previous process become interrupted because the scheduler cannot prove what completed before it stopped. Capacity skips have separate records and never count as started work.
+
+History keeps up to 1,000 records for at most 30 days, with output capped at 8,192 characters by default. The first limit reached removes old completed records: one run every five minutes fills 1,000 records in about 3.5 days. Configure these bounds with `cron({ history: { maxRecords, retentionDays, maxOutputChars } })`. This is a summary history, so keep full reports or logs in your workflow’s files.
+
+SQLite handles transactions, retention and paginated lookups without rewriting the whole history. One scheduler holds the database lock until its active work stops; a second scheduler cannot open the same file and interrupt its runs. Use the cron tools to inspect history while the scheduler runs. This plugin requires Node 22.13 or newer for the built-in SQLite driver.
+
+The earlier JSON history format was never released. This change uses a new database file and leaves any existing `runs.json` untouched rather than importing or deleting it.
+
+Historical definition snapshots exclude prompt and command bodies. They record
+job model overrides when available, rather than guessing inherited runtime model
+metadata. Completion follows execution finalisation and ephemeral worker cleanup;
+`onRunComplete` observes the saved result and does not own critical cleanup.
+A successful run still does not prove a domain action or notification succeeded;
+inspect the owning plugin's evidence.
+
 ## Send notifications
 
 Use the notifications plugin for unattended updates, such as a completed cron run. Configure named destinations with transport adapters; the agent chooses a destination without supplying a recipient or credentials:
