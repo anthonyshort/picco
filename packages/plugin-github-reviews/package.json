@@ -1,0 +1,36 @@
+{
+  "name": "@picco-agent/plugin-github-reviews",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Internal GraphQL source for personal GitHub review requests.",
+  "homepage": "https://github.com/picco-agent/picco/tree/main/packages/plugin-github-reviews",
+  "bugs": {
+    "url": "https://github.com/picco-agent/picco/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/picco-agent/picco.git",
+    "directory": "packages/plugin-github-reviews"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/github.d.ts",
+      "import": "./dist/github.js"
+    }
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}
