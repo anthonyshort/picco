@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { z } from "zod";
 import {
   createGithubSource,
   GithubReviewSourceError,
@@ -288,6 +289,70 @@ describe("GitHub review source", () => {
     expect(fixture.inputs[1]).toContain('"includeTimeline":false');
   });
 
+  test("continues history with the completed request connection omitted", async () => {
+    const fixture = inspectionFixture({ events: [], secondEventPage: [request()] });
+    const result = await fixture.source.inspect(candidate, "reviewer");
+    expect(result).toMatchObject({
+      requestEventId: "event:70",
+      requestedAt: REQUESTED,
+      rateLimit: { cost: 2 },
+    });
+    expect(fixture.calls).toHaveLength(2);
+    expect(fixture.inputs[1]).toContain('"includeRequests":false');
+    expect(fixture.inputs[1]).toContain('"before":"older"');
+  });
+
+  test("rechecks live eligibility after either inspection connection finishes", async () => {
+    for (const historyFirst of [true, false]) {
+      for (const [change, reason] of [
+        [{ headRefOid: "b".repeat(40) }, "head-changed"],
+        [{ isDraft: true }, "no-longer-ready-for-review"],
+        [{ state: "CLOSED" }, "no-longer-ready-for-review"],
+      ] as const) {
+        const fixture = inspectionFixture({
+          ...(historyFirst
+            ? {
+                events: [request()],
+                requests: [],
+                secondRequestPage: [{ requestedReviewer: { login: "reviewer" } }],
+              }
+            : { events: [], secondEventPage: [request()] }),
+          live: (page) => (page === 2 ? change : {}),
+        });
+        const result = await fixture.source.inspect(candidate, "reviewer");
+        expect(result.blockedReason).toBe(reason);
+        expect(result.rateLimit.cost).toBe(2);
+        expect(result.requestEventId).toBe(historyFirst ? "event:70" : undefined);
+        expect(fixture.calls).toHaveLength(2);
+      }
+    }
+  });
+
+  test("rechecks viewer and pull request identity while only history remains", async () => {
+    const viewer = inspectionFixture({
+      secondEventPage: [request()],
+      viewer: (page) => (page === 2 ? "another-reviewer" : "reviewer"),
+    });
+    await expect(viewer.source.inspect(candidate, "reviewer")).rejects.toThrow("reviewer changed");
+    const identity = inspectionFixture({
+      secondEventPage: [request()],
+      live: (page) => (page === 2 ? { number: 13 } : {}),
+    });
+    await expect(identity.source.inspect(candidate, "reviewer")).rejects.toThrow(
+      "identity does not match",
+    );
+  });
+
+  test("blocks a missing personal request before processing invalid history", async () => {
+    const fixture = inspectionFixture({
+      requests: [],
+      events: [request(70, "2026-10-27T10:00:00Z")],
+    });
+    expect((await fixture.source.inspect(candidate, "reviewer")).blockedReason).toBe(
+      "review-no-longer-requested",
+    );
+  });
+
   test("a team request does not count as a direct personal request", async () => {
     const fixture = inspectionFixture({ requests: [{ requestedReviewer: {} }] });
     expect((await fixture.source.inspect(candidate, "reviewer")).blockedReason).toBe(
@@ -410,7 +475,7 @@ function pull(selected: Candidate) {
 }
 
 /**
- * Build numeric REST request-event evidence.
+ * Build opaque GraphQL request-event evidence.
  */
 function request(id = 70, created_at = REQUESTED, reviewer = "reviewer") {
   return { id: `event:${id}`, createdAt: created_at, requestedReviewer: { login: reviewer } };
@@ -422,7 +487,8 @@ function request(id = 70, created_at = REQUESTED, reviewer = "reviewer") {
 function inspectionFixture(
   opts: {
     events?: unknown[];
-    live?: Record<string, unknown>;
+    live?: Record<string, unknown> | ((page: number) => Record<string, unknown>);
+    viewer?: (page: number) => string;
     secondEventPage?: unknown[];
     requests?: unknown[];
     secondRequestPage?: unknown[];
@@ -437,38 +503,55 @@ function inspectionFixture(
     inputs.push(input ?? "");
     expect(args).toEqual(["api", "graphql", "--input", "-"]);
     expect(input).toContain("query InspectReview");
-    const olderPage = input?.includes('"before":"older"');
-    const nextRequests = input?.includes('"after":"more-requests"');
+    const { variables } = z
+      .object({
+        variables: z.object({
+          after: z.string().nullable(),
+          before: z.string().nullable(),
+          includeRequests: z.boolean(),
+          includeTimeline: z.boolean(),
+        }),
+      })
+      .parse(JSON.parse(input ?? ""));
+    const olderPage = variables.before === "older";
+    const nextRequests = variables.after === "more-requests";
+    const live = {
+      number: selected.number,
+      title: selected.title,
+      url: selected.url,
+      createdAt: selected.createdAt,
+      headRefOid: HEAD,
+      state: "OPEN",
+      isDraft: false,
+      reviewRequests: {
+        nodes: nextRequests
+          ? (opts.secondRequestPage ?? [])
+          : (opts.requests ?? [
+              { requestedReviewer: { login: opts.viewer?.(calls.length) ?? "reviewer" } },
+            ]),
+        pageInfo: {
+          hasNextPage: Boolean(opts.secondRequestPage) && !nextRequests,
+          endCursor: "more-requests",
+        },
+      },
+      timelineItems: {
+        nodes: olderPage ? (opts.secondEventPage ?? []) : (opts.events ?? []),
+        pageInfo: {
+          hasPreviousPage: Boolean(opts.secondEventPage) && !olderPage,
+          startCursor: "older",
+        },
+      },
+      ...(typeof opts.live === "function" ? opts.live(calls.length) : opts.live),
+    };
     return JSON.stringify({
       data: {
-        viewer: { login: "reviewer" },
+        viewer: { login: opts.viewer?.(calls.length) ?? "reviewer" },
         repository: {
           nameWithOwner: selected.repository,
           pullRequest: {
-            number: selected.number,
-            title: selected.title,
-            url: selected.url,
-            createdAt: selected.createdAt,
-            headRefOid: HEAD,
-            state: "OPEN",
-            isDraft: false,
-            reviewRequests: {
-              nodes: nextRequests
-                ? (opts.secondRequestPage ?? [])
-                : (opts.requests ?? [{ requestedReviewer: { login: "reviewer" } }]),
-              pageInfo: {
-                hasNextPage: Boolean(opts.secondRequestPage) && !nextRequests,
-                endCursor: "more-requests",
-              },
-            },
-            timelineItems: {
-              nodes: olderPage ? (opts.secondEventPage ?? []) : (opts.events ?? []),
-              pageInfo: {
-                hasPreviousPage: Boolean(opts.secondEventPage) && !olderPage,
-                startCursor: "older",
-              },
-            },
-            ...opts.live,
+            ...live,
+            reviewRequests: variables.includeRequests ? live.reviewRequests : undefined,
+            timelineItems: variables.includeTimeline ? live.timelineItems : undefined,
           },
         },
         rateLimit: { cost: 1, remaining: 4_999, resetAt: "2026-10-26T13:00:00Z" },
