@@ -1,0 +1,39 @@
+{
+  "name": "@picco-agent/plugin-github-reviews",
+  "version": "0.0.0",
+  "description": "Picco plugin: poll personal GitHub review requests and run durable, bounded review sessions.",
+  "homepage": "https://github.com/picco-agent/picco/tree/main/packages/plugin-github-reviews",
+  "bugs": {
+    "url": "https://github.com/picco-agent/picco/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/picco-agent/picco.git",
+    "directory": "packages/plugin-github-reviews"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "@picco-agent/core": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}

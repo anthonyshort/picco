@@ -24,6 +24,7 @@ extensions, skills, or packages.
 - [Configure Pi](./guides/configuring-pi.md) — choose a model and add instructions or Pi resources.
 - [Tools](./guides/tools.md) — expose controlled host-side capabilities.
 - [Plugins](./guides/plugins.md) — add gateways, services, commands, and session behaviour.
+- [GitHub reviews](./guides/github-reviews.md) — poll personal review requests and run persistent queued work.
 - [Identity](./guides/identity.md) — connect services using each sender's credentials.
 - [Runtimes](./guides/runtimes/index.md) — choose local execution or a bubblewrap sandbox.
 - [Providers](./guides/providers.md) — make model credentials and custom providers available.
