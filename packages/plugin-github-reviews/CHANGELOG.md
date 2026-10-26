@@ -1,5 +1,11 @@
 # @picco-agent/plugin-github-reviews
 
+## 0.1.1
+
+### Patch Changes
+
+- e65ef39: Allow an unconfigured review plugin to start disabled with no repositories, keeping management tools available without calling GitHub. Export the settings schema so applications can validate configuration without copying its defaults and limits. Enabling reviews still requires at least one repository route.
+
 ## 0.1.0
 
 ### Minor Changes
