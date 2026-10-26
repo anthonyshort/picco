@@ -23,13 +23,14 @@ const agent = createAgent({
 
 Picco includes packages for common assistant surfaces:
 
-| Plugin                                                         | Use                                                                          |
-| -------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| [`plugin-telegram`](../../packages/plugin-telegram/)           | Receive messages and keep one session per chat or topic                      |
-| [`plugin-github`](../../packages/plugin-github/)               | Respond to GitHub mentions with scoped installation credentials              |
-| [`plugin-agentmail`](../../packages/plugin-agentmail/)         | Receive email and expose mailbox tools                                       |
-| [`plugin-cron`](../../packages/plugin-cron/)                   | Run scheduled prompts and manage jobs                                        |
-| [`plugin-notifications`](../../packages/plugin-notifications/) | Send notifications through configured adapters and inspect delivery receipts |
+| Plugin                                                           | Use                                                                          |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| [`plugin-telegram`](../../packages/plugin-telegram/)             | Receive messages and keep one session per chat or topic                      |
+| [`plugin-github`](../../packages/plugin-github/)                 | Respond to GitHub mentions with scoped installation credentials              |
+| [`plugin-github-reviews`](../../packages/plugin-github-reviews/) | Poll personal review requests and run queued reviews                         |
+| [`plugin-agentmail`](../../packages/plugin-agentmail/)           | Receive email and expose mailbox tools                                       |
+| [`plugin-cron`](../../packages/plugin-cron/)                     | Run scheduled prompts and manage jobs                                        |
+| [`plugin-notifications`](../../packages/plugin-notifications/)   | Send notifications through configured adapters and inspect delivery receipts |
 
 The [identity plugin](./identity.md) adds per-user service connections. Combine plugins to build the
 assistant you need.

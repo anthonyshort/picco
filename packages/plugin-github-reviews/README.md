@@ -1,9 +1,38 @@
-# GitHub review state
+# `@picco-agent/plugin-github-reviews`
 
-Private workspace package for reading personal GitHub review requests through GraphQL and storing review workflow state in SQLite.
+Poll personal GitHub review requests and run review sessions from a persistent queue.
 
-The source discovers candidates and revalidates their head, personal request and request cycle using the authenticated host GitHub CLI. It performs no GitHub mutations.
+## Install
 
-The store owns the queue, reviewed-commit history, PR reservations, run outcomes and persistent pause/poll state in one database. Database creation occurs only when the store factory is called. Merely importing this package starts no polling or model sessions.
+```sh
+npm install @picco-agent/core @picco-agent/plugin-github-reviews @picco-agent/runtime-local
+```
 
-Run its tests with `pnpm exec vitest run packages/plugin-github-reviews`.
+## Usage
+
+```ts
+import { createAgent } from "@picco-agent/core";
+import { githubReviews } from "@picco-agent/plugin-github-reviews";
+import { local } from "@picco-agent/runtime-local";
+
+const agent = createAgent({
+  name: "review-assistant",
+  runtime: local(),
+  pi: { skills: ["./skills"] },
+  plugins: [
+    githubReviews({
+      enabled: true,
+      repositories: [{ name: "owner/repository", skill: "review" }],
+    }),
+  ],
+});
+
+await agent.start();
+```
+
+Install and authenticate the GitHub CLI on the host, and provide the configured review skill.
+
+## Docs
+
+- [Run requested GitHub reviews](../../docs/guides/github-reviews.md)
+- [Plugins](../../docs/guides/plugins.md)

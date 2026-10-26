@@ -127,6 +127,8 @@ memory.
 Start with [Getting started](docs/getting-started.md), or browse the
 [documentation index](docs/index.md).
 
+For requested pull request automation, see [GitHub reviews](docs/guides/github-reviews.md).
+
 ## License
 
 MIT

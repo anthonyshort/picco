@@ -1,8 +1,7 @@
 {
   "name": "@picco-agent/plugin-github-reviews",
   "version": "0.0.0",
-  "private": true,
-  "description": "Internal GraphQL source for personal GitHub review requests.",
+  "description": "Picco plugin: poll personal GitHub review requests and run durable, bounded review sessions.",
   "homepage": "https://github.com/picco-agent/picco/tree/main/packages/plugin-github-reviews",
   "bugs": {
     "url": "https://github.com/picco-agent/picco/issues"
@@ -19,15 +18,19 @@
   "type": "module",
   "exports": {
     ".": {
-      "types": "./dist/github.d.ts",
-      "import": "./dist/github.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "rimraf dist && tsc -p tsconfig.build.json",
     "prepare": "pnpm build"
   },
   "dependencies": {
+    "@picco-agent/core": "workspace:*",
     "zod": "^4.4.3"
   },
   "engines": {
