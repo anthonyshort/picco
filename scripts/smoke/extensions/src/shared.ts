@@ -20,7 +20,9 @@ export async function runCheck(opts: {
     console.log(`[${label}] agent started — driving one turn…`);
 
     const turn = agent.run(
-      `Call the ${toolName} tool with prefix "smoke-", then reply with its text content and nothing else.`,
+      `Invoke the ${toolName} tool with ${JSON.stringify({ prefix: "smoke-" })}. ` +
+        "Make the tool call instead of writing tool-call markup or code. " +
+        "Wait for the tool result, then reply with exactly its text content and nothing else.",
       { timeoutMs: 240_000 },
     );
     const { text } = await turn;
@@ -28,12 +30,15 @@ export async function runCheck(opts: {
 
     // Replayed post hoc — the finished turn's event stream is complete by now.
     const tools: string[] = [];
+    const completedTools: string[] = [];
     for await (const event of turn.events) {
       if (event.type === "tool_start") tools.push(event.tool);
+      if (event.type === "tool_end" && !event.isError) completedTools.push(event.tool);
     }
 
     const checks: [string, boolean][] = [
       [`extension tool ${toolName} fired`, tools.includes(toolName)],
+      [`extension tool ${toolName} completed`, completedTools.includes(toolName)],
       ["sentinel round-tripped into the reply", text.includes(sentinel)],
       ["tool input round-tripped into the reply", text.startsWith("smoke-")],
     ];

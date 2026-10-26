@@ -25,7 +25,7 @@ const ping = tool({
 
 const agent = createAgent({
   name: "ext-bwrap-bridge",
-  pi: createSmokeModel(),
+  pi: { ...createSmokeModel(), allowedTools: [ping.name] },
   runtime: bwrap({ env: ["OPENROUTER_API_KEY"] }),
   tools: [ping],
 });
