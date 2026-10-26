@@ -290,10 +290,192 @@ describe("createReviewStore", () => {
         admitted.id,
         "completed",
         "Verified saved review report",
+        admitted.startedAt,
       );
       expect(
         fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, candidate.head),
       ).toBe(true);
+      expect(fixtureState.first.status().reservations).toEqual([]);
+    } finally {
+      fixtureState.cleanup();
+    }
+  });
+
+  test("completion recovery preserves a newer request made before operator resolution", () => {
+    const fixtureState = fixture();
+    try {
+      const [item] = fixtureState.populate();
+      fixtureState.first.setCycle(item!.id, "request:first", "2026-10-25T00:00:00Z");
+      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
+      const reviewedAt = "2026-10-26T00:00:10.000Z";
+      const newerRequestAt = "2026-10-26T00:00:20.000Z";
+      fixtureState.advance(30_000);
+      fixtureState.first.recoverInterrupted();
+      fixtureState.first.resolveInterrupted(
+        admitted.id,
+        "completed",
+        "Verified original completion timestamp in saved report",
+        reviewedAt,
+      );
+      expect(
+        fixtureState.first.hasCompleted(
+          "reviewer",
+          candidate.repository,
+          42,
+          candidate.head,
+          "request:second",
+          newerRequestAt,
+        ),
+      ).toBe(false);
+      expect(
+        fixtureState.first.hasAttempted(
+          "reviewer",
+          candidate.repository,
+          42,
+          candidate.head,
+          "request:second",
+          newerRequestAt,
+        ),
+      ).toBe(false);
+      expect(
+        fixtureState.first.hasCompleted(
+          "reviewer",
+          candidate.repository,
+          42,
+          candidate.head,
+          "request:first",
+        ),
+      ).toBe(true);
+      expect(
+        fixtureState.first.hasCompleted(
+          "reviewer",
+          candidate.repository,
+          42,
+          candidate.head,
+          "request:equal",
+          reviewedAt,
+        ),
+      ).toBe(true);
+      expect(fixtureState.first.details(admitted.id)?.runs[0]?.reviewedAt).toBe(reviewedAt);
+      expect(fixtureState.first.status().reservations).toEqual([]);
+    } finally {
+      fixtureState.cleanup();
+    }
+  });
+
+  test("completion recovery accepts GitHub evidence from the run's start second", () => {
+    const fixtureState = fixture();
+    try {
+      const [item] = fixtureState.populate();
+      fixtureState.advance(500);
+      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
+      fixtureState.advance(30_000);
+      fixtureState.first.recoverInterrupted();
+      const before = fixtureState.first.details(admitted.id);
+      const reservations = fixtureState.first.status().reservations;
+      expect(() =>
+        fixtureState.first.resolveInterrupted(
+          admitted.id,
+          "completed",
+          "Evidence predates this run",
+          "2026-10-25T23:59:59Z",
+        ),
+      ).toThrow();
+      expect(fixtureState.first.details(admitted.id)).toEqual(before);
+      expect(fixtureState.first.status().reservations).toEqual(reservations);
+      fixtureState.first.resolveInterrupted(
+        admitted.id,
+        "completed",
+        "Verified GitHub second-precision completion timestamp",
+        "2026-10-26T00:00:00Z",
+      );
+      expect(admitted.startedAt).toBe("2026-10-26T00:00:00.500Z");
+      expect(fixtureState.first.details(admitted.id)?.runs[0]?.reviewedAt).toBe(
+        "2026-10-26T00:00:00Z",
+      );
+      expect(
+        fixtureState.first.hasCompleted(
+          "reviewer",
+          candidate.repository,
+          42,
+          candidate.head,
+          "request:newer",
+          "2026-10-26T00:00:01Z",
+        ),
+      ).toBe(false);
+      expect(
+        fixtureState.first.hasAttempted(
+          "reviewer",
+          candidate.repository,
+          42,
+          candidate.head,
+          "request:newer",
+          "2026-10-26T00:00:01Z",
+        ),
+      ).toBe(false);
+      expect(fixtureState.first.status().reservations).toEqual([]);
+    } finally {
+      fixtureState.cleanup();
+    }
+  });
+
+  test.each([
+    { label: "missing", reviewedAt: undefined },
+    { label: "malformed", reviewedAt: "not-a-timestamp" },
+    { label: "future", reviewedAt: "2026-10-26T00:00:31.000Z" },
+    { label: "before the run", reviewedAt: "2026-10-25T23:59:59.000Z" },
+  ])("completed resolution rejects $label evidence without changing state", ({ reviewedAt }) => {
+    const fixtureState = fixture();
+    try {
+      const [item] = fixtureState.populate();
+      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
+      fixtureState.advance(30_000);
+      fixtureState.first.recoverInterrupted();
+      const before = fixtureState.first.details(admitted.id);
+      const reservations = fixtureState.first.status().reservations;
+      expect(() =>
+        fixtureState.first.resolveInterrupted(
+          admitted.id,
+          "completed",
+          "Operator supplied evidence",
+          reviewedAt,
+        ),
+      ).toThrow();
+      expect(fixtureState.first.details(admitted.id)).toEqual(before);
+      expect(fixtureState.first.status().reservations).toEqual(reservations);
+      expect(
+        fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, candidate.head),
+      ).toBe(false);
+    } finally {
+      fixtureState.cleanup();
+    }
+  });
+
+  test("completed resolution preserves an existing declaration instead of later evidence", () => {
+    const fixtureState = fixture();
+    try {
+      const [item] = fixtureState.populate();
+      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
+      fixtureState.first.markReviewed(admitted.id, "Original completed review");
+      fixtureState.advance(30_000);
+      fixtureState.first.recoverInterrupted();
+      fixtureState.first.resolveInterrupted(
+        admitted.id,
+        "completed",
+        "Confirmed original declaration",
+        "2026-10-26T00:00:30.000Z",
+      );
+      expect(fixtureState.first.details(admitted.id)?.runs[0]?.reviewedAt).toBe(admitted.startedAt);
+      expect(
+        fixtureState.first.hasCompleted(
+          "reviewer",
+          candidate.repository,
+          42,
+          candidate.head,
+          "request:newer",
+          "2026-10-26T00:00:10.000Z",
+        ),
+      ).toBe(false);
       expect(fixtureState.first.status().reservations).toEqual([]);
     } finally {
       fixtureState.cleanup();

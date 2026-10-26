@@ -197,6 +197,32 @@ export function createReviewStore(filename: string, now = Date.now) {
       );
   }
 
+  function completeResolution(admitted: StoreRun, reason: string, suppliedReviewedAt?: string) {
+    const recorded = z
+      .object({ reviewedAt: z.iso.datetime().nullable() })
+      .parse(database.prepare("SELECT reviewedAt FROM review_runs WHERE id=?").get(admitted.id));
+    const reviewedAt = recorded.reviewedAt ?? suppliedReviewedAt;
+    if (!reviewedAt) {
+      throw new Error("Verified original reviewedAt is required to resolve an undeclared review");
+    }
+    if (
+      recorded.reviewedAt === null &&
+      (Date.parse(reviewedAt) < Math.floor(Date.parse(admitted.startedAt) / 1000) * 1000 ||
+        Date.parse(reviewedAt) > now())
+    ) {
+      throw new Error("Original reviewedAt must be between the review run's start second and now");
+    }
+    database
+      .prepare(
+        "UPDATE review_runs SET state='completed',reviewedAt=?,resolution='completed',resolutionReason=?,reason=NULL WHERE id=?",
+      )
+      .run(reviewedAt, reason, admitted.id);
+    recordReviewed(admitted, reviewedAt, reason);
+    database
+      .prepare("UPDATE review_queue SET status='completed',reason=NULL WHERE id=?")
+      .run(admitted.itemId);
+  }
+
   return {
     reconcile(reviewer: string, candidates: Candidate[]) {
       const checked = z.array(CandidateSchema).max(1000).parse(candidates);
@@ -415,13 +441,19 @@ export function createReviewStore(filename: string, now = Date.now) {
         return rows.length;
       });
     },
-    resolveInterrupted(runId: string, action: "completed" | "retry", reason: string) {
+    resolveInterrupted(
+      runId: string,
+      action: "completed" | "retry",
+      reason: string,
+      reviewedAt?: string,
+    ) {
       const checked = z
         .object({
           action: z.enum(["completed", "retry"]),
           reason: z.string().trim().min(1).max(6000),
+          reviewedAt: z.iso.datetime().optional(),
         })
-        .parse({ action, reason });
+        .parse({ action, reason, reviewedAt });
       return transaction(() => {
         const admitted = run(runId);
         if (
@@ -434,22 +466,7 @@ export function createReviewStore(filename: string, now = Date.now) {
         }
         switch (checked.action) {
           case "completed":
-            database
-              .prepare(
-                "UPDATE review_runs SET state='completed',reviewedAt=COALESCE(reviewedAt,?),resolution='completed',resolutionReason=?,reason=NULL WHERE id=?",
-              )
-              .run(new Date(now()).toISOString(), checked.reason, runId);
-            recordReviewed(
-              admitted,
-              z
-                .object({ reviewedAt: z.iso.datetime() })
-                .parse(database.prepare("SELECT reviewedAt FROM review_runs WHERE id=?").get(runId))
-                .reviewedAt,
-              checked.reason,
-            );
-            database
-              .prepare("UPDATE review_queue SET status='completed',reason=NULL WHERE id=?")
-              .run(admitted.itemId);
+            completeResolution(admitted, checked.reason, checked.reviewedAt);
             break;
           case "retry":
             if (
