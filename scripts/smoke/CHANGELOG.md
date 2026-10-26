@@ -1,5 +1,20 @@
 # smoke-tests
 
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies [2ace4f6]
+- Updated dependencies [dd1c05f]
+- Updated dependencies [d774a7c]
+- Updated dependencies [10eda2f]
+- Updated dependencies [4dda0ad]
+- Updated dependencies [2ace4f6]
+  - @picco-agent/core@0.3.0
+  - @picco-agent/plugin-cron@0.2.0
+  - @picco-agent/plugin-notifications@0.2.0
+  - @picco-agent/runtime-bwrap@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes
