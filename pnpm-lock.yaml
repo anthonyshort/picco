@@ -236,11 +236,26 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
 
+  packages/plugin-notifications:
+    dependencies:
+      '@picco-agent/core':
+        specifier: workspace:*
+        version: link:../core
+      lru-cache:
+        specifier: 11.5.2
+        version: 11.5.2
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
   packages/plugin-telegram:
     dependencies:
       '@picco-agent/core':
         specifier: workspace:*
         version: link:../core
+      '@picco-agent/plugin-notifications':
+        specifier: workspace:*
+        version: link:../plugin-notifications
       grammy:
         specifier: ^1.44.0
         version: 1.45.1
@@ -268,6 +283,9 @@ importers:
       '@picco-agent/plugin-cron':
         specifier: workspace:*
         version: link:../../packages/plugin-cron
+      '@picco-agent/plugin-notifications':
+        specifier: workspace:*
+        version: link:../../packages/plugin-notifications
       '@picco-agent/runtime-bwrap':
         specifier: workspace:*
         version: link:../../packages/runtime-bwrap

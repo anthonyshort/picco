@@ -1,28 +1,43 @@
-import { tool, type Tool } from "@picco-agent/core";
+import { Api, GrammyError } from "grammy";
 import * as z from "zod";
+import type { NotificationAdapter } from "@picco-agent/plugin-notifications";
 import { TELEGRAM_MAX } from "./limits.js";
 
 /**
- * Build a notification tool whose recipient is configured outside the model's input.
+ * One fixed Telegram recipient, independent of the conversational gateway and its allowlist.
  */
-export function createNotificationTool(
-  chatId: number,
-  send: (chatId: number, text: string) => Promise<unknown>,
-): Tool {
-  return tool({
-    name: "telegram_notify",
-    description:
-      "Send one plain-text notification to the configured Telegram chat. Use reply for conversation responses. Do not retry delivery that was not confirmed.",
-    input: z.object({ text: z.string().trim().min(1).max(TELEGRAM_MAX) }).strict(),
-    async execute({ text }) {
+export interface TelegramNotificationOptions {
+  botToken: string;
+  chatId: number;
+}
+
+/**
+ * Send plain-text notifications without starting a polling bot or registering another tool.
+ */
+export function telegramNotifications(options: TelegramNotificationOptions): NotificationAdapter {
+  const chatId = z
+    .number()
+    .int()
+    .safe()
+    .refine((value) => value !== 0)
+    .parse(options.chatId);
+  const api = new Api(options.botToken);
+  return {
+    async send(text, signal) {
+      if (text.length > TELEGRAM_MAX) return { status: "rejected" };
       try {
-        await send(chatId, text);
-      } catch {
-        throw new Error(
-          "Telegram notification delivery was not confirmed. Do not retry automatically.",
+        // grammY declares a legacy EventTarget shim; its transport accepts native signals.
+        const receipt = await api.sendMessage(
+          chatId,
+          text,
+          { link_preview_options: { is_disabled: true } },
+          signal as Parameters<Api["sendMessage"]>[3],
         );
+        return { status: "confirmed", externalId: String(receipt.message_id) };
+      } catch (err) {
+        if (err instanceof GrammyError) return { status: "rejected" };
+        throw err;
       }
-      return "Telegram confirmed notification delivery.";
     },
-  });
+  };
 }
