@@ -30,3 +30,4 @@ const agent = createAgent({
 ## Docs
 
 - [Plugins](../../docs/guides/plugins.md)
+- [Send notifications with the Telegram adapter](../../docs/guides/plugins.md#send-notifications)

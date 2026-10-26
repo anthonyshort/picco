@@ -52,3 +52,36 @@ Those calls create a temporary session, run the turn, and stop its process autom
 
 Session directories remain on disk in both cases. See [Filesystem](./filesystem.md) for their
 layout and [Agents](../guides/agents.md) for the APIs used to run them.
+
+## Finish execution-owned work
+
+Each submitted turn has a trusted `turn.execution` identity, including while queued.
+Bridged tools receive that same identity and a cancellation signal in their context.
+Later turns in one conversation have different execution IDs.
+
+A plugin can await critical cleanup using `finaliseExecution`. This is a partial
+plugin definition:
+
+```ts
+{
+  name: "reservations",
+  async finaliseExecution({ execution, outcome, signal }) {
+    await reservations.finish(execution.id, { outcome, signal });
+  },
+}
+```
+
+Picco waits for admitted host tools and runs finalisers in plugin order before
+settling the turn or emitting its final event. Each finaliser has a 30-second
+default deadline, configurable with `sessions.finalisationTimeoutMs`. A failed
+finaliser does not skip later finalisers. Its session remains quarantined rather
+than invoking legacy release hooks or admitting new work under uncertain ownership. `ExecutionFailure` preserves the original
+error and separate cleanup errors. Finalisers must honour their signal and retain
+uncertain external ownership when their deadline expires.
+
+If host tools cannot settle within the deadline, Picco rejects the execution and
+skips release finalisers to quarantine ownership. It cannot retract a submitted
+remote write or stop arbitrary JavaScript. Background child integrations must
+stop or join their owned work before Pi settles; detached work cannot safely
+borrow a later turn's execution identity. Idle or finalising sessions cannot
+issue new bridged calls.

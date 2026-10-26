@@ -7,6 +7,7 @@
   "dependencies": {
     "@picco-agent/core": "workspace:*",
     "@picco-agent/plugin-cron": "workspace:*",
+    "@picco-agent/plugin-notifications": "workspace:*",
     "@picco-agent/runtime-bwrap": "workspace:*",
     "zod": "^4.4.3"
   }

@@ -613,4 +613,264 @@ describe("SessionManager", () => {
 
     expect(teardowns).toEqual(["telegram/a", "telegram/a", "telegram/b"]);
   });
+  test("awaits every critical finaliser before completion and separates executions in one session", async () => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const seen: string[] = [];
+    const mgr = manager(new FakeRuntime(), {
+      finalisers: [
+        {
+          name: "resource",
+          async run({ execution }) {
+            seen.push(execution.id);
+            entered.resolve();
+            await release.promise;
+          },
+        },
+      ],
+    });
+    const first = mgr.namespace("telegram").run("chat", "first");
+    let completed = false;
+    void first.then(() => {
+      completed = true;
+      return undefined;
+    });
+    await entered.promise;
+    expect(completed).toBe(false);
+    expect(first.execution?.id).toBe(seen[0]);
+    release.resolve();
+    await first;
+    const second = mgr.namespace("telegram").run("chat", "second");
+    await second;
+    expect(second.execution?.id).not.toBe(first.execution?.id);
+    expect(seen).toHaveLength(2);
+  });
+
+  test("preserves the primary failure and runs later finalisers after a cleanup failure", async () => {
+    const seen: string[] = [];
+    const mgr = manager(new FakeRuntime({ dieOnPrompt: true }), {
+      finalisers: [
+        {
+          name: "first",
+          run() {
+            seen.push("first");
+            throw new Error("cleanup one");
+          },
+        },
+        {
+          name: "second",
+          run() {
+            seen.push("second");
+            throw new Error("cleanup two");
+          },
+        },
+      ],
+    });
+    const failure = await mgr
+      .namespace("cron")
+      .run("job", "fail")
+      .catch((error) => error);
+    expect(failure.primary.message).toMatch(/exited/);
+    expect(failure.finalisationErrors).toHaveLength(2);
+    expect(seen).toEqual(["first", "second"]);
+  });
+
+  test("cancelling queued work neither prompts it nor aborts the active turn", async () => {
+    const gate = Promise.withResolvers<string>();
+    const runtime = new FakeRuntime({ reply: () => gate.promise });
+    const mgr = manager(runtime);
+    const first = mgr.namespace("telegram").run("chat", "first");
+    await vi.waitFor(() => expect(runtime.spawns[0]?.process.prompts).toEqual(["first"]));
+    const second = mgr.namespace("telegram").run("chat", "second");
+    second.abort("not needed");
+    expect(runtime.spawns[0]!.process.requests.some((request) => request.type === "abort")).toBe(
+      false,
+    );
+    gate.resolve("done");
+    expect((await first).text).toBe("done");
+    await expect(second).rejects.toThrow("not needed");
+    expect(runtime.spawns[0]!.process.prompts).toEqual(["first"]);
+  });
+
+  test("bounds a finaliser, aborts its signal and still runs remaining cleanup", async () => {
+    let timedOut: AbortSignal | undefined;
+    let next = false;
+    const mgr = manager(new FakeRuntime(), {
+      finalisationTimeoutMs: 10,
+      finalisers: [
+        {
+          name: "blocked",
+          run({ signal }) {
+            timedOut = signal;
+            return new Promise(() => {});
+          },
+        },
+        {
+          name: "next",
+          run() {
+            next = true;
+          },
+        },
+      ],
+    });
+    await expect(mgr.namespace("host").run("chat", "hi")).rejects.toThrow("finalisation");
+    expect(timedOut?.aborted).toBe(true);
+    expect(next).toBe(true);
+  });
+
+  test("cancelled preparation cannot later mint credentials or spawn a worker", async () => {
+    const entered = Promise.withResolvers<void>();
+    const gate = Promise.withResolvers<void>();
+    const minted = Promise.withResolvers<void>();
+    let credentials = 0;
+    let released = 0;
+    const runtime = new FakeRuntime();
+    const mgr = manager(runtime, {
+      finalisationTimeoutMs: 10,
+      async setupSession() {
+        entered.resolve();
+        await gate.promise;
+        credentials++;
+        minted.resolve();
+        return { pi: {}, bridgeToken: "late-token" };
+      },
+      revokeSession() {
+        credentials = 0;
+      },
+      teardownSession() {
+        released++;
+      },
+    });
+    const turn = mgr.namespace("host").run("chat", "hello");
+    await entered.promise;
+    turn.abort("cancel during setup");
+    await expect(turn).rejects.toThrow("cancel during setup");
+    expect(runtime.spawns).toHaveLength(0);
+    expect(released).toBe(0);
+    gate.resolve();
+    await minted.promise;
+    await vi.waitFor(() => expect(credentials).toBe(0));
+    expect(runtime.spawns).toHaveLength(0);
+    await expect(mgr.namespace("host").run("chat", "retry")).rejects.toThrow("quarantined");
+  });
+
+  test("reset during successful finalisation revokes and releases the session once", async () => {
+    const entered = Promise.withResolvers<void>();
+    const gate = Promise.withResolvers<void>();
+    let released = 0;
+    const runtime = new FakeRuntime();
+    const mgr = manager(runtime, {
+      finalisers: [
+        {
+          name: "cleanup",
+          async run() {
+            entered.resolve();
+            await gate.promise;
+          },
+        },
+      ],
+      teardownSession() {
+        released++;
+      },
+    });
+    const turn = mgr.namespace("host").run("chat", "hello");
+    await entered.promise;
+    const reset = mgr.namespace("host").reset("chat");
+    gate.resolve();
+    await turn;
+    await reset;
+    expect(released).toBe(1);
+    expect(runtime.spawns[0]!.process.alive).toBe(false);
+  });
+
+  test("reset waits for worker exit without waiting for or closing the queued successor", async () => {
+    const stopped = Promise.withResolvers<void>();
+    const stopping = Promise.withResolvers<void>();
+    const reply = Promise.withResolvers<string>();
+    const runtime = new FakeRuntime((index) =>
+      index === 0 ? { neverFinish: true } : { reply: () => reply.promise },
+    );
+    const sessions = manager(runtime).namespace("telegram");
+    const first = sessions.run("chat", "first");
+    const cancelled = first.catch((err: unknown) => err);
+    await vi.waitFor(() => expect(runtime.spawns[0]?.process.prompts).toEqual(["first"]));
+    const previous = runtime.spawns[0]!.process;
+    const kill = previous.kill.bind(previous);
+    previous.kill = async () => {
+      stopping.resolve();
+      await stopped.promise;
+      await kill();
+    };
+    const next = sessions.run("chat", "next");
+    let finished = false;
+    void first.catch(() => {
+      finished = true;
+    });
+    const reset = sessions.reset("chat");
+    try {
+      await stopping.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(runtime.spawns).toHaveLength(1);
+      expect(finished).toBe(false);
+      stopped.resolve();
+      await reset;
+      expect(await cancelled).toMatchObject({ message: expect.stringContaining("session reset") });
+      await vi.waitFor(() => expect(runtime.spawns).toHaveLength(2));
+      expect(runtime.spawns[1]!.process.alive).toBe(true);
+      expect(runtime.spawns[1]!.spec.resume).toBe(false);
+      reply.resolve("next response");
+      expect((await next).text).toBe("next response");
+      expect(runtime.spawns[1]!.process.alive).toBe(true);
+    } finally {
+      stopped.resolve();
+      reply.resolve("next response");
+      await Promise.allSettled([first, next, reset]);
+    }
+  });
+
+  test("quarantined host work revokes access without invoking ownership-release hooks", async () => {
+    let revoked = 0;
+    let released = 0;
+    let finalised = 0;
+    const runtime = new FakeRuntime();
+    const mgr = manager(runtime, {
+      finalisationTimeoutMs: 10,
+      quiesceExecution: () => new Promise(() => {}),
+      revokeSession() {
+        revoked++;
+      },
+      teardownSession() {
+        released++;
+      },
+      finalisers: [
+        {
+          name: "release",
+          run() {
+            finalised++;
+          },
+        },
+      ],
+    });
+    await expect(mgr.namespace("host").run("chat", "hi")).rejects.toThrow("finalisation");
+    expect(revoked).toBeGreaterThan(0);
+    expect(released).toBe(0);
+    expect(finalised).toBe(0);
+    expect(runtime.spawns[0]!.process.alive).toBe(false);
+  });
+
+  test("a queued one-shot can cancel before the active run releases capacity", async () => {
+    const gate = Promise.withResolvers<string>();
+    const runtime = new FakeRuntime({ reply: () => gate.promise });
+    const mgr = manager(runtime, { maxRuns: 1 });
+    const first = mgr.runOnce("host", "first");
+    await vi.waitFor(() => expect(runtime.spawns).toHaveLength(1));
+    const second = mgr.runOnce("host", "second");
+    second.abort("queued cancellation");
+    await expect(second).rejects.toThrow("queued cancellation");
+    expect(runtime.spawns).toHaveLength(1);
+    gate.resolve("done");
+    await first;
+    expect((await mgr.runOnce("host", "third")).text).toBe("done");
+    expect(runtime.spawns).toHaveLength(2);
+  });
 });

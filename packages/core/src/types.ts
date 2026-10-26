@@ -1,3 +1,4 @@
+import type { ExecutionFinalisation } from "./session/execution.js";
 import type { McpServerConfig } from "@earendil-works/pi-coding-agent";
 import type { Tool } from "./tools/tool.js";
 import type { Turn, TurnEvent, TurnResult } from "./session/turn.js";
@@ -449,6 +450,11 @@ export interface Plugin {
    * Called whenever any session is torn down.
    */
   releaseSession?(session: SessionRef): void;
+
+  /**
+   * Critical per-execution cleanup, awaited on success, failure and cancellation.
+   */
+  finaliseExecution?(ctx: ExecutionFinalisation): void | Promise<void>;
 }
 
 /**
@@ -650,6 +656,10 @@ export interface AgentConfig {
      * Default: 10.
      */
     maxRuns?: number;
+    /**
+     * Deadline for each plugin finaliser and tracked host-tool settlement (default 30 s).
+     */
+    finalisationTimeoutMs?: number;
   };
 }
 

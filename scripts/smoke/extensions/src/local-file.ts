@@ -19,6 +19,7 @@ const agent = createAgent({
   name: "ext-local-file",
   pi: {
     ...createSmokeModel(),
+    allowedTools: [PING_TOOL],
     extensions: [bundlePath],
   },
   runtime: local(),

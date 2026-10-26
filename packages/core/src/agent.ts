@@ -90,7 +90,6 @@ export function createAgent(config: AgentConfig): AgentHandle {
   const commands = collectCommands(plugins);
 
   const tools = collectTools(config, plugins);
-
   let manager: SessionManager | null = null;
   let bridge: ToolBridge | null = null;
   let started = false;
@@ -189,6 +188,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
       tools,
       logger: scopeLogger(logger, { component: "bridge" }),
       currentUser: (ref) => manager?.currentUser(ref.source, ref.key),
+      executionContext: (ref) => manager?.currentExecution(ref),
     });
     await bridge.start();
 
@@ -201,6 +201,14 @@ export function createAgent(config: AgentConfig): AgentHandle {
       bridge: { url: bridge.callUrl() },
       idleTimeout: config.sessions?.idleTimeout,
       maxRuns: config.sessions?.maxRuns,
+      finalisationTimeoutMs: config.sessions?.finalisationTimeoutMs,
+      quiesceExecution: (execution) => bridge!.settleExecution(execution.id),
+      finalisers: plugins
+        .filter((plugin) => plugin.finaliseExecution)
+        .map((plugin) => ({
+          name: plugin.name,
+          run: (ctx) => plugin.finaliseExecution!(ctx),
+        })),
       prepareSession: async (info) => {
         // The owner prepares first, followed by every plugin's global hook.
         for (const plugin of plugins) {
@@ -255,8 +263,8 @@ export function createAgent(config: AgentConfig): AgentHandle {
           bridgeToken: bridge!.issueToken(ref, sessionTools),
         };
       },
+      revokeSession: (ref) => bridge?.releaseSession(ref),
       teardownSession: (ref) => {
-        bridge?.releaseSession(ref);
         for (const plugin of [...plugins].reverse()) {
           try {
             plugin.releaseSession?.(ref);

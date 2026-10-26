@@ -31,10 +31,8 @@
   },
   "dependencies": {
     "@picco-agent/core": "workspace:*",
+    "@picco-agent/plugin-notifications": "workspace:*",
     "grammy": "^1.44.0",
     "zod": "^4.4.3"
-  },
-  "engines": {
-    "node": ">=22"
   }
 }

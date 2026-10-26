@@ -46,6 +46,7 @@ const agent = createAgent({
   name: "ext-bwrap-mount",
   pi: {
     ...createSmokeModel(),
+    allowedTools: [UNBUNDLED_TOOL],
     extensions: [rawEntry],
   },
   runtime: bwrap({

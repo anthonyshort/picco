@@ -4,7 +4,7 @@ import { tool, type Tool } from "@picco-agent/core";
 import type { Plugin, PluginContext, SessionIdentity } from "@picco-agent/core";
 
 import { TELEGRAM_MAX } from "./limits.js";
-import { createNotificationTool } from "./notification.js";
+export { telegramNotifications, type TelegramNotificationOptions } from "./notification.js";
 const TYPING_REFRESH_MS = 4000;
 
 /**
@@ -62,10 +62,6 @@ export interface TelegramOptions {
    * Chat ids allowed to talk to the agent. Everything else is ignored.
    */
   allowlist: number[];
-  /**
-   * Enable telegram_notify for this fixed recipient, which must also be in allowlist.
-   */
-  notificationChatId?: number;
 }
 
 /**
@@ -290,33 +286,18 @@ async function handleCommand(
  * Create the Telegram plugin: long-polling bot and message routing.
  */
 export function telegram(options: TelegramOptions): Plugin {
-  const chatId = options.notificationChatId;
-  if (
-    chatId !== undefined &&
-    (!Number.isSafeInteger(chatId) || chatId === 0 || !options.allowlist.includes(chatId))
-  ) {
-    throw new Error("Telegram notificationChatId must be a nonzero safe integer in allowlist");
-  }
   const bot = new Bot(options.botToken);
 
   return {
     name: "telegram",
-    tools:
-      chatId === undefined
-        ? []
-        : [
-            createNotificationTool(chatId, (recipient, text) =>
-              bot.api.sendMessage(recipient, text, { link_preview_options: { is_disabled: true } }),
-            ),
-          ],
-
     async start(ctx: PluginContext) {
-      const handle = createMessageHandler(ctx, options);
-
       const contributed = ctx.commands.list();
       const reserved = new Set(["new", "context"]);
       const collision = contributed.find((command) => reserved.has(command.name));
       if (collision) throw new Error(`Telegram command "/${collision.name}" is reserved`);
+
+      const handle = createMessageHandler(ctx, options);
+
       bot.api
         .setMyCommands([
           { command: "new", description: "Start a new conversation" },
