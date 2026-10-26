@@ -41,6 +41,8 @@ await agent.start();
 
 Run the assistant with the model credentials your Pi configuration needs. Setting `enabled: true` permits automatic review sessions, including any publication authorised by the configured skill. Omit it while preparing configuration or inspecting persisted state.
 
+For an unconfigured installation, register `githubReviews({})`. It starts disabled with no repository routes, exposes management tools and initialises its database without calling GitHub or starting review workers. Add repository routes before enabling it. Applications loading settings from a file can use the exported `GithubReviewsSettingsSchema` to validate the same defaults and limits as the plugin.
+
 The host CLI sign-in supplies discovery credentials. Review sessions use the agent's configured runtime and inherit its existing authentication setup. A sandbox must already provide the GitHub tools, repository access and credentials that the review skill needs; this plugin does not add mounts or copy the host credential store into a worker. See [Runtime isolation](./runtimes/index.md).
 
 ## Select eligible work

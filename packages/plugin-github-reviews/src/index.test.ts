@@ -9,7 +9,7 @@ import {
 } from "@picco-agent/core/testing";
 import { createAgent, silentLogger, type Plugin, type ToolContext } from "@picco-agent/core";
 import { z } from "zod";
-import { githubReviews } from "./index.js";
+import { githubReviews, GithubReviewsSettingsSchema } from "./index.js";
 import { createReviewStore } from "./store.js";
 import { type GithubExecute } from "./github.js";
 import { type GithubReviewResult, type GithubReviewsOptions } from "./types.js";
@@ -171,6 +171,44 @@ async function invoke(plugin: Plugin, name: string, input = {}) {
 }
 
 describe("GitHub reviews plugin", () => {
+  test.each([
+    { label: "omitted", repositories: undefined },
+    { label: "empty", repositories: [] },
+  ])(
+    "disabled $label repositories keep management tools without GitHub calls",
+    async ({ repositories }) => {
+      const fixture = createGithubFixture();
+      const plugin = githubReviews({
+        repositories,
+        reviewsDirectory: directory,
+        github: { execute: fixture.execute },
+      });
+      const ctx = createFakePluginContext();
+      await plugin.start!(ctx);
+      plugins.push(plugin);
+
+      const status = JSON.parse(String(await invoke(plugin, "github_reviews_status")));
+      expect(status).toMatchObject({ enabled: false, settings: { repositories: [] } });
+      expect(status.settings).toEqual(
+        GithubReviewsSettingsSchema.parse({ repositories, reviewsDirectory: directory }),
+      );
+      expect(JSON.parse(String(await invoke(plugin, "github_reviews_list")))).toEqual([]);
+      await invoke(plugin, "github_reviews_poll");
+      await invoke(plugin, "github_reviews_resume");
+      expect(fixture.calls).toHaveLength(0);
+      expect(ctx.turns).toHaveLength(0);
+    },
+  );
+
+  test.each([
+    { label: "omitted", repositories: undefined },
+    { label: "empty", repositories: [] },
+  ])("enabled $label repositories are rejected", ({ repositories }) => {
+    expect(() => githubReviews({ enabled: true, repositories })).toThrow(
+      "Configure at least one repository",
+    );
+  });
+
   test("disabled configuration and empty polling never start a model", async () => {
     const fixture = createGithubFixture();
     const disabled = await start(fixture.execute, { enabled: false });

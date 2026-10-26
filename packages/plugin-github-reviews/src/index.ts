@@ -414,6 +414,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
   };
 }
 
+export { GithubReviewsSettingsSchema } from "./types.js";
 export type {
   GithubReviewsOptions,
   GithubReviewsSettings,
