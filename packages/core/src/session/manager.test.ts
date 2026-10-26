@@ -783,6 +783,51 @@ describe("SessionManager", () => {
     expect(runtime.spawns[0]!.process.alive).toBe(false);
   });
 
+  test("reset waits for worker exit without waiting for or closing the queued successor", async () => {
+    const stopped = Promise.withResolvers<void>();
+    const stopping = Promise.withResolvers<void>();
+    const reply = Promise.withResolvers<string>();
+    const runtime = new FakeRuntime((index) =>
+      index === 0 ? { neverFinish: true } : { reply: () => reply.promise },
+    );
+    const sessions = manager(runtime).namespace("telegram");
+    const first = sessions.run("chat", "first");
+    const cancelled = first.catch((err: unknown) => err);
+    await vi.waitFor(() => expect(runtime.spawns[0]?.process.prompts).toEqual(["first"]));
+    const previous = runtime.spawns[0]!.process;
+    const kill = previous.kill.bind(previous);
+    previous.kill = async () => {
+      stopping.resolve();
+      await stopped.promise;
+      await kill();
+    };
+    const next = sessions.run("chat", "next");
+    let finished = false;
+    void first.catch(() => {
+      finished = true;
+    });
+    const reset = sessions.reset("chat");
+    try {
+      await stopping.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(runtime.spawns).toHaveLength(1);
+      expect(finished).toBe(false);
+      stopped.resolve();
+      await reset;
+      expect(await cancelled).toMatchObject({ message: expect.stringContaining("session reset") });
+      await vi.waitFor(() => expect(runtime.spawns).toHaveLength(2));
+      expect(runtime.spawns[1]!.process.alive).toBe(true);
+      expect(runtime.spawns[1]!.spec.resume).toBe(false);
+      reply.resolve("next response");
+      expect((await next).text).toBe("next response");
+      expect(runtime.spawns[1]!.process.alive).toBe(true);
+    } finally {
+      stopped.resolve();
+      reply.resolve("next response");
+      await Promise.allSettled([first, next, reset]);
+    }
+  });
+
   test("quarantined host work revokes access without invoking ownership-release hooks", async () => {
     let revoked = 0;
     let released = 0;
