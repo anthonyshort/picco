@@ -329,16 +329,17 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
     tool({
       name: "github_reviews_resolve",
       description:
-        "Resolve an uncertain review only after the user has confirmed its outcome. Mark completed if already reviewed, or retry only after confirming the earlier worker stopped and retrying will not duplicate remote effects. Record the evidence in reason.",
+        "Resolve an uncertain review only after the user has confirmed its outcome. Mark completed if already reviewed, or retry only after confirming the earlier worker stopped and retrying will not duplicate remote effects. Record the evidence in reason. For completed runs without a saved declaration, supply reviewedAt as the verified original UTC completion timestamp, not the time of resolution.",
       input: z
         .object({
           runId: z.uuid(),
           action: z.enum(["completed", "retry"]),
           reason: z.string().trim().min(1).max(4000),
+          reviewedAt: z.iso.datetime().optional(),
         })
         .strict(),
-      async execute({ runId, action, reason }) {
-        state().store.resolveInterrupted(runId, action, reason);
+      async execute({ runId, action, reason, reviewedAt }) {
+        state().store.resolveInterrupted(runId, action, reason, reviewedAt);
         return "Review resolution recorded. The next poll will revalidate any retry.";
       },
     }),
@@ -357,6 +358,10 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
         store = undefined;
         throw new Error("Another GitHub review dispatcher owns this database");
       }
+      ownershipLost = false;
+      healthy = false;
+      failures = 0;
+      refillRequested = false;
       controller = new AbortController();
       stopped = false;
       try {

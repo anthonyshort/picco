@@ -10,6 +10,7 @@ import {
 import { createAgent, silentLogger, type Plugin, type ToolContext } from "@picco-agent/core";
 import { z } from "zod";
 import { githubReviews } from "./index.js";
+import { createReviewStore } from "./store.js";
 import { type GithubExecute } from "./github.js";
 import { type GithubReviewResult, type GithubReviewsOptions } from "./types.js";
 
@@ -183,6 +184,71 @@ describe("GitHub reviews plugin", () => {
     expect(fixture.calls).toHaveLength(1);
     expect(enabled.ctx.turns).toHaveLength(0);
     expect(enabled.results).toHaveLength(0);
+  });
+
+  test("the same plugin can reacquire ownership after its dispatcher lease expires", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    const fixture = createGithubFixture();
+    fixture.state.empty = true;
+    const current = await start(fixture.execute);
+    await invoke(current.plugin, "github_reviews_poll");
+    vi.setSystemTime(new Date("2026-10-26T12:06:00.000Z"));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await invoke(current.plugin, "github_reviews_status")).toContain('"ownershipLost":true');
+    await invoke(current.plugin, "github_reviews_poll");
+    expect(fixture.calls).toHaveLength(1);
+
+    await current.plugin.stop!();
+    await current.plugin.start!(current.ctx);
+    expect(await invoke(current.plugin, "github_reviews_status")).toContain(
+      '"ownershipLost":false',
+    );
+    await invoke(current.plugin, "github_reviews_poll");
+    expect(fixture.calls).toHaveLength(2);
+    expect(current.ctx.turns).toHaveLength(0);
+  });
+
+  test("resolving historical completion preserves a later same-commit request", async () => {
+    const store = createReviewStore(path.join(directory, "reviews.sqlite"));
+    store.reconcile("reviewer", [
+      {
+        repository: Repository,
+        number: 42,
+        title: "Requested change",
+        url: `https://github.com/${Repository}/pull/42`,
+        head: Head,
+        createdAt: "2026-10-25T10:00:00Z",
+      },
+    ]);
+    const item = store.next()[0];
+    store.setCycle(item.id, "request:first", "2026-10-25T12:00:00Z");
+    const run = store.admit(item.id, "reviewer", 1)!;
+    store.finish(run.id, { status: "interrupted", reason: "publication-uncertain" });
+    store.close();
+    vi.setSystemTime(new Date("2026-10-26T12:10:00.000Z"));
+    const fixture = createGithubFixture();
+    fixture.state.request = "request:second";
+    fixture.state.requestedAt = "2026-10-26T12:05:00Z";
+    const current = await start(fixture.execute);
+    const resolution = {
+      runId: run.id,
+      action: "completed",
+      reason: "Verified original published review",
+    };
+    await expect(invoke(current.plugin, "github_reviews_resolve", resolution)).rejects.toThrow();
+    expect(await invoke(current.plugin, "github_reviews_details", { id: run.id })).toContain(
+      '"reviewedAt":null',
+    );
+    await invoke(current.plugin, "github_reviews_resolve", {
+      ...resolution,
+      reviewedAt: "2026-10-26T12:01:00.000Z",
+    });
+    expect(await invoke(current.plugin, "github_reviews_details", { id: run.id })).toContain(
+      '"reviewedAt":"2026-10-26T12:01:00.000Z"',
+    );
+    await invoke(current.plugin, "github_reviews_poll");
+    await vi.waitFor(() => expect(current.results).toHaveLength(1));
+    expect(current.results[0].selection.run.requestEventId).toBe("request:second");
   });
 
   test("records reviewed commits once across polls and process restarts using only GraphQL", async () => {

@@ -59,7 +59,7 @@ export function runReview(opts: RunnerOptions) {
       artifactDirectory,
       publisherStateFile: path.join(artifactDirectory, "progress.json"),
     };
-    let summary: string | undefined;
+    const declaration = createCompletionDeclaration(opts, () => abortReason);
     let output: string | undefined;
     let error: string | undefined;
     let cleanupFailed = false;
@@ -74,29 +74,6 @@ export function runReview(opts: RunnerOptions) {
     try {
       await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
       if (abortReason) throw new Error(abortReason);
-      const complete = tool({
-        name: "github_review_complete",
-        description:
-          "Record this selected PR and commit as reviewed only after the entire review skill has finished successfully, including any publication it requires. This records local review completion; it does not post to GitHub. Do not call for a blocked, partial or failed review.",
-        input: CompletionSchema,
-        async execute(input, ctx) {
-          if (
-            ctx.caller.kind !== "session" ||
-            ctx.caller.ref.source !== "github-reviews" ||
-            ctx.caller.ref.key !== opts.run.sessionKey
-          ) {
-            throw new Error("Only this review's session may record its completion");
-          }
-          if (abortReason)
-            throw new Error("Review has been aborted; completion cannot be recorded");
-          const checked = CompletionSchema.parse(input);
-          if (!opts.store.markReviewed(opts.run.id, checked.summary)) {
-            throw new Error("Review reservation expired or was lost; completion was not recorded");
-          }
-          summary = checked.summary;
-          return "Review completion recorded for this PR, commit and request cycle.";
-        },
-      });
       turn = opts.ctx.sessions.run(
         opts.run.sessionKey,
         opts.prompt?.(selection) ?? buildPrompt(selection),
@@ -105,7 +82,7 @@ export function runReview(opts: RunnerOptions) {
           session: {
             cwd: artifactDirectory,
             env: { REVIEW_RUN_ID: opts.run.id },
-            tools: [complete],
+            tools: [declaration.tool],
           },
         },
       );
@@ -122,6 +99,7 @@ export function runReview(opts: RunnerOptions) {
       }
       clearInterval(heartbeat);
     }
+    const summary = declaration.summary();
     const status =
       error || abortReason || cleanupFailed ? "interrupted" : summary ? "completed" : "blocked";
     const result: GithubReviewResult = {
@@ -137,22 +115,59 @@ export function runReview(opts: RunnerOptions) {
       reason: status === "completed" ? undefined : "publication-uncertain",
       output: result.output,
     });
-    if (opts.onRunComplete && opts.store.recordNotificationAttempt(opts.run.id)) {
-      try {
-        await deliverCompletion(opts.onRunComplete, result);
-        opts.store.completeNotification(opts.run.id, "confirmed");
-      } catch {
-        opts.store.completeNotification(
-          opts.run.id,
-          "uncertain",
-          "Completion callback did not confirm delivery",
-        );
-        opts.ctx.logger.error("review completion callback failed; delivery will not be retried", {
-          runId: opts.run.id,
-        });
-      }
-    }
+    await reportCompletion(opts, result);
     return result;
+  }
+}
+
+/**
+ * Bind a durable completion declaration to the selected worker session.
+ */
+function createCompletionDeclaration(opts: RunnerOptions, abortReason: () => string | undefined) {
+  let summary: string | undefined;
+  const complete = tool({
+    name: "github_review_complete",
+    description:
+      "Record this selected PR and commit as reviewed only after the entire review skill has finished successfully, including any publication it requires. This records local review completion; it does not post to GitHub. Do not call for a blocked, partial or failed review.",
+    input: CompletionSchema,
+    async execute(input, ctx) {
+      if (
+        ctx.caller.kind !== "session" ||
+        ctx.caller.ref.source !== "github-reviews" ||
+        ctx.caller.ref.key !== opts.run.sessionKey
+      ) {
+        throw new Error("Only this review's session may record its completion");
+      }
+      if (abortReason()) throw new Error("Review has been aborted; completion cannot be recorded");
+      const checked = CompletionSchema.parse(input);
+      if (!opts.store.markReviewed(opts.run.id, checked.summary)) {
+        throw new Error("Review reservation expired or was lost; completion was not recorded");
+      }
+      summary = checked.summary;
+      return "Review completion recorded for this PR, commit and request cycle.";
+    },
+  });
+  return { tool: complete, summary: () => summary };
+}
+
+/**
+ * Record one callback attempt after the review outcome is durable.
+ */
+async function reportCompletion(opts: RunnerOptions, result: GithubReviewResult) {
+  if (opts.onRunComplete && opts.store.recordNotificationAttempt(opts.run.id)) {
+    try {
+      await deliverCompletion(opts.onRunComplete, result);
+      opts.store.completeNotification(opts.run.id, "confirmed");
+    } catch {
+      opts.store.completeNotification(
+        opts.run.id,
+        "uncertain",
+        "Completion callback did not confirm delivery",
+      );
+      opts.ctx.logger.error("review completion callback failed; delivery will not be retried", {
+        runId: opts.run.id,
+      });
+    }
   }
 }
 
