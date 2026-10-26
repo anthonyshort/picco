@@ -718,6 +718,36 @@ describe("SessionManager", () => {
     expect(next).toBe(true);
   });
 
+  test("a deferred reload runs before an already queued next prompt without losing history", async () => {
+    const gate = Promise.withResolvers<string>();
+    const runtime = new FakeRuntime({
+      reply: (prompt) => (prompt === "first" ? gate.promise : "second"),
+    });
+    const mgr = manager(runtime);
+    const sessions = mgr.namespace("telegram");
+    const first = sessions.run("chat", "first");
+    await vi.waitFor(() => expect(runtime.spawns[0]?.process.prompts).toEqual(["first"]));
+    const second = sessions.run("chat", "second");
+    const reload = sessions.get("chat")!.reload();
+    expect(reload.status).toBe("scheduled");
+    expect(sessions.get("chat")!.reload()).toBe(reload);
+    gate.resolve("first");
+    await first;
+    await reload.completed;
+    await second;
+    expect(reload.status).toBe("completed");
+    expect(runtime.spawns).toHaveLength(1);
+    expect(runtime.spawns[0]!.process.prompts).toEqual(["first", "/picco-reload", "second"]);
+  });
+  test("reload immediately after awaiting a turn is not lost in the queue settlement window", async () => {
+    const runtime = new FakeRuntime();
+    const sessions = manager(runtime).namespace("host");
+    await sessions.run("chat", "first");
+    const reload = sessions.get("chat")!.reload();
+    await reload.completed;
+    expect(reload.status).toBe("completed");
+    expect(runtime.spawns[0]!.process.prompts).toEqual(["first", "/picco-reload"]);
+  });
   test("cancelled preparation cannot later mint credentials or spawn a worker", async () => {
     const entered = Promise.withResolvers<void>();
     const gate = Promise.withResolvers<void>();
@@ -857,7 +887,91 @@ describe("SessionManager", () => {
     expect(finalised).toBe(0);
     expect(runtime.spawns[0]!.process.alive).toBe(false);
   });
+  test("a failed reload closes the worker and preserves resumable history", async () => {
+    const runtime = new FakeRuntime({ reloadError: true });
+    const sessions = manager(runtime).namespace("host");
+    await sessions.run("chat", "before");
+    const reload = sessions.get("chat")!.reload();
+    await reload.completed;
+    expect(reload.status).toBe("failed");
+    expect(runtime.spawns[0]!.process.alive).toBe(false);
+    await sessions.run("chat", "after");
+    expect(runtime.spawns).toHaveLength(2);
+    expect(runtime.spawns[1]!.spec.resume).toBe(true);
+  });
 
+  test.each(["reset", "shutdown"])(
+    "%s keeps an interrupted reload result stable after late completion",
+    async (action) => {
+      const acknowledgement = Promise.withResolvers<void>();
+      const termination = Promise.withResolvers<void>();
+      const runtime = new FakeRuntime();
+      const mgr = manager(runtime);
+      const sessions = mgr.namespace("host");
+      await sessions.run("chat", "before");
+      const process = runtime.spawns[0]!.process;
+      const push = process.push.bind(process);
+      let acknowledge: (() => void) | undefined;
+      process.push = (message) => {
+        if (message.type === "response" && message.command === "prompt") {
+          acknowledge = () => push(message);
+          acknowledgement.resolve();
+        } else push(message);
+      };
+      const kill = process.kill.bind(process);
+      process.kill = async () => {
+        await termination.promise;
+        await kill();
+      };
+      const reload = sessions.get("chat")!.reload();
+      await acknowledgement.promise;
+      const close = action === "reset" ? sessions.reset("chat") : mgr.stopAll();
+      try {
+        await reload.completed;
+        expect(reload.status).toBe("interrupted");
+        if (action === "reset") acknowledge!();
+        termination.resolve();
+        await close;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(reload.status).toBe("interrupted");
+        expect(reload.error).toBeUndefined();
+      } finally {
+        termination.resolve();
+        await close;
+      }
+    },
+  );
+
+  test.each(["run", "open"])(
+    "later %s options cannot turn a persistent conversation into an ephemeral session",
+    async (creation) => {
+      const runtime = new FakeRuntime();
+      const sessions = manager(runtime).namespace("host");
+      if (creation === "run") await sessions.run("chat", "first");
+      else await sessions.open("chat");
+      await sessions.open("chat", { ephemeral: true });
+      await sessions.run("chat", "next", { session: { ephemeral: true } });
+      expect(runtime.spawns).toHaveLength(1);
+      expect(runtime.spawns[0]!.process.alive).toBe(true);
+      const reload = sessions.get("chat")!.reload();
+      expect(reload.status).toBe("scheduled");
+      await reload.completed;
+      expect(reload.status).toBe("completed");
+    },
+  );
+
+  test("an ephemeral session does not schedule reload and closes before completion", async () => {
+    const gate = Promise.withResolvers<string>();
+    const runtime = new FakeRuntime({ reply: () => gate.promise });
+    const sessions = manager(runtime).namespace("cron");
+    const turn = sessions.run("job", "work", { session: { ephemeral: true } });
+    await vi.waitFor(() => expect(runtime.spawns[0]?.process.prompts).toHaveLength(1));
+    expect(sessions.get("job")!.reload().status).toBe("not-needed");
+    gate.resolve("done");
+    await turn;
+    expect(runtime.spawns[0]!.process.alive).toBe(false);
+    expect(sessions.get("job")).toBeUndefined();
+  });
   test("a queued one-shot can cancel before the active run releases capacity", async () => {
     const gate = Promise.withResolvers<string>();
     const runtime = new FakeRuntime({ reply: () => gate.promise });

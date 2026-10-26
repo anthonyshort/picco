@@ -85,3 +85,35 @@ remote write or stop arbitrary JavaScript. Background child integrations must
 stop or join their owned work before Pi settles; detached work cannot safely
 borrow a later turn's execution identity. Idle or finalising sessions cannot
 issue new bridged calls.
+
+## Reload conversation resources
+
+```ts
+const session = agent.sessions.get("planning");
+if (session) {
+  const operation = session.reload();
+  await operation.completed;
+  console.log(operation.status);
+}
+```
+
+Reload refreshes Pi's skills, extensions, prompts and instruction files while
+preserving the conversation. It uses a registered command, without inference.
+A request during a turn is coalesced and runs after critical finalisation, before
+the next queued prompt. Inspect `session.reloadStatus()` for the last result.
+The default `reload` tool schedules this operation without waiting for its own
+turn to finish; `reload({ action: "status" })` inspects its actual result. Telegram
+exposes the same operation through `/reload` and `/reload status`.
+
+A session declared `ephemeral: true`, including `agent.run()`, returns
+`not-needed`; its worker will close. A closed worker interrupts pending reload.
+Command or transport errors produce a failed result with a safe diagnostic. A
+completed result confirms that Pi finished its reload command, not that every
+configured resource loaded. Pi 1.0 can omit a broken extension without reporting
+the load error through its public command API. Check worker diagnostics and the
+required extension after editing it. Picco does not inspect Pi's private loader
+state to infer that result.
+
+Reload does not install packages, change provider authentication or restart host
+plugins. Child calls schedule the owning Picco conversation's reload at its idle
+boundary, rather than reloading a sibling Pi process independently.

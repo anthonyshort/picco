@@ -253,6 +253,22 @@ async function handleCommand(
     return "Started a fresh session.";
   }
 
+  if (command === "reload") {
+    const session = ctx.sessions.get(key);
+    if (!session) return "No active session. The next conversation loads current resources.";
+    if (args.trim() === "status") {
+      const operation = session.reloadStatus();
+      return operation
+        ? `Reload ${operation.status}${operation.error ? ": " + operation.error : "."}`
+        : "No reload has been requested.";
+    }
+    if (args.trim()) return "Use /reload or /reload status.";
+    const operation = session.reload();
+    if (operation.status === "scheduled")
+      await message.reply("Resource reload scheduled after the current response.");
+    await operation.completed;
+    return `Reload ${operation.status}${operation.error ? ": " + operation.error : "."}`;
+  }
   if (command === "context") {
     const session = ctx.sessions.get(key);
     if (!session) {
@@ -292,7 +308,7 @@ export function telegram(options: TelegramOptions): Plugin {
     name: "telegram",
     async start(ctx: PluginContext) {
       const contributed = ctx.commands.list();
-      const reserved = new Set(["new", "context"]);
+      const reserved = new Set(["new", "context", "reload"]);
       const collision = contributed.find((command) => reserved.has(command.name));
       if (collision) throw new Error(`Telegram command "/${collision.name}" is reserved`);
 
@@ -302,6 +318,7 @@ export function telegram(options: TelegramOptions): Plugin {
         .setMyCommands([
           { command: "new", description: "Start a new conversation" },
           { command: "context", description: "Show current context usage" },
+          { command: "reload", description: "Reload conversation resources" },
           ...contributed.map(({ name: command, description }) => ({ command, description })),
         ])
         .catch((err) => ctx.logger.log("failed to set the Telegram command menu", err));

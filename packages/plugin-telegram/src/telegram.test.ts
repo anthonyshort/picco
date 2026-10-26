@@ -243,6 +243,16 @@ describe("telegram plugin commands", () => {
     return { calls, ctx, dispatch, message, replies, dms };
   }
 
+  test("/reload invokes the session control operation without a model turn", async () => {
+    const { dispatch, message, replies, ctx } = commandSetup();
+    await dispatch(message({ text: "/reload" }));
+    expect(replies.at(-1)).toContain("No active session");
+    await ctx.sessions.open("1-general");
+    await dispatch(message({ text: "/reload" }));
+    expect(replies.at(-1)).toBe("Reload completed.");
+    expect(ctx.turns).toHaveLength(0);
+  });
+
   test("dispatches a contributed command with sender, args, reply, and dm", async () => {
     const { dispatch, message, calls, dms, ctx } = commandSetup();
 

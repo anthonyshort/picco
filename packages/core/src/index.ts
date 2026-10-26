@@ -45,3 +45,4 @@ export { createLogger, silentLogger } from "./utils/logger.js";
 
 export { ExecutionFailure, ExecutionError } from "./session/execution.js";
 export type { ExecutionRef, ExecutionOutcome, ExecutionFinalisation } from "./session/execution.js";
+export type { ReloadOperation } from "./session/reload.js";

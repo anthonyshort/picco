@@ -158,4 +158,12 @@ describe("RpcSession", () => {
     expect(await new RpcSession("recovered", proc).prompt("hello")).toBe("echo: hello");
     await proc.kill();
   });
+
+  test("reload uses the registered command without a model prompt", async () => {
+    const proc = new FakeRuntimeProcess();
+    await new RpcSession("reload", proc).reload();
+    expect(proc.requests.map((request) => request.type)).toEqual(["get_commands", "prompt"]);
+    expect(proc.prompts).toEqual(["/picco-reload"]);
+    await proc.kill();
+  });
 });

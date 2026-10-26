@@ -1,4 +1,5 @@
 import type { ExecutionFinalisation } from "./session/execution.js";
+import type { ReloadOperation } from "./session/reload.js";
 import type { McpServerConfig } from "@earendil-works/pi-coding-agent";
 import type { Tool } from "./tools/tool.js";
 import type { Turn, TurnEvent, TurnResult } from "./session/turn.js";
@@ -154,6 +155,10 @@ export interface SessionRef {
 
 export interface SessionOptions {
   /**
+   * One-shot lifetime: reload requests return not-needed.
+   */
+  ephemeral?: boolean;
+  /**
    * Per-session pi overrides, merged over the agent-wide `pi` config. `instructions` concatenates
    * onto the agent-wide instructions (both append to pi's base prompt); every other field replaces.
    * To replace pi's base prompt entirely, set `pi.systemPrompt`.
@@ -242,6 +247,14 @@ export interface SessionInfo {
 }
 
 export interface Session {
+  /**
+   * Schedule resource reload at the next idle boundary, without inference.
+   */
+  reload(): ReloadOperation;
+  /**
+   * Last reload request for this conversation.
+   */
+  reloadStatus(): ReloadOperation | undefined;
   /**
    * The session identifier.
    */

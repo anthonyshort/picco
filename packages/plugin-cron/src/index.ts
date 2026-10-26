@@ -77,7 +77,10 @@ export function cron(options: CronOptions = {}): Plugin {
               // The key is unique per run, so this always creates the session — the job's
               // model/thinking overrides land on the fresh pi session. Conditional spreads keep an
               // undefined from clobbering the agent-wide value in the pi merge.
-              session: { pi: { ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) } },
+              session: {
+                ephemeral: true,
+                pi: { ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) },
+              },
             });
             return text;
           } finally {

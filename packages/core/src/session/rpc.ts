@@ -78,6 +78,8 @@ export class RpcSession {
   private dead = false;
   private promptInFlight = false;
   private promptFailure: Error | undefined;
+  private reloadFailure: Error | undefined;
+  private reloading = false;
   private agentSettled: { resolve: () => void; reject: (err: Error) => void } | null = null;
   private onEvent: ((event: TurnEvent) => void) | null = null;
 
@@ -167,6 +169,29 @@ export class RpcSession {
     } finally {
       this.promptInFlight = false;
       this.onEvent = null;
+    }
+  }
+
+  /**
+   * Execute the bundled reload command only after verifying that it is registered.
+   */
+  async reload(): Promise<void> {
+    if (this.promptInFlight) throw new Error("Cannot reload during a prompt");
+    const catalogue = await this.request({ type: "get_commands" });
+    if (!catalogue.data.commands.some((command) => command.name === "picco-reload")) {
+      throw new Error("The Picco reload command is unavailable in this worker");
+    }
+    this.reloadFailure = undefined;
+    this.reloading = true;
+    try {
+      const response = await this.request({ type: "prompt", message: "/picco-reload" }, 30_000);
+      if (response.data.disposition !== "handled") {
+        this.abortTurn();
+        throw new Error("Reload was not handled as a session command");
+      }
+      if (this.reloadFailure) throw this.reloadFailure;
+    } finally {
+      this.reloading = false;
     }
   }
 
@@ -278,6 +303,13 @@ export class RpcSession {
         default:
           this.promptFailure = undefined;
       }
+    }
+    if (
+      msg.type === "extension_error" &&
+      this.reloading &&
+      msg.extensionPath === "command:picco-reload"
+    ) {
+      this.reloadFailure = new Error("Pi resource reload failed; inspect session diagnostics.");
     }
     // Responses correlate to a pending request by id
     if (msg.type === "response") {
