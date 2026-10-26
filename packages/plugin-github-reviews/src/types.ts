@@ -20,19 +20,23 @@ export const GithubReviewsSettingsSchema = z
           })
           .strict(),
       )
-      .min(1)
       .max(100)
       .refine(
         (routes) => new Set(routes.map((route) => route.name)).size === routes.length,
         "Repository routes must be unique",
-      ),
+      )
+      .default([]),
     pollIntervalMs: z.number().int().min(1000).max(86_400_000).default(60_000),
     maxPrAgeDays: z.number().int().min(1).max(3650).default(28),
     maxConcurrentReviews: z.number().int().min(1).max(100).default(3),
     reviewTimeoutMs: z.number().int().min(1000).max(86_400_000).default(3_600_000),
     reviewsDirectory: z.string().min(1).optional(),
   })
-  .strict();
+  .strict()
+  .refine((settings) => !settings.enabled || settings.repositories.length > 0, {
+    path: ["repositories"],
+    message: "Configure at least one repository before enabling GitHub reviews",
+  });
 
 /**
  * Immutable admission plus the writable session directory assigned to this review.
