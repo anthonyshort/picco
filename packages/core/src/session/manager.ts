@@ -191,6 +191,8 @@ interface Slot {
   quarantined?: boolean;
   generation?: number;
   acquisition?: Promise<void>;
+  resetting?: Promise<void>;
+  termination?: Promise<void>;
   active?: ManagedExecution;
 }
 
@@ -303,14 +305,26 @@ export class SessionManager {
    */
   async reset(source: string, key: string): Promise<void> {
     const slot = this.slot(source, key);
+    if (slot.resetting) return slot.resetting;
+    const active = slot.active;
+    const reset = Promise.withResolvers<void>();
+    slot.resetting = reset.promise;
     slot.freshNextSpawn = true;
     slot.generation = (slot.generation ?? 0) + 1;
     slot.closing = true;
-    slot.active?.cancel("session reset");
-    await this.killLive(slot, !slot.active);
-    if (slot.active) await slot.active.controller.turn.catch(() => {});
-    slot.closing = false;
-    this.logger.log("reset", { source, key });
+    active?.cancel("session reset");
+    try {
+      await this.killLive(slot, !active);
+      await active?.controller.turn.catch(() => {});
+      this.logger.log("reset", { source, key });
+    } catch (err) {
+      slot.quarantined = true;
+      throw err;
+    } finally {
+      slot.closing = false;
+      slot.resetting = undefined;
+      reset.resolve();
+    }
   }
 
   /**
@@ -616,7 +630,10 @@ export class SessionManager {
       slot.pending--;
       return undefined;
     };
-    const result = slot.queueTail.then(task);
+    const result = slot.queueTail.then(async () => {
+      while (slot.resetting) await slot.resetting;
+      return task();
+    });
     slot.queueTail = result.then(settle, settle);
     return result;
   }
@@ -671,6 +688,7 @@ export class SessionManager {
    * call it directly on their transient slot).
    */
   private async ensureLive(slot: Slot, opts?: SessionOptions): Promise<LiveSession> {
+    if (slot.termination) await slot.termination;
     if (this.stopped) throw new Error("Session manager is stopped");
     if (slot.quarantined)
       throw new Error(
@@ -803,17 +821,29 @@ export class SessionManager {
    * Tear down a slot's live process (if any); the slot and its queue survive.
    */
   private async killLive(slot: Slot, release = true): Promise<void> {
+    if (slot.termination) return slot.termination;
     this.opts.revokeSession?.(slot.ref);
     const live = slot.live;
     if (!live) return;
     slot.live = null;
-    try {
-      if (release && !slot.released) {
-        this.opts.teardownSession?.(slot.ref);
-        slot.released = true;
+    const termination = Promise.resolve().then(async () => {
+      try {
+        if (release && !slot.released) {
+          this.opts.teardownSession?.(slot.ref);
+          slot.released = true;
+        }
+      } finally {
+        await live.rpc.kill();
       }
+    });
+    slot.termination = termination;
+    try {
+      await termination;
+    } catch (err) {
+      slot.quarantined = true;
+      throw err;
     } finally {
-      await live.rpc.kill();
+      slot.termination = undefined;
     }
   }
 

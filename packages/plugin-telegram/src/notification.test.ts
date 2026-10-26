@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { GrammyError } from "grammy";
+import { Api, Bot, GrammyError } from "grammy";
 import { silentLogger, type ToolContext } from "@picco-agent/core";
+import { createFakePluginContext } from "@picco-agent/core/testing";
 import { telegram } from "./index.js";
 import {
   createNotificationTool,
@@ -46,6 +47,56 @@ describe("Telegram notifications", () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
   });
+  test.each([undefined, 456])(
+    "keeps polling defaults when notification chat is %s",
+    async (notificationChatId) => {
+      const pollingBots: Bot[] = [];
+      const notificationClients: Api[] = [];
+      vi.spyOn(Bot.prototype, "start").mockImplementation(function (this: Bot) {
+        pollingBots.push(this);
+        return new Promise<void>(() => {});
+      });
+      vi.spyOn(Bot.prototype, "stop").mockResolvedValue(undefined);
+      vi.spyOn(Api.prototype, "setMyCommands").mockResolvedValue(true);
+      vi.spyOn(Api.prototype, "sendMessage").mockImplementation(
+        async function (this: Api, chatId, text) {
+          notificationClients.push(this);
+          return {
+            message_id: 77,
+            date: 0,
+            chat: { id: Number(chatId), type: "private" as const, first_name: "Test" },
+            text,
+          };
+        },
+      );
+      const gateway = telegram({
+        botToken: "123:test-token",
+        allowlist: [456],
+        notificationChatId,
+        notificationTimeoutMs: 5,
+      });
+      try {
+        await gateway.start?.(createFakePluginContext({ source: "telegram" }));
+        expect(pollingBots).toHaveLength(1);
+        expect(pollingBots[0].api.options?.timeoutSeconds).toBeUndefined();
+        if (notificationChatId !== undefined) {
+          expect(await gateway.notify({ text: "Ready" })).toMatchObject({
+            status: "confirmed",
+            messageId: 77,
+          });
+          expect(notificationClients).toHaveLength(1);
+          expect(notificationClients[0]).not.toBe(pollingBots[0].api);
+          expect(notificationClients[0].options?.timeoutSeconds).toBe(0.005);
+        } else {
+          expect(gateway.tools).toEqual([]);
+          expect(notificationClients).toHaveLength(0);
+        }
+      } finally {
+        await gateway.stop?.();
+      }
+    },
+  );
+
   test("registers delivery tools only for a configured allowlisted recipient", () => {
     expect(telegram({ botToken: "123:test-token", allowlist: [456] }).tools).toEqual([]);
     expect(

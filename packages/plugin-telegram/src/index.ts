@@ -1,4 +1,4 @@
-import { Bot } from "grammy";
+import { Api, Bot } from "grammy";
 import * as z from "zod";
 import { tool, type Tool } from "@picco-agent/core";
 import type { Plugin, PluginContext, SessionIdentity } from "@picco-agent/core";
@@ -330,9 +330,7 @@ export function telegram(options: TelegramOptions): TelegramPlugin {
       maxRecords: options.maxDeliveryRecords ?? 10_000,
       retentionDays: options.deliveryRetentionDays ?? 30,
     });
-  const bot = new Bot(options.botToken, {
-    client: { timeoutSeconds: deliveryOptions.timeoutMs / 1000 },
-  });
+  const bot = new Bot(options.botToken);
   let notifications: ReturnType<typeof createNotifications> | undefined;
   function ensureNotifications() {
     if (!notifications) throw new Error("Telegram notifications are not started");
@@ -359,10 +357,15 @@ export function telegram(options: TelegramOptions): TelegramPlugin {
       if (collision) throw new Error(`Telegram command "/${collision.name}" is reserved`);
 
       if (chatId !== undefined) {
+        const notificationApi = new Api(options.botToken, {
+          timeoutSeconds: deliveryOptions.timeoutMs / 1000,
+        });
         notifications = createNotifications(
           chatId,
           (recipient, text) =>
-            bot.api.sendMessage(recipient, text, { link_preview_options: { is_disabled: true } }),
+            notificationApi.sendMessage(recipient, text, {
+              link_preview_options: { is_disabled: true },
+            }),
           deliveryOptions.timeoutMs,
           { max: deliveryOptions.maxRecords, ttl: deliveryOptions.retentionDays * 86_400_000 },
         );
