@@ -1,5 +1,18 @@
 # @picco-agent/core
 
+## 0.3.0
+
+### Minor Changes
+
+- 2ace4f6: Give submitted executions trusted identities, propagate provider failures, and await bounded plugin finalisation before completion. Fence tool admission and quarantine ownership when host work cannot settle safely.
+- 10eda2f: Add a default reload tool and session reload operation backed by an acknowledged Pi command without inference. Expose Telegram /reload and /reload status, and mark cron workers as one-shot so reload requests return not-needed.
+
+### Patch Changes
+
+- 4dda0ad: Accept a host logger for Picco and its plugins, and log direct subagent calls, reported models and errors from existing Pi RPC events.
+- Updated dependencies [10eda2f]
+  - @picco-agent/bridge-extension@0.1.2
+
 ## 0.2.0
 
 ### Minor Changes

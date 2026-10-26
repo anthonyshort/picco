@@ -1,5 +1,14 @@
 # @picco-agent/identity
 
+## 0.2.1
+
+### Patch Changes
+
+- Updated dependencies [2ace4f6]
+- Updated dependencies [10eda2f]
+- Updated dependencies [4dda0ad]
+  - @picco-agent/core@0.3.0
+
 ## 0.2.0
 
 ### Minor Changes
