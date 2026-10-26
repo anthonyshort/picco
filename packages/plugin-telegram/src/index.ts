@@ -1,12 +1,10 @@
-import { Api, Bot } from "grammy";
+import { Bot } from "grammy";
 import * as z from "zod";
 import { tool, type Tool } from "@picco-agent/core";
 import type { Plugin, PluginContext, SessionIdentity } from "@picco-agent/core";
 
 import { TELEGRAM_MAX } from "./limits.js";
-import { createNotificationTool, createDeliveryTool, createNotifications } from "./notification.js";
-import type { NotificationInput, NotificationResult } from "./notification.js";
-export type { NotificationInput, NotificationResult } from "./notification.js";
+export { telegramNotifications, type TelegramNotificationOptions } from "./notification.js";
 const TYPING_REFRESH_MS = 4000;
 
 /**
@@ -64,30 +62,6 @@ export interface TelegramOptions {
    * Chat ids allowed to talk to the agent. Everything else is ignored.
    */
   allowlist: number[];
-  /**
-   * Enable telegram_notify for this fixed recipient, which must also be in allowlist.
-   */
-  notificationChatId?: number;
-  /**
-   * Bound notification transport time (default 15 seconds).
-   */
-  notificationTimeoutMs?: number;
-  /**
-   * Maximum cached receipts and simultaneous active attempts, each bounded to 10,000 by default.
-   */
-  maxDeliveryRecords?: number;
-  /**
-   * Completed receipt cache TTL, including uncertain outcomes (default 30 days).
-   */
-  deliveryRetentionDays?: number;
-}
-
-/**
- * Host notifications share the same in-memory cache as the model tools; available after start.
- */
-export interface TelegramPlugin extends Plugin {
-  notify(input: NotificationInput): Promise<NotificationResult>;
-  delivery(deliveryId: string): NotificationResult | undefined;
 }
 
 /**
@@ -311,65 +285,17 @@ async function handleCommand(
 /**
  * Create the Telegram plugin: long-polling bot and message routing.
  */
-export function telegram(options: TelegramOptions): TelegramPlugin {
-  const chatId = options.notificationChatId;
-  if (
-    chatId !== undefined &&
-    (!Number.isSafeInteger(chatId) || chatId === 0 || !options.allowlist.includes(chatId))
-  ) {
-    throw new Error("Telegram notificationChatId must be a nonzero safe integer in allowlist");
-  }
-  const deliveryOptions = z
-    .object({
-      timeoutMs: z.number().int().min(1).max(60_000),
-      maxRecords: z.number().int().min(1).max(100_000),
-      retentionDays: z.number().int().min(1).max(3650),
-    })
-    .parse({
-      timeoutMs: options.notificationTimeoutMs ?? 15_000,
-      maxRecords: options.maxDeliveryRecords ?? 10_000,
-      retentionDays: options.deliveryRetentionDays ?? 30,
-    });
+export function telegram(options: TelegramOptions): Plugin {
   const bot = new Bot(options.botToken);
-  let notifications: ReturnType<typeof createNotifications> | undefined;
-  function ensureNotifications() {
-    if (!notifications) throw new Error("Telegram notifications are not started");
-    return notifications;
-  }
 
   return {
     name: "telegram",
-    tools:
-      chatId === undefined
-        ? []
-        : [createNotificationTool(ensureNotifications), createDeliveryTool(ensureNotifications)],
-
-    notify(input) {
-      return ensureNotifications().notify(input);
-    },
-    delivery(deliveryId) {
-      return ensureNotifications().delivery(deliveryId);
-    },
     async start(ctx: PluginContext) {
       const contributed = ctx.commands.list();
       const reserved = new Set(["new", "context"]);
       const collision = contributed.find((command) => reserved.has(command.name));
       if (collision) throw new Error(`Telegram command "/${collision.name}" is reserved`);
 
-      if (chatId !== undefined) {
-        const notificationApi = new Api(options.botToken, {
-          timeoutSeconds: deliveryOptions.timeoutMs / 1000,
-        });
-        notifications = createNotifications(
-          chatId,
-          (recipient, text) =>
-            notificationApi.sendMessage(recipient, text, {
-              link_preview_options: { is_disabled: true },
-            }),
-          deliveryOptions.timeoutMs,
-          { max: deliveryOptions.maxRecords, ttl: deliveryOptions.retentionDays * 86_400_000 },
-        );
-      }
       const handle = createMessageHandler(ctx, options);
 
       bot.api
@@ -425,12 +351,7 @@ export function telegram(options: TelegramOptions): TelegramPlugin {
     },
 
     async stop() {
-      try {
-        await bot.stop();
-      } finally {
-        await notifications?.stop();
-        notifications = undefined;
-      }
+      await bot.stop();
     },
   };
 }

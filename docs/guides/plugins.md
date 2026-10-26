@@ -23,12 +23,13 @@ const agent = createAgent({
 
 Picco includes packages for common assistant surfaces:
 
-| Plugin                                                 | Use                                                             |
-| ------------------------------------------------------ | --------------------------------------------------------------- |
-| [`plugin-telegram`](../../packages/plugin-telegram/)   | Receive messages and keep one session per chat or topic         |
-| [`plugin-github`](../../packages/plugin-github/)       | Respond to GitHub mentions with scoped installation credentials |
-| [`plugin-agentmail`](../../packages/plugin-agentmail/) | Receive email and expose mailbox tools                          |
-| [`plugin-cron`](../../packages/plugin-cron/)           | Run scheduled prompts and manage jobs                           |
+| Plugin                                                         | Use                                                                          |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| [`plugin-telegram`](../../packages/plugin-telegram/)           | Receive messages and keep one session per chat or topic                      |
+| [`plugin-github`](../../packages/plugin-github/)               | Respond to GitHub mentions with scoped installation credentials              |
+| [`plugin-agentmail`](../../packages/plugin-agentmail/)         | Receive email and expose mailbox tools                                       |
+| [`plugin-cron`](../../packages/plugin-cron/)                   | Run scheduled prompts and manage jobs                                        |
+| [`plugin-notifications`](../../packages/plugin-notifications/) | Send notifications through configured adapters and inspect delivery receipts |
 
 The [identity plugin](./identity.md) adds per-user service connections. Combine plugins to build the
 assistant you need.
@@ -240,54 +241,67 @@ configuration it started with. Independent agent runs receive unique sessions.
 Their workers are closed after success, failure or timeout, before completion is
 reported. Session files remain available for inspection.
 
-## Send Telegram notifications
+## Send notifications
 
-A conversation replies through its session-scoped `reply` tool. For unattended
-work such as a cron run, enable a fixed notification recipient:
+Use the notifications plugin for unattended updates, such as a completed cron run. Configure named destinations with transport adapters; the agent chooses a destination without supplying a recipient or credentials:
 
 ```ts
-telegram({
-  botToken: process.env.TELEGRAM_BOT_TOKEN!,
-  allowlist: [123456789],
-  notificationChatId: 123456789,
+import { notifications } from "@picco-agent/plugin-notifications";
+import { telegramNotifications } from "@picco-agent/plugin-telegram";
+
+const updates = notifications({
+  destinations: {
+    "review-updates": telegramNotifications({
+      botToken: process.env.TELEGRAM_BOT_TOKEN!,
+      chatId: Number(process.env.TELEGRAM_CHAT_ID),
+    }),
+  },
 });
+// Add updates to createAgent({ plugins: [...] }).
 ```
 
-This exposes `telegram_notify` and read-only `telegram_delivery` tools. The recipient
-must be allowlisted and cannot be changed by the model. Notification text must fit
-in one plain-text Telegram message.
+The Telegram adapter sends to its fixed chat without starting the conversational gateway. Add `telegram(...)` separately if you also want incoming messages and conversation replies. Its chat allowlist controls incoming conversations; notification recipients come from the adapter configuration. Telegram notifications must fit in one plain-text message.
 
-Reuse a key for the same notification intent:
+The plugin exposes one `notify` tool for sending and checking receipts:
 
-```text
-telegram_notify({ text: "Digest ready.", deduplicationKey: "digest:2026-10-26" })
-→ { deliveryId, status: "confirmed", messageId: 123, duplicate: false }
+```typescript
+notify({
+  action: "send",
+  destination: "review-updates",
+  text: "Digest ready.",
+  deduplicationKey: "digest:2026-10-26",
+});
+// → { deliveryId, destination, status: "confirmed", externalId: "123", duplicate: false }
 
-telegram_delivery({ deliveryId })
-→ the cached receipt without sending another message
+notify({ action: "status", deliveryId });
+// → the cached receipt without sending another message
 ```
 
-The plugin uses `lru-cache` for completed receipts and keeps active attempts in a
-separate bounded map. Identical calls share the active delivery ID; a key reused
-with different text fails. Both the completed cache and active attempts have a
-separate limit of 10,000 entries by default, configured with `maxDeliveryRecords`.
-At the active-attempt limit, new intents fail rather than evicting an unfinished
-reservation. Completed receipts are evicted in least-recently-used order.
+Reuse a key for the same intent and destination. Concurrent duplicates return the active delivery ID, while reusing a key with different text fails. Keys belong to a destination, so the same key can send through two configured destinations independently. Host code uses `updates.notify(input)` and `updates.delivery(id)` after startup, sharing the tool’s delivery records.
 
-Receipt TTL starts when an attempt completes and defaults to 30 days, configured
-with `deliveryRetentionDays`. Reading a duplicate does not extend its TTL.
-Confirmed, rejected and uncertain outcomes all expire or evict. An expired or
-evicted key can send again; these are process-local cache semantics, not durable
-delivery guarantees. Stopping or restarting the plugin loses the cache and never
-replays previous attempts. No notification state is written to disk.
+Completed receipts use a bounded `lru-cache`; active attempts have a separate bounded map. Each has a default limit of 10,000 entries, set with `maxDeliveryRecords`. New intents fail at the active-attempt limit instead of removing unfinished reservations, while completed receipts expire or leave the cache when it fills up.
 
-A provider rejection is distinct from uncertain delivery caused by a timeout or
-broken connection. The plugin never automatically retries. Inspect uncertainty
-before deliberately requesting another send, including after cache eviction.
+Receipt expiry starts when an attempt completes and defaults to 30 days, set with `deliveryRetentionDays`. Reading a duplicate does not extend that period. Confirmed, rejected and uncertain outcomes all expire or leave the cache, after which the same key can send again. Stopping or restarting the plugin clears these records without replaying sends; no notification state is written to disk.
 
-The host methods `gateway.notify(input)` and `gateway.delivery(id)` use the same
-cache after startup. Tool diagnostics include trusted execution IDs and safe
-receipt metadata. The cache excludes message text and credentials. Workflows
-choose when to notify and derive stable intent keys from their domain state; a
-new model-generated key creates a new intent. Empty queues and review outcomes
-are not Telegram concepts.
+A definite rejection differs from uncertain delivery after a timeout or broken connection. Attempts time out after 15 seconds by default, set with `timeoutMs`, and the plugin never retries automatically. Inspect an uncertain result before deliberately sending again. The cache and tool diagnostics exclude message text, credentials and raw provider errors.
+
+### Add a notification adapter
+
+An adapter sends to a recipient you configure on the host. Implement `NotificationAdapter` to add another transport without registering another agent tool:
+
+```typescript
+import type { NotificationAdapter } from "@picco-agent/plugin-notifications";
+
+const adapter: NotificationAdapter = {
+  async send(text, signal) {
+    const receipt = await client.send({ text, signal });
+    return { status: "confirmed", externalId: receipt.id };
+  },
+};
+```
+
+Pass the adapter under a name in `destinations`. Return `rejected` only when you know the provider did not accept the message; throw when the outcome is unknown. Honour the abort signal so timed-out requests stop. The plugin bounds the wait even when an adapter ignores cancellation, but that adapter may still deliver later.
+
+### Move existing Telegram notifications
+
+Replace `telegram({ notificationChatId, ... })` with a `notifications(...)` plugin containing a `telegramNotifications({ botToken, chatId })` destination. Move delivery limits to the notifications plugin, renaming `notificationTimeoutMs` to `timeoutMs`. Replace `telegram_notify` calls with `notify({ action: "send", destination, ... })` and `telegram_delivery` with `notify({ action: "status", deliveryId })`; provider message IDs now use the string `externalId` field.

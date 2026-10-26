@@ -1,5 +1,6 @@
 ---
+"@picco-agent/plugin-notifications": minor
 "@picco-agent/plugin-telegram": minor
 ---
 
-Add process-local notification deduplication and receipt inspection using a bounded lru-cache. Active attempts are reserved separately, completed receipts expire or evict, and plugin restarts discard the cache without replaying sends. Notification tools return structured JSON delivery results.
+Move notification delivery into a plugin with named adapters, bounded in-memory deduplication and one notify tool for sending and inspecting receipts. Add a Telegram adapter that sends without starting the conversational gateway. Replace notificationChatId and the Telegram-specific notification tools with configured notification destinations.

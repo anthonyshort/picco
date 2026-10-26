@@ -1,0 +1,37 @@
+{
+  "name": "@picco-agent/plugin-notifications",
+  "version": "0.1.0",
+  "description": "Picco plugin: notifications with shared delivery tracking and transport adapters.",
+  "homepage": "https://github.com/picco-agent/picco/tree/main/packages/plugin-notifications",
+  "bugs": {
+    "url": "https://github.com/picco-agent/picco/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/picco-agent/picco.git",
+    "directory": "packages/plugin-notifications"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "prepare": "pnpm build"
+  },
+  "dependencies": {
+    "@picco-agent/core": "workspace:*",
+    "lru-cache": "11.5.2",
+    "zod": "^4.4.3"
+  }
+}

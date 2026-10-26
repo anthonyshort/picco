@@ -31,8 +31,8 @@
   },
   "dependencies": {
     "@picco-agent/core": "workspace:*",
+    "@picco-agent/plugin-notifications": "workspace:*",
     "grammy": "^1.44.0",
-    "lru-cache": "11.5.2",
     "zod": "^4.4.3"
   }
 }
