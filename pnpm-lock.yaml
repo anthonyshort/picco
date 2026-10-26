@@ -236,6 +236,12 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
 
+  packages/plugin-github-reviews:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
   packages/plugin-notifications:
     dependencies:
       '@picco-agent/core':
