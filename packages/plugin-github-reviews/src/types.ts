@@ -80,6 +80,11 @@ export type GithubReviewResult = z.infer<typeof GithubReviewResultSchema>;
  */
 export type GithubReviewsOptions = z.input<typeof GithubReviewsSettingsSchema> & {
   prompt?: (selection: ReviewSelection) => string;
+  /**
+   * Report an admitted review before worker startup. Waits up to 30 seconds; failure is logged
+   * without stopping the review or retrying the callback.
+   */
+  onRunStart?: (selection: ReviewSelection) => void | Promise<void>;
   onRunComplete?: (result: GithubReviewResult) => void | Promise<void>;
   github?: GithubSourceOptions;
 };

@@ -79,6 +79,8 @@ If you supply a custom `prompt`, retain this completion instruction. A worker's 
 
 The worker is closed before its run finishes. A failed or incomplete workflow remains blocked for reconciliation. A local completion record and a remote GitHub write cannot be one transaction; the database records the worker's explicit declaration of success, not proof of remote delivery.
 
+Use `onRunStart` to notify the user when an eligible request has been reserved and its worker is about to start. It receives the same selection as the prompt builder. The callback is awaited for up to 30 seconds while the reservation remains held. Failure or timeout is logged and the review continues; the callback is not retried. A timed-out callback can still finish later. This reports an admitted review, not every newly discovered request, and worker startup can still fail afterwards.
+
 Use `onRunComplete` to report a durable outcome to an application log or notification system. The plugin records the callback attempt before invoking it and does not automatically repeat an uncertain attempt. Callback failures are visible in run details and do not make a recorded review eligible again. The application still owns its notification destination and message.
 
 ## Inspect and pause work
