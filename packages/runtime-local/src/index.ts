@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { promisify } from "node:util";
@@ -16,11 +16,25 @@ const DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin";
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 /**
+ * Configuration for the unisolated runtime.
+ */
+export interface LocalOptions {
+  /**
+   * Existing absolute Pi profile directory. Session overrides stay in `.pi/`.
+   */
+  agentDir?: string;
+}
+
+/**
  * The no-isolation runtime. Sessions and `exec` run as ordinary host processes with the operator's
  * full environment and filesystem — there is no sandbox. Use it only for trusted code in
  * development and testing; reach for `bwrap` when the session runs anything untrusted.
  */
-export function local(): Runtime {
+export function local(options: LocalOptions = {}): Runtime {
+  if (options.agentDir !== undefined) {
+    if (!path.isAbsolute(options.agentDir)) throw new Error("agentDir must be an absolute path");
+    options = { ...options, agentDir: realpathSync(options.agentDir) };
+  }
   return {
     name: "local",
 
@@ -43,7 +57,27 @@ export function local(): Runtime {
 
     async spawn(spec: SpawnRequest): Promise<RuntimeProcess> {
       // Write pi's config files to the workspace before spawning.
-      writeSessionConfig(spec, path.join(spec.cwd, ".pi", "agent"));
+      if (options.agentDir) {
+        for (const relative of [
+          path.relative(options.agentDir, realpathSync(spec.cwd)),
+          path.relative(realpathSync(spec.cwd), options.agentDir),
+        ]) {
+          if (
+            relative !== ".." &&
+            !relative.startsWith(`..${path.sep}`) &&
+            !path.isAbsolute(relative)
+          )
+            throw new Error(
+              "Shared agentDir must be outside the session directory and its ancestors",
+            );
+        }
+      }
+      const env = buildLocalEnv(spec.cwd, spec.env, options.agentDir);
+      writeSessionConfig(
+        spec,
+        path.join(spec.cwd, options.agentDir ? ".pi" : ".pi/agent"),
+        !!options.agentDir,
+      );
 
       const argv = buildPiArgs(spec);
       const child = spawn("pi", argv, {
@@ -51,7 +85,7 @@ export function local(): Runtime {
         // Pipe [stdin, stdout, stderr] so the host owns all three: it writes RPC requests to stdin,
         // reads the JSONL event stream off stdout, and drains stderr for diagnostics.
         stdio: ["pipe", "pipe", "pipe"],
-        env: buildLocalEnv(spec.cwd, spec.env),
+        env,
       });
       return wrapChild(child);
     },
@@ -63,7 +97,7 @@ export function local(): Runtime {
     async exec(opts: RuntimeExecOptions): Promise<string> {
       return execCollect("sh", ["-c", opts.command], {
         cwd: opts.cwd,
-        env: buildLocalEnv(opts.cwd),
+        env: buildLocalEnv(opts.cwd, undefined, options.agentDir),
         timeoutMs: opts.timeoutMs,
       });
     },
@@ -75,7 +109,21 @@ export function local(): Runtime {
  * passes through to pi verbatim — pi owns models/auth/mcp resolution. Each file is written only
  * when the spec carries data for it.
  */
-export function writeSessionConfig(spec: SpawnRequest, dir: string): void {
+export function writeSessionConfig(spec: SpawnRequest, dir: string, sharedProfile = false): void {
+  if (sharedProfile) {
+    for (const file of [dir, path.join(dir, "settings.json"), path.join(dir, "mcp.json")]) {
+      if (lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink())
+        throw new Error(`Generated Pi configuration must not be a symlink: ${file}`);
+    }
+    if (spec.pi.models)
+      throw new Error("Configure models in the shared agentDir/models.json, not per session");
+    for (const server of Object.values(spec.pi.mcpServers ?? {})) {
+      if ("url" in server && server.auth)
+        throw new Error(
+          "Configure provider-backed MCP authentication in the shared agentDir/mcp.json",
+        );
+    }
+  }
   mkdirSync(dir, { recursive: true });
 
   // Custom providers, verbatim. pi resolves `apiKey` (env interpolation / conventional env vars).
@@ -87,7 +135,7 @@ export function writeSessionConfig(spec: SpawnRequest, dir: string): void {
   // settings escape hatch.
   const packages = spec.pi.packages;
   const extensions = spec.pi.extensions;
-  if (spec.pi.settings || packages?.length || extensions?.length) {
+  if (sharedProfile || spec.pi.settings || packages?.length || extensions?.length) {
     const settings: Record<string, unknown> = { ...spec.pi.settings };
     if (packages?.length) settings.packages = packages;
     if (extensions?.length) settings.extensions = extensions;
@@ -100,6 +148,8 @@ export function writeSessionConfig(spec: SpawnRequest, dir: string): void {
       path.join(dir, "mcp.json"),
       JSON.stringify({ mcpServers: spec.pi.mcpServers }, null, 2),
     );
+  } else if (sharedProfile) {
+    rmSync(path.join(dir, "mcp.json"), { force: true });
   }
 
   // The connection belongs to the session, independently of Pi configuration.
@@ -157,16 +207,27 @@ export function buildPiArgs(spec: SpawnRequest): string[] {
  * isolation, so the session gets the process's real environment — including HOME and the operator's
  * git identity), then any per-spawn vars from `extra` win.
  *
- * PI_CODING_AGENT_DIR points pi (and the bridge extension) at the session's own config directory,
- * so config discovery does not depend on HOME — HOME stays the operator's real home, as expected
- * for an unisolated process. GIT_TERMINAL_PROMPT is off so a git credential prompt can't block the
+ * PI_CODING_AGENT_DIR points Pi at the selected profile or the session's own config directory, so
+ * config discovery does not depend on HOME — HOME stays the operator's real home, as expected for
+ * an unisolated process. GIT_TERMINAL_PROMPT is off so a git credential prompt can't block the
  * worker's silent stdin.
  */
-export function buildLocalEnv(cwd: string, extra?: Record<string, string>): Record<string, string> {
+export function buildLocalEnv(
+  cwd: string,
+  extra?: Record<string, string>,
+  agentDir?: string,
+): Record<string, string> {
+  if (
+    agentDir &&
+    extra?.PI_CODING_AGENT_DIR !== undefined &&
+    extra.PI_CODING_AGENT_DIR !== agentDir
+  )
+    throw new Error("PI_CODING_AGENT_DIR conflicts with runtime agentDir");
   return {
     ...(process.env as Record<string, string>),
     PATH: process.env.PATH ?? DEFAULT_PATH,
-    PI_CODING_AGENT_DIR: path.join(cwd, ".pi", "agent"),
+    PI_CODING_AGENT_DIR: agentDir ?? path.join(cwd, ".pi", "agent"),
+    ...(agentDir ? { PI_CODING_AGENT_SESSION_DIR: path.join(cwd, "subagents") } : {}),
     GIT_TERMINAL_PROMPT: "0",
     ...extra,
   };

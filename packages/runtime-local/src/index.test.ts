@@ -1,4 +1,13 @@
-import { mkdtempSync, readFileSync, statSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -33,6 +42,21 @@ describe("local().exec", () => {
 
     expect(out).toContain("host-visible");
     expect(out).toContain(realpathSync(workdir));
+  });
+
+  it("uses the selected profile for exec while keeping child transcripts local", async () => {
+    const agentDir = tmp();
+    const workdir = tmp();
+    const out = await local({ agentDir }).exec({
+      cwd: workdir,
+      command: 'echo "$PI_CODING_AGENT_DIR:$PI_CODING_AGENT_SESSION_DIR"',
+      timeoutMs: 15_000,
+    });
+    expect(out).toBe(`${realpathSync(agentDir)}:${workdir}/subagents`);
+    expect(() => buildLocalEnv(workdir, { PI_CODING_AGENT_DIR: "/other" }, agentDir)).toThrow(
+      "conflicts",
+    );
+    expect(() => local({ agentDir: "relative" })).toThrow("absolute path");
   });
 
   it("inherits the host HOME — local() runs unisolated", async () => {
@@ -114,6 +138,52 @@ describe("writeSessionConfig", () => {
       return false;
     }
   }
+
+  it.each([".", "settings.json", "mcp.json"])(
+    "rejects generated configuration symlink %s before changing shared files",
+    (entry) => {
+      const root = tmp();
+      const profile = path.join(root, "profile"),
+        project = path.join(root, "worker/.pi");
+      mkdirSync(profile);
+      mkdirSync(entry === "." ? path.dirname(project) : project, { recursive: true });
+      for (const name of ["settings.json", "mcp.json"])
+        writeFileSync(path.join(profile, name), "preserve");
+      symlinkSync(entry === "." ? profile : path.join(profile, entry), path.join(project, entry));
+      expect(() =>
+        writeSessionConfig(makeSpec({ cwd: path.dirname(project), pi: {} }), project, true),
+      ).toThrow("symlink");
+      for (const name of ["settings.json", "mcp.json"])
+        expect(readFileSync(path.join(profile, name), "utf8")).toBe("preserve");
+    },
+  );
+
+  it("keeps shared-profile overrides local and rejects profile-only configuration", () => {
+    const dir = tmp();
+    const s = makeSpec({
+      pi: { extensions: ["/bridge.js"], mcpServers: { probe: { url: "http://localhost/mcp" } } },
+    });
+    writeSessionConfig(s, dir, true);
+    expect(readJson(dir, "settings.json")).toEqual({ extensions: ["/bridge.js"] });
+    expect(readJson(dir, "mcp.json")).toEqual({ mcpServers: s.pi.mcpServers });
+    writeSessionConfig(makeSpec({ pi: {} }), dir, true);
+    expect(exists(dir, "mcp.json")).toBe(false);
+    expect(readJson(dir, "settings.json")).toEqual({});
+    expect(() => writeSessionConfig(makeSpec({ pi: { models: {} } }), dir, true)).toThrow(
+      "shared agentDir/models.json",
+    );
+    expect(() =>
+      writeSessionConfig(
+        makeSpec({
+          pi: {
+            mcpServers: { private: { url: "http://localhost/mcp", auth: { provider: "fake" } } },
+          },
+        }),
+        dir,
+        true,
+      ),
+    ).toThrow("shared agentDir/mcp.json");
+  });
 
   it("writes custom providers verbatim to models.json (no apiKey injection)", () => {
     const dir = tmp();
