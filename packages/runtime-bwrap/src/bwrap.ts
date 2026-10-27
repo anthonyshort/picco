@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -158,6 +158,10 @@ function normalizeMounts(mounts: MountEntry[] = []): NormalizedMount[] {
  */
 export function writeSessionConfig(spec: SpawnRequest, dir: string, sharedProfile = false): void {
   if (sharedProfile) {
+    for (const file of [dir, path.join(dir, "settings.json"), path.join(dir, "mcp.json")]) {
+      if (lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink())
+        throw new Error(`Generated Pi configuration must not be a symlink: ${file}`);
+    }
     if (spec.pi.models)
       throw new Error("Configure models in the shared agentDir/models.json, not per session");
     for (const server of Object.values(spec.pi.mcpServers ?? {})) {
@@ -370,20 +374,6 @@ export function buildSessionArgs(options: BwrapOptions, spec: SpawnRequest): str
     }
     protectedPaths.push(options.agentDir);
   }
-  for (const mount of mounts) {
-    const target = resolveMountTarget(spec.cwd, mount);
-    for (const directory of protectedPaths) {
-      const configPath = path.relative(target, directory);
-      if (configPath === "" || (!configPath.startsWith("..") && !path.isAbsolute(configPath))) {
-        throw new Error(
-          `Mount target ${target} hides generated session configuration at ${directory}; mount only extension-owned subdirectories`,
-        );
-      }
-    }
-  }
-
-  if (options.agentDir) mounts.push({ source: options.agentDir, mode: "rw" });
-
   // Skill, prompt, and file-path extension paths that actually exist on the host. A nonexistent
   // path is dropped here so it can't take down the spawn — a --ro-bind of a missing source fails,
   // and a --skill/--prompt-template flag for an unmounted path would point at nothing. Both the
@@ -402,6 +392,24 @@ export function buildSessionArgs(options: BwrapOptions, spec: SpawnRequest): str
       mode: "ro" as const,
     }),
   );
+
+  for (const mount of [...mounts, ...resourceMounts]) {
+    const target = resolveMountTarget(spec.cwd, mount);
+    for (const directory of protectedPaths) {
+      const configPath = path.relative(target, directory);
+      if (
+        configPath !== ".." &&
+        !configPath.startsWith(`..${path.sep}`) &&
+        !path.isAbsolute(configPath)
+      ) {
+        throw new Error(
+          `Mount target ${target} hides generated session configuration at ${directory}; mount only extension-owned subdirectories`,
+        );
+      }
+    }
+  }
+
+  if (options.agentDir) mounts.push({ source: options.agentDir, mode: "rw" });
 
   const args = buildBwrapArgs(spec.cwd, [...mounts, ...resourceMounts]);
 

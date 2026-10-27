@@ -1,4 +1,13 @@
-import { mkdtempSync, readFileSync, statSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -129,6 +138,25 @@ describe("writeSessionConfig", () => {
       return false;
     }
   }
+
+  it.each([".", "settings.json", "mcp.json"])(
+    "rejects generated configuration symlink %s before changing shared files",
+    (entry) => {
+      const root = tmp();
+      const profile = path.join(root, "profile"),
+        project = path.join(root, "worker/.pi");
+      mkdirSync(profile);
+      mkdirSync(entry === "." ? path.dirname(project) : project, { recursive: true });
+      for (const name of ["settings.json", "mcp.json"])
+        writeFileSync(path.join(profile, name), "preserve");
+      symlinkSync(entry === "." ? profile : path.join(profile, entry), path.join(project, entry));
+      expect(() =>
+        writeSessionConfig(makeSpec({ cwd: path.dirname(project), pi: {} }), project, true),
+      ).toThrow("symlink");
+      for (const name of ["settings.json", "mcp.json"])
+        expect(readFileSync(path.join(profile, name), "utf8")).toBe("preserve");
+    },
+  );
 
   it("keeps shared-profile overrides local and rejects profile-only configuration", () => {
     const dir = tmp();

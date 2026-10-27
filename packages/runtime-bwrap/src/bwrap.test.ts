@@ -3,6 +3,7 @@ import {
   mkdtempSync,
   readFileSync,
   statSync,
+  symlinkSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -124,6 +125,26 @@ describe("buildSessionArgs", () => {
       ).toThrow("hides generated session configuration");
     }
     expect(() => buildSessionArgs({ agentDir: s.cwd }, s)).toThrow("outside the session directory");
+  });
+
+  it("rejects resource mounts covering the profile but allows its resource subdirectories", () => {
+    const s = spec(),
+      root = s.cwd,
+      agentDir = path.join(root, "profile");
+    s.cwd = path.join(root, "worker");
+    const skills = path.join(agentDir, "skills");
+    mkdirSync(s.cwd);
+    mkdirSync(skills, { recursive: true });
+    for (const key of ["skills", "prompts", "extensions"] as const) {
+      for (const resource of [agentDir, root]) {
+        expect(() => buildSessionArgs({ agentDir }, { ...s, pi: { [key]: [resource] } })).toThrow(
+          "hides generated session configuration",
+        );
+      }
+    }
+    const args = buildSessionArgs({ agentDir }, { ...s, pi: { skills: [skills] } });
+    expect(bindFor(args, agentDir)?.[0]).toBe("--bind");
+    expect(bindFor(args, skills)?.[0]).toBe("--ro-bind");
   });
 
   it("binds extra mounts read-only", () => {
@@ -282,6 +303,26 @@ describe("writeSessionConfig", () => {
       ...over,
     };
   }
+
+  it.each([".", "settings.json", "mcp.json"])(
+    "rejects generated configuration symlink %s before changing shared files",
+    (entry) => {
+      dir = mkdtempSync(path.join(os.tmpdir(), "bwrap-alias-"));
+      const root = dir;
+      const profile = path.join(root, "profile"),
+        project = path.join(root, "worker/.pi");
+      mkdirSync(profile);
+      mkdirSync(entry === "." ? path.dirname(project) : project, { recursive: true });
+      for (const name of ["settings.json", "mcp.json"])
+        writeFileSync(path.join(profile, name), "preserve");
+      symlinkSync(entry === "." ? profile : path.join(profile, entry), path.join(project, entry));
+      expect(() =>
+        writeSessionConfig(specWith({ cwd: path.dirname(project), pi: {} }), project, true),
+      ).toThrow("symlink");
+      for (const name of ["settings.json", "mcp.json"])
+        expect(readFileSync(path.join(profile, name), "utf8")).toBe("preserve");
+    },
+  );
 
   it("keeps shared-profile overrides local and rejects profile-only configuration", () => {
     dir = mkdtempSync(path.join(os.tmpdir(), "bwrap-write-"));

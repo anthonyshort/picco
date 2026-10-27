@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { promisify } from "node:util";
@@ -111,6 +111,10 @@ export function local(options: LocalOptions = {}): Runtime {
  */
 export function writeSessionConfig(spec: SpawnRequest, dir: string, sharedProfile = false): void {
   if (sharedProfile) {
+    for (const file of [dir, path.join(dir, "settings.json"), path.join(dir, "mcp.json")]) {
+      if (lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink())
+        throw new Error(`Generated Pi configuration must not be a symlink: ${file}`);
+    }
     if (spec.pi.models)
       throw new Error("Configure models in the shared agentDir/models.json, not per session");
     for (const server of Object.values(spec.pi.mcpServers ?? {})) {
