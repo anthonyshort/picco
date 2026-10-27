@@ -1,7 +1,15 @@
 import * as z from "zod";
 import { createDeliveries } from "./delivery.js";
 import { createNotificationTool } from "./tool.js";
-import type { NotificationOptions, NotificationPlugin } from "./types.js";
+import { createMessages } from "./messages.js";
+import type {
+  NotificationOptions,
+  NotificationPlugin,
+  NotificationInput,
+  NotificationResult,
+  NotificationBroadcast,
+  NotificationBroadcastResult,
+} from "./types.js";
 export type {
   AdapterResult,
   NotificationAdapter,
@@ -9,6 +17,8 @@ export type {
   NotificationOptions,
   NotificationPlugin,
   NotificationResult,
+  NotificationBroadcast,
+  NotificationBroadcastResult,
 } from "./types.js";
 
 /**
@@ -32,28 +42,44 @@ export function notifications(options: NotificationOptions): NotificationPlugin 
       retentionDays: options.deliveryRetentionDays ?? 30,
     });
   let deliveries: ReturnType<typeof createDeliveries> | undefined;
+  let messages: ReturnType<typeof createMessages> | undefined;
 
   function ensureDeliveries() {
     if (!deliveries) throw new Error("Notifications are not started");
     return deliveries;
   }
 
+  function notify(input: NotificationInput): Promise<NotificationResult>;
+  function notify(input: NotificationBroadcast): Promise<NotificationBroadcastResult>;
+  function notify(input: NotificationInput | NotificationBroadcast) {
+    ensureDeliveries();
+    return "destination" in input ? deliveries!.notify(input) : messages!.notify(input);
+  }
+
   const plugin: NotificationPlugin = {
     name: "notifications",
     tools: [],
-    notify: (input) => ensureDeliveries().notify(input),
-    delivery: (deliveryId) => ensureDeliveries().delivery(deliveryId),
+    notify,
+    delivery: (deliveryId) =>
+      ensureDeliveries().delivery(deliveryId) ?? messages!.delivery(deliveryId),
     start() {
       deliveries = createDeliveries(destinations, {
         ...limits,
         ttl: limits.retentionDays * 86_400_000,
       });
+      messages = createMessages(options.resolveDestinations ?? (() => options.destinations), {
+        max: limits.max,
+        timeoutMs: limits.timeoutMs,
+      });
     },
     async stop() {
-      await deliveries?.stop();
+      await Promise.all([deliveries?.stop(), messages?.stop()]);
       deliveries = undefined;
+      messages = undefined;
     },
   };
-  plugin.tools = [createNotificationTool([...destinations.keys()], plugin)];
+  plugin.tools = [
+    createNotificationTool([...destinations.keys()], plugin, (input) => plugin.notify(input)),
+  ];
   return plugin;
 }
