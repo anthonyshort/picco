@@ -1,6 +1,6 @@
 {
   "name": "@picco-agent/plugin-github-reviews",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Picco plugin: poll personal GitHub review requests and run durable, bounded review sessions.",
   "homepage": "https://github.com/picco-agent/picco/tree/main/packages/plugin-github-reviews",
   "bugs": {
