@@ -1,21 +1,11 @@
 import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 import * as z from "zod";
 
 /**
- * The bridge config path: pi's agent directory + bridge.json. Resolved the same way pi resolves its
- * own config dir — `PI_CODING_AGENT_DIR` when set (the runtimes point it at the session dir), else
- * `~/.pi/agent` — so the extension reads the file wherever pi reads its config.
- */
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-const DEFAULT_CONFIG_PATH = join(AGENT_DIR, "bridge.json");
-
-/**
- * Bridge config the runtime writes into the session's agent directory (`bridge.json`, mode 0600).
- * Every field is machine-written — a partial file is a configuration error, reported loudly.
+ * Connection details for this worker, stored at `.picco/bridge.json` in its working directory.
  */
 export const BridgeConfigSchema = z.object({
   // The bridge's /call endpoint.
@@ -65,7 +55,7 @@ export type BridgeCallResult = z.infer<typeof BridgeCallResultSchema>;
  * The bridge extension — registers the host-side tools listed in the session's bridge.json.
  */
 export default function BridgeExtension(pi: ExtensionAPI) {
-  const config = readBridgeConfig(DEFAULT_CONFIG_PATH);
+  const config = readBridgeConfig(join(process.cwd(), ".picco", "bridge.json"));
   pi.registerCommand("picco-reload", {
     description: "Reload this session's resources while preserving history",
     async handler(_args, ctx) {

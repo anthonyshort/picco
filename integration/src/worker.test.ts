@@ -52,8 +52,7 @@ afterEach(async () => {
  * Write pi config files to the workspace. models.json is written verbatim — pi resolves `apiKey`
  * itself (env interpolation), exactly as the real runtime does.
  */
-function writeSessionConfig(cwd: string, models: Record<string, unknown>): void {
-  const agentDir = path.join(cwd, ".pi", "agent");
+function writeSessionConfig(cwd: string, models: Record<string, unknown>, agentDir: string): void {
   mkdirSync(agentDir, { recursive: true });
   writeFileSync(path.join(agentDir, "models.json"), JSON.stringify(models, null, 2));
 
@@ -128,11 +127,12 @@ async function startWorker(opts: {
   };
 
   // Write config files and bridge extension.
-  writeSessionConfig(cwd, pi.models as Record<string, unknown>);
+  const agentDir = opts.env?.PI_CODING_AGENT_DIR ?? path.join(cwd, ".pi", "agent");
+  writeSessionConfig(cwd, pi.models as Record<string, unknown>, agentDir);
 
   // Write bridge.json so the bridge extension can read its config.
-  const agentDir = path.join(cwd, ".pi", "agent");
-  mkdirSync(agentDir, { recursive: true });
+  const bridgeDir = path.join(cwd, ".picco");
+  mkdirSync(bridgeDir, { recursive: true, mode: 0o700 });
   const toolSpecs = (opts.tools ?? []).map((t) => ({
     name: t.name,
     description: t.description,
@@ -140,7 +140,7 @@ async function startWorker(opts: {
   }));
   // bridge.json carries the per-session bearer token value; the extension reads it directly.
   writeFileSync(
-    path.join(agentDir, "bridge.json"),
+    path.join(bridgeDir, "bridge.json"),
     JSON.stringify({ url: bridge.callUrl(), token: bridgeToken, tools: toolSpecs }, null, 2),
   );
 
@@ -154,7 +154,7 @@ async function startWorker(opts: {
       // What both runtimes set: config discovery rides PI_CODING_AGENT_DIR, exactly as in
       // production. HOME is the session cwd only so the canary can't see the host's real ~/.pi.
       HOME: cwd,
-      PI_CODING_AGENT_DIR: path.join(cwd, ".pi", "agent"),
+      PI_CODING_AGENT_DIR: agentDir,
       ...opts.env,
     },
     stdio: ["pipe", "pipe", "pipe"],
@@ -219,6 +219,40 @@ describe("worker integration", () => {
 
     // get_session_stats answers (the /context path).
     expect(await h.rpc.stats()).toBeGreaterThan(0);
+  });
+
+  test("workers sharing a Pi profile keep separate bridge connections and transcripts", async () => {
+    const profile = mkdtempSync(path.join(os.tmpdir(), "shared-pi-"));
+    cleanups.push(() => rmSync(profile, { recursive: true, force: true }));
+    const workers: Harness[] = [];
+    for (const identity of ["left", "right"]) {
+      const worker = await startWorker({
+        env: { PI_CODING_AGENT_DIR: profile },
+        tools: [
+          tool({
+            name: "worker_identity",
+            description: "Identify this worker through its host connection.",
+            input: z.object({}),
+            execute: () => identity,
+          }),
+        ],
+        script: (params) =>
+          params.messages.some((message) => message.role === "tool")
+            ? [{ text: lastToolText(params) }]
+            : [{ toolCall: { name: "worker_identity", args: {} } }],
+      });
+      expect(await worker.rpc.stats()).toBe(0);
+      workers.push(worker);
+    }
+
+    expect(await Promise.all(workers.map((worker) => worker.prompt("Identify yourself.")))).toEqual(
+      ["left", "right"],
+    );
+    for (const worker of workers) {
+      expect((await readdir(worker.cwd)).some((file) => file.endsWith(".jsonl"))).toBe(true);
+      expect(await readdir(path.join(worker.cwd, ".picco"))).toContain("bridge.json");
+    }
+    expect(await readdir(profile)).not.toContain("bridge.json");
   });
 
   test("a throwing host tool surfaces as a model-visible error result", async () => {

@@ -5,8 +5,8 @@ into every session automatically — you never add it yourself.
 
 ## How it works
 
-At spawn the runtime writes `bridge.json` (mode 0600) into the session's agent directory: the
-bridge URL, a per-session bearer token, and the tool manifest. This extension reads that file,
+At spawn the runtime writes `.picco/bridge.json` (mode 0600) under the session’s working directory.
+It contains the bridge URL, a per-session bearer token, and the tool manifest. This extension reads that file,
 registers each tool with pi, and forwards calls to the bridge over loopback HTTP.
 
 ## Docs

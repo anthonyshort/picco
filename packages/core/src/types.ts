@@ -82,7 +82,7 @@ export interface SpawnRequest {
   resume?: boolean;
   /**
    * The tool bridge as the HOST reaches it. The runtime must make it reachable from wherever the
-   * session runs (remote runtimes tunnel it) and writes `token` into the session's bridge.json so
+   * session runs (remote runtimes tunnel it) and writes `token` into `{cwd}/.picco/bridge.json` so
    * the bridge extension can authenticate its calls. The token is a per-session, loopback-scoped
    * bearer, revoked at teardown.
    */

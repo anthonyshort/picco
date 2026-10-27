@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -94,7 +94,7 @@ describe("writeSessionConfig", () => {
   function makeSpec(overrides?: Partial<SpawnRequest>): SpawnRequest {
     return {
       ref: { source: "test", key: "default" },
-      cwd: "/unused",
+      cwd: tmp(),
       env: {},
       bridge: { url: "http://localhost:9999", token: "tok-abc" },
       pi: { model: "anthropic/claude-sonnet-4-5" },
@@ -181,13 +181,15 @@ describe("writeSessionConfig", () => {
     expect(exists(empty, "mcp.json")).toBe(false);
   });
 
-  it("writes the per-session bearer token value into bridge.json", () => {
+  it("keeps the private bridge connection outside Pi configuration", () => {
     const dir = tmp();
     writeSessionConfig(
-      makeSpec({ bridge: { url: "http://localhost:9999", token: "sk-super-secret" } }),
-      dir,
+      makeSpec({ cwd: dir, bridge: { url: "http://localhost:9999", token: "sk-super-secret" } }),
+      path.join(dir, ".pi/agent"),
     );
-    expect(readJson(dir, "bridge.json")).toEqual({
+    expect(exists(path.join(dir, ".pi/agent"), "bridge.json")).toBe(false);
+    expect(statSync(path.join(dir, ".picco/bridge.json")).mode & 0o777).toBe(0o600);
+    expect(readJson(path.join(dir, ".picco"), "bridge.json")).toEqual({
       url: "http://localhost:9999",
       token: "sk-super-secret",
       tools: [],
@@ -196,8 +198,8 @@ describe("writeSessionConfig", () => {
 
   it("omits bridge.json when no token is configured", () => {
     const dir = tmp();
-    writeSessionConfig(makeSpec({ bridge: { url: "http://localhost:9999" } }), dir);
-    expect(exists(dir, "bridge.json")).toBe(false);
+    writeSessionConfig(makeSpec({ cwd: dir, bridge: { url: "http://localhost:9999" } }), dir);
+    expect(exists(path.join(dir, ".picco"), "bridge.json")).toBe(false);
   });
 
   it("creates the agent directory recursively", () => {

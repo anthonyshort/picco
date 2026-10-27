@@ -15,8 +15,9 @@ required agent name prevents multiple agents from sharing state accidentally.
 ## Session directories
 
 Each session directory is Pi's working directory. Both runtimes point
-`PI_CODING_AGENT_DIR` at `{session}/.pi/agent` and write generated model, settings, MCP, and bridge
-configuration there.
+`PI_CODING_AGENT_DIR` at `{session}/.pi/agent` and write generated model, settings, and MCP
+configuration there. The session’s Picco connection lives separately in `{session}/.picco/bridge.json`,
+so it does not depend on the Pi profile location.
 
 Pi transcripts are written directly under the session directory:
 
@@ -24,8 +25,9 @@ Pi transcripts are written directly under the session directory:
 sessions/telegram/123-general/
   .pi/
     agent/
-      bridge.json
       settings.json
+  .picco/
+    bridge.json
   2026-07-24T10-15-00-000Z_abc123.jsonl
 ```
 

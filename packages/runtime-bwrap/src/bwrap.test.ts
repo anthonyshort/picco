@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -102,9 +110,9 @@ describe("buildSessionArgs", () => {
     ]);
   });
 
-  it("rejects mounts at or above Pi's generated configuration", () => {
+  it("rejects mounts hiding Pi configuration or the bridge connection", () => {
     const s = spec();
-    for (const target of ["~/.pi", "~/.pi/agent"]) {
+    for (const target of ["~/.pi", "~/.pi/agent", "~/.picco"]) {
       expect(() =>
         buildSessionArgs({ mounts: [{ source: "/ws/shared", target, mode: "rw" }] }, s),
       ).toThrow("mount only extension-owned subdirectories");
@@ -242,7 +250,7 @@ describe("writeSessionConfig", () => {
   function specWith(over: Partial<SpawnRequest> = {}): SpawnRequest {
     return {
       ref: { source: "telegram", key: "42" },
-      cwd: "/unused",
+      cwd: dir,
       env: {},
       pi: {},
       bridge: { url: "http://127.0.0.1:4321/call", token: "tok-abc" },
@@ -261,15 +269,19 @@ describe("writeSessionConfig", () => {
           mcpServers: { deepwiki: { url: "https://mcp.deepwiki.com/mcp" } },
         },
       }),
-      dir,
+      path.join(dir, ".pi/agent"),
     );
 
-    const read = (f: string) => JSON.parse(readFileSync(path.join(dir, f), "utf-8"));
+    const read = (f: string) => JSON.parse(readFileSync(path.join(dir, ".pi/agent", f), "utf-8"));
     expect(read("models.json")).toEqual({ providers: { fake: { apiKey: "$FAKE_KEY" } } });
     expect(read("settings.json")).toEqual({ packages: ["npm:context-mode@1.2.0"] });
     expect(read("mcp.json")).toEqual({
       mcpServers: { deepwiki: { url: "https://mcp.deepwiki.com/mcp" } },
     });
-    expect(read("bridge.json").token).toBe("sk-secret");
+    expect(statSync(path.join(dir, ".picco/bridge.json")).mode & 0o777).toBe(0o600);
+    expect(() => read("bridge.json")).toThrow();
+    expect(JSON.parse(readFileSync(path.join(dir, ".picco/bridge.json"), "utf-8")).token).toBe(
+      "sk-secret",
+    );
   });
 });
