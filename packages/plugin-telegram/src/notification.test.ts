@@ -1,3 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { notifications, type NotificationResult } from "../../plugin-notifications/src/index.js";
+import { runReview } from "../../plugin-github-reviews/src/runner.js";
+import { createReviewStore } from "../../plugin-github-reviews/src/store.js";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { Api, Bot, GrammyError } from "grammy";
 import { createFakePluginContext } from "@picco-agent/core/testing";
@@ -32,6 +38,66 @@ describe("Telegram notification adapter", () => {
       signal,
     );
     expect(polling).not.toHaveBeenCalled();
+  });
+
+  test("sends review-start callbacks through the host notification API and Telegram adapter", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "picco-review-notification-"));
+    const store = createReviewStore(path.join(directory, "reviews.sqlite"));
+    store.reconcile("reviewer", [
+      {
+        repository: "example/project",
+        number: 42,
+        title: "Requested change",
+        url: "https://github.com/example/project/pull/42",
+        head: "a".repeat(40),
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    const selectedRun = store.admit(store.next()[0]!.id, "reviewer", 1)!;
+    const ctx = createFakePluginContext({ source: "github-reviews" });
+    const send = vi
+      .spyOn(Api.prototype, "sendMessage")
+      .mockResolvedValue(receipt(456, "Review starting"));
+    const polling = vi.spyOn(Bot.prototype, "start");
+    const deliveries: NotificationResult[] = [];
+    const notifier = notifications({
+      destinations: {
+        telegram: telegramNotifications({ botToken: "123:test-token", chatId: 456 }),
+      },
+    });
+    try {
+      await notifier.start?.(ctx);
+      await runReview({
+        ctx,
+        store,
+        run: selectedRun,
+        skill: "review",
+        reviewsDirectory: directory,
+        timeoutMs: 60_000,
+        onRunStart: async ({ run }) => {
+          const delivery = await notifier.notify({
+            destination: "telegram",
+            text: `Review starting: ${run.repository} #${run.number}\n${run.url}`,
+            deduplicationKey: `review-start:${run.id}`,
+          });
+          deliveries.push(delivery);
+          if (delivery.status !== "confirmed") throw new Error("Start notification unconfirmed");
+        },
+      }).completion;
+      expect(deliveries).toMatchObject([{ status: "confirmed", externalId: "77" }]);
+      expect(send).toHaveBeenCalledExactlyOnceWith(
+        456,
+        "Review starting: example/project #42\nhttps://github.com/example/project/pull/42",
+        { link_preview_options: { is_disabled: true } },
+        expect.any(AbortSignal),
+      );
+      expect(polling).not.toHaveBeenCalled();
+      expect(ctx.turns).toHaveLength(1);
+    } finally {
+      await notifier.stop?.();
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("validates the recipient and rejects oversized messages before transport", async () => {
