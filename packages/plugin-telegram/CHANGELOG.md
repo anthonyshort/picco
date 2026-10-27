@@ -1,5 +1,12 @@
 # @picco-agent/plugin-telegram
 
+## 0.2.1
+
+### Patch Changes
+
+- @picco-agent/core@0.3.1
+- @picco-agent/plugin-notifications@0.2.1
+
 ## 0.2.0
 
 ### Minor Changes

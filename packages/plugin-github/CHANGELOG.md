@@ -1,5 +1,11 @@
 # @picco-agent/plugin-github
 
+## 0.1.3
+
+### Patch Changes
+
+- @picco-agent/core@0.3.1
+
 ## 0.1.2
 
 ### Patch Changes

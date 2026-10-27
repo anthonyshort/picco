@@ -1,5 +1,12 @@
 # @picco-agent/core
 
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [1124ac6]
+  - @picco-agent/bridge-extension@0.1.3
+
 ## 0.3.0
 
 ### Minor Changes

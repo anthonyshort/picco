@@ -1,5 +1,11 @@
 # @picco-agent/identity
 
+## 0.2.2
+
+### Patch Changes
+
+- @picco-agent/core@0.3.1
+
 ## 0.2.1
 
 ### Patch Changes
