@@ -1,5 +1,15 @@
 # @picco-agent/plugin-github-reviews
 
+## 0.2.0
+
+### Minor Changes
+
+- 504452f: Add an optional onRunStart callback so applications can notify users before a reserved review starts. Callback failures and timeouts are logged without preventing the review or retrying delivery.
+
+### Patch Changes
+
+- dcd874e: Use GitHub advanced issue search for nested repository filters so requested pull requests are discovered across configured repositories.
+
 ## 0.1.2
 
 ### Patch Changes
