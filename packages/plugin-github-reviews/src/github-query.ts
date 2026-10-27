@@ -105,7 +105,7 @@ export function buildDiscoveryDocument(repositories: string[]): string {
   return `query RequestedReviews($query: String!, $after: String) {
     viewer { login }
     ${repositoryFields}
-    search(query: $query, type: ISSUE, first: ${PAGE_SIZE}, after: $after) {
+    search(query: $query, type: ISSUE_ADVANCED, first: ${PAGE_SIZE}, after: $after) {
       issueCount nodes { ... on PullRequest { number title url headRefOid createdAt isDraft state repository { nameWithOwner } } }
       pageInfo { hasNextPage endCursor }
     }
