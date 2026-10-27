@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -65,6 +65,10 @@ export type MountEntry =
 
 export interface BwrapOptions {
   /**
+   * Existing absolute Pi profile directory, mounted read-write. Session overrides stay in `.pi/`.
+   */
+  agentDir?: string;
+  /**
    * Host env var names forwarded into the sandbox (e.g. ANTHROPIC_API_KEY).
    */
   env?: string[];
@@ -86,6 +90,10 @@ type NormalizedMount = { source: string; target?: string; mode: "ro" | "rw" };
  * The bubblewrap Runtime (see the file header for what it isolates).
  */
 export function bwrap(options: BwrapOptions = {}): Runtime {
+  if (options.agentDir !== undefined) {
+    if (!path.isAbsolute(options.agentDir)) throw new Error("agentDir must be an absolute path");
+    options = { ...options, agentDir: realpathSync(options.agentDir) };
+  }
   return {
     name: "bwrap",
 
@@ -108,18 +116,24 @@ export function bwrap(options: BwrapOptions = {}): Runtime {
 
     async spawn(spec: SpawnRequest): Promise<RuntimeProcess> {
       // Write pi's config files to the workspace before spawning.
-      writeSessionConfig(spec, path.join(spec.cwd, ".pi", "agent"));
-
       const args = buildSessionArgs(options, spec);
+      const env = buildSpawnEnv(options, spec.cwd, spec.env);
+      writeSessionConfig(
+        spec,
+        path.join(spec.cwd, options.agentDir ? ".pi" : ".pi/agent"),
+        !!options.agentDir,
+      );
       const child = spawn(BWRAP, args, {
         stdio: ["pipe", "pipe", "pipe"],
-        env: buildSpawnEnv(options, spec.cwd, spec.env),
+        env,
       });
       return wrapChild(child);
     },
 
     async exec(opts: RuntimeExecOptions): Promise<string> {
-      const args = buildBwrapArgs(opts.cwd, normalizeMounts(options.mounts));
+      const mounts = normalizeMounts(options.mounts);
+      if (options.agentDir) mounts.push({ source: options.agentDir, mode: "rw" });
+      const args = buildBwrapArgs(opts.cwd, mounts);
       args.push("sh", "-c", opts.command);
 
       return execCollect(BWRAP, args, {
@@ -139,10 +153,20 @@ function normalizeMounts(mounts: MountEntry[] = []): NormalizedMount[] {
 
 /**
  * Write Pi configuration under `dir` and the bridge connection under `{cwd}/.picco`. Every field
- * passes through to pi verbatim — pi owns models/auth/mcp resolution. Each file is written only
- * when the spec carries data for it.
+ * passes through to Pi. Shared-profile mode writes project overrides only and rejects profile-only
+ * model definitions and provider-backed MCP authentication.
  */
-export function writeSessionConfig(spec: SpawnRequest, dir: string): void {
+export function writeSessionConfig(spec: SpawnRequest, dir: string, sharedProfile = false): void {
+  if (sharedProfile) {
+    if (spec.pi.models)
+      throw new Error("Configure models in the shared agentDir/models.json, not per session");
+    for (const server of Object.values(spec.pi.mcpServers ?? {})) {
+      if ("url" in server && server.auth)
+        throw new Error(
+          "Configure provider-backed MCP authentication in the shared agentDir/mcp.json",
+        );
+    }
+  }
   mkdirSync(dir, { recursive: true });
 
   // Custom providers, verbatim. pi resolves `apiKey` (env interpolation / conventional env vars).
@@ -154,7 +178,7 @@ export function writeSessionConfig(spec: SpawnRequest, dir: string): void {
   // settings escape hatch.
   const packages = spec.pi.packages;
   const extensions = spec.pi.extensions;
-  if (spec.pi.settings || packages?.length || extensions?.length) {
+  if (sharedProfile || spec.pi.settings || packages?.length || extensions?.length) {
     const settings: Record<string, unknown> = { ...spec.pi.settings };
     if (packages?.length) settings.packages = packages;
     if (extensions?.length) settings.extensions = extensions;
@@ -167,6 +191,8 @@ export function writeSessionConfig(spec: SpawnRequest, dir: string): void {
       path.join(dir, "mcp.json"),
       JSON.stringify({ mcpServers: spec.pi.mcpServers }, null, 2),
     );
+  } else if (sharedProfile) {
+    rmSync(path.join(dir, "mcp.json"), { force: true });
   }
 
   // The connection belongs to the session, independently of Pi configuration.
@@ -204,8 +230,8 @@ function resolveMountTarget(cwd: string, mount: NormalizedMount): string {
  * HOME is the session cwd: it's the only writable per-session directory, so `~` resolves somewhere
  * real and extensions that write ~/.config or ~/.cache get an ephemeral, session-scoped home
  * instead of a dangling host path. PI_CODING_AGENT_DIR points pi (and the bridge extension) at the
- * session's config dir explicitly, so config discovery doesn't hinge on HOME. Git identity survives
- * via GIT_CONFIG_GLOBAL, which points at the host ~/.gitconfig mount (git treats a missing file as
+ * selected profile explicitly, so config discovery doesn't hinge on HOME. Git identity survives via
+ * GIT_CONFIG_GLOBAL, which points at the host ~/.gitconfig mount (git treats a missing file as
  * empty).
  */
 export function buildSpawnEnv(
@@ -216,7 +242,7 @@ export function buildSpawnEnv(
   const env: Record<string, string> = {
     PATH: options.path ?? DEFAULT_PATH,
     HOME: cwd,
-    PI_CODING_AGENT_DIR: path.join(cwd, ".pi", "agent"),
+    PI_CODING_AGENT_DIR: options.agentDir ?? path.join(cwd, ".pi", "agent"),
     GIT_CONFIG_GLOBAL: `${HOME}/.gitconfig`,
     // Headless sessions have no terminal: a git credential prompt would
     // block on the worker's silent stdin until the turn times out. Fail
@@ -226,6 +252,12 @@ export function buildSpawnEnv(
   for (const name of options.env ?? []) {
     const value = process.env[name];
     if (value) env[name] = value;
+  }
+  if (options.agentDir) {
+    if (extra?.PI_CODING_AGENT_DIR !== undefined && extra.PI_CODING_AGENT_DIR !== options.agentDir)
+      throw new Error("PI_CODING_AGENT_DIR conflicts with runtime agentDir");
+    env.PI_CODING_AGENT_DIR = options.agentDir;
+    env.PI_CODING_AGENT_SESSION_DIR = path.join(cwd, "subagents");
   }
   return Object.assign(env, extra);
 }
@@ -326,10 +358,21 @@ export function buildBwrapArgs(cwd: string, mounts: NormalizedMount[] = []): str
  */
 export function buildSessionArgs(options: BwrapOptions, spec: SpawnRequest): string[] {
   const mounts = normalizeMounts(options.mounts);
-  const agentDir = path.join(spec.cwd, ".pi", "agent");
+  const agentDir = path.join(spec.cwd, options.agentDir ? ".pi" : ".pi/agent");
+  const protectedPaths = [agentDir, path.join(spec.cwd, ".picco")];
+  if (options.agentDir) {
+    for (const relative of [
+      path.relative(options.agentDir, realpathSync(spec.cwd)),
+      path.relative(realpathSync(spec.cwd), options.agentDir),
+    ]) {
+      if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+        throw new Error("Shared agentDir must be outside the session directory and its ancestors");
+    }
+    protectedPaths.push(options.agentDir);
+  }
   for (const mount of mounts) {
     const target = resolveMountTarget(spec.cwd, mount);
-    for (const directory of [agentDir, path.join(spec.cwd, ".picco")]) {
+    for (const directory of protectedPaths) {
       const configPath = path.relative(target, directory);
       if (configPath === "" || (!configPath.startsWith("..") && !path.isAbsolute(configPath))) {
         throw new Error(
@@ -338,6 +381,8 @@ export function buildSessionArgs(options: BwrapOptions, spec: SpawnRequest): str
       }
     }
   }
+
+  if (options.agentDir) mounts.push({ source: options.agentDir, mode: "rw" });
 
   // Skill, prompt, and file-path extension paths that actually exist on the host. A nonexistent
   // path is dropped here so it can't take down the spawn — a --ro-bind of a missing source fails,

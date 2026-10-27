@@ -64,6 +64,16 @@ describe("buildSpawnEnv", () => {
     expect(env.GIT_TERMINAL_PROMPT).toBe("0");
   });
 
+  it("selects the shared profile without changing HOME or child transcript ownership", () => {
+    const env = buildSpawnEnv({ agentDir: "/srv/profile" }, cwd);
+    expect(env.PI_CODING_AGENT_DIR).toBe("/srv/profile");
+    expect(env.HOME).toBe(cwd);
+    expect(env.PI_CODING_AGENT_SESSION_DIR).toBe(`${cwd}/subagents`);
+    expect(() =>
+      buildSpawnEnv({ agentDir: "/srv/profile" }, cwd, { PI_CODING_AGENT_DIR: "/other" }),
+    ).toThrow("conflicts");
+  });
+
   it("forwards only the named host env vars that are set", () => {
     process.env.TEST_FORWARDED = "yes";
     const env = buildSpawnEnv({ env: ["TEST_FORWARDED", "TEST_UNSET"] }, cwd);
@@ -100,6 +110,21 @@ describe("buildSessionArgs", () => {
       ...over,
     };
   }
+
+  it("mounts only the selected shared profile and protects both configuration layers", () => {
+    const s = spec();
+    const args = buildSessionArgs({ agentDir: "/srv/profile" }, s);
+    expect(bindFor(args, "/srv/profile")).toEqual(["--bind", "/srv/profile", "/srv/profile"]);
+    for (const target of ["~/.pi", "~/.picco", "/srv", "/srv/profile"]) {
+      expect(() =>
+        buildSessionArgs(
+          { agentDir: "/srv/profile", mounts: [{ source: "/other", target, mode: "rw" }] },
+          s,
+        ),
+      ).toThrow("hides generated session configuration");
+    }
+    expect(() => buildSessionArgs({ agentDir: s.cwd }, s)).toThrow("outside the session directory");
+  });
 
   it("binds extra mounts read-only", () => {
     const args = buildSessionArgs({ mounts: [{ source: "/ws/node_modules", mode: "ro" }] }, spec());
@@ -257,6 +282,38 @@ describe("writeSessionConfig", () => {
       ...over,
     };
   }
+
+  it("keeps shared-profile overrides local and rejects profile-only configuration", () => {
+    dir = mkdtempSync(path.join(os.tmpdir(), "bwrap-write-"));
+    const project = path.join(dir, ".pi");
+    const spec = specWith({
+      pi: { extensions: ["/bridge.js"], mcpServers: { probe: { url: "http://localhost/mcp" } } },
+    });
+    writeSessionConfig(spec, project, true);
+    expect(JSON.parse(readFileSync(path.join(project, "settings.json"), "utf8"))).toEqual({
+      extensions: ["/bridge.js"],
+    });
+    expect(JSON.parse(readFileSync(path.join(project, "mcp.json"), "utf8"))).toEqual({
+      mcpServers: spec.pi.mcpServers,
+    });
+    writeSessionConfig(specWith({ pi: {} }), project, true);
+    expect(() => readFileSync(path.join(project, "mcp.json"))).toThrow();
+    expect(JSON.parse(readFileSync(path.join(project, "settings.json"), "utf8"))).toEqual({});
+    expect(() => writeSessionConfig(specWith({ pi: { models: {} } }), project, true)).toThrow(
+      "shared agentDir/models.json",
+    );
+    expect(() =>
+      writeSessionConfig(
+        specWith({
+          pi: {
+            mcpServers: { private: { url: "http://localhost/mcp", auth: { provider: "fake" } } },
+          },
+        }),
+        project,
+        true,
+      ),
+    ).toThrow("shared agentDir/mcp.json");
+  });
 
   it("writes each config file from the spec, including the bearer token in bridge.json", () => {
     dir = mkdtempSync(path.join(os.tmpdir(), "bwrap-write-"));

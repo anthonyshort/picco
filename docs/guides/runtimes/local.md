@@ -34,6 +34,13 @@ directly under the session directory.
 The operator's `~/.pi/agent` is not used for session configuration, even though the process retains
 the operator's real `HOME`.
 
+To share a dedicated profile, use `local({ agentDir: "/srv/assistant/pi" })` with an existing absolute
+directory outside session directories and their ancestors. This sets `PI_CODING_AGENT_DIR` for
+workers and runtime commands while retaining the host `HOME`. Worker overrides stay in the project's
+`.pi/` directory; parent transcripts and bridge credentials remain session-specific. Child transcript
+defaults use `{session}/subagents`. The same [shared-profile configuration rules](./bwrap.md#share-an-agent-owned-pi-profile)
+apply, including configuring custom models and provider-backed MCP authentication in the profile.
+
 ## Extensions
 
 File-path extensions use normal host module resolution. Their imports work when dependencies are

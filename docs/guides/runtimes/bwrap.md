@@ -65,6 +65,32 @@ runtime: bwrap({
 
 Prefer read-only mounts. See [Mounts](./bwrap/mounts.md) for persistence and shared-state patterns.
 
+## Share an agent-owned Pi profile
+
+Create and configure a dedicated Pi profile, then select its existing absolute directory:
+
+```ts
+runtime: bwrap({ agentDir: "/srv/assistant/pi" });
+```
+
+The runtime mounts this directory read-write at the same path and sets `PI_CODING_AGENT_DIR` for
+workers and runtime commands. All workers share its settings, model definitions, provider and MCP
+credentials, and authentication refresh locks. Use this only for workers trusted with the same
+credentials. Keep the profile outside session directories and their ancestors, and outside `/tmp`,
+which the sandbox replaces with a private filesystem.
+
+Configure defaults and authentication in the profile. Pass only deliberate worker overrides through
+`pi.settings`; copying the profile's defaults into each worker would override later shared changes.
+Picco writes worker settings, injected extensions and MCP overrides to `{session}/.pi/`, without
+rewriting shared configuration on spawn. Custom model definitions (`pi.models`) and provider-backed
+MCP authentication must be configured in the shared profile; passing either as a worker override
+fails before launch. Mount any external resources referenced by the profile separately.
+
+Working directories and `$HOME` remain separate. Parent transcripts stay in the session directory,
+child transcript defaults use `{session}/subagents`, and each worker reads its own
+`{session}/.picco/bridge.json`. In-process subagents still share the parent's filesystem and identity.
+No bridge environment variable is needed. Omitting `agentDir` keeps the default per-session profile.
+
 ## Load extensions
 
 Pi package sources install their dependencies inside Pi's agent directory:

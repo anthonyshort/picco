@@ -35,6 +35,21 @@ describe("local().exec", () => {
     expect(out).toContain(realpathSync(workdir));
   });
 
+  it("uses the selected profile for exec while keeping child transcripts local", async () => {
+    const agentDir = tmp();
+    const workdir = tmp();
+    const out = await local({ agentDir }).exec({
+      cwd: workdir,
+      command: 'echo "$PI_CODING_AGENT_DIR:$PI_CODING_AGENT_SESSION_DIR"',
+      timeoutMs: 15_000,
+    });
+    expect(out).toBe(`${realpathSync(agentDir)}:${workdir}/subagents`);
+    expect(() => buildLocalEnv(workdir, { PI_CODING_AGENT_DIR: "/other" }, agentDir)).toThrow(
+      "conflicts",
+    );
+    expect(() => local({ agentDir: "relative" })).toThrow("absolute path");
+  });
+
   it("inherits the host HOME — local() runs unisolated", async () => {
     const workdir = tmp();
     const out = await runtime.exec({ cwd: workdir, command: 'echo "$HOME"', timeoutMs: 15_000 });
@@ -114,6 +129,33 @@ describe("writeSessionConfig", () => {
       return false;
     }
   }
+
+  it("keeps shared-profile overrides local and rejects profile-only configuration", () => {
+    const dir = tmp();
+    const s = makeSpec({
+      pi: { extensions: ["/bridge.js"], mcpServers: { probe: { url: "http://localhost/mcp" } } },
+    });
+    writeSessionConfig(s, dir, true);
+    expect(readJson(dir, "settings.json")).toEqual({ extensions: ["/bridge.js"] });
+    expect(readJson(dir, "mcp.json")).toEqual({ mcpServers: s.pi.mcpServers });
+    writeSessionConfig(makeSpec({ pi: {} }), dir, true);
+    expect(exists(dir, "mcp.json")).toBe(false);
+    expect(readJson(dir, "settings.json")).toEqual({});
+    expect(() => writeSessionConfig(makeSpec({ pi: { models: {} } }), dir, true)).toThrow(
+      "shared agentDir/models.json",
+    );
+    expect(() =>
+      writeSessionConfig(
+        makeSpec({
+          pi: {
+            mcpServers: { private: { url: "http://localhost/mcp", auth: { provider: "fake" } } },
+          },
+        }),
+        dir,
+        true,
+      ),
+    ).toThrow("shared agentDir/mcp.json");
+  });
 
   it("writes custom providers verbatim to models.json (no apiKey injection)", () => {
     const dir = tmp();
