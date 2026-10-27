@@ -54,6 +54,7 @@ describe("GitHub review source", () => {
     const result = await source.discover(["owner/one", "owner/two"], 28);
     expect(calls).toEqual([["api", "graphql", "--input", "-"]]);
     expect(inputs[0]).toContain("repo:owner/one OR repo:owner/two");
+    expect(inputs[0]).toContain("type: ISSUE_ADVANCED");
     expect(inputs[0]).toContain("created:>=2026-09-28");
     expect(result).toEqual({
       reviewer: "reviewer",
