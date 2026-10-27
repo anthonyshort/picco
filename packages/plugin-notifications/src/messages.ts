@@ -32,7 +32,7 @@ export type MessageRecord = z.infer<typeof MessageRecordSchema>;
  */
 export interface MessageStore {
   get(key: string): MessageRecord | undefined;
-  set(key: string, record: MessageRecord): void;
+  set(key: string, record: MessageRecord, expectedDeliveryId: string | null): void;
   close(): void;
 }
 
@@ -207,7 +207,7 @@ async function runQueuedDelivery(
   try {
     return await deliverMessage(request, store, timeoutMs);
   } catch {
-    return { ...rejected(request.destination), status: "uncertain" as const };
+    return rejected(request.destination);
   } finally {
     queue.pendingDeliveries--;
   }
@@ -228,11 +228,15 @@ async function deliverMessage(
   }
   const record = preparation.record;
   if (request.keyed) {
-    store.set(request.key, record);
+    store.set(request.key, record, previous?.deliveryId ?? null);
   }
   await invokeAdapter(request, record, timeoutMs);
-  if (request.keyed) {
-    store.set(request.key, record);
+  try {
+    if (request.keyed) {
+      store.set(request.key, record, record.deliveryId);
+    }
+  } catch {
+    record.status = "uncertain";
   }
   return receipt(record, false);
 }
@@ -360,7 +364,10 @@ function createMessageStore(max: number): MessageStore {
   const records = new Map<string, MessageRecord>();
   return {
     get: (key) => records.get(key),
-    set(key, record) {
+    set(key, record, expectedDeliveryId) {
+      if ((records.get(key)?.deliveryId ?? null) !== expectedDeliveryId) {
+        throw new Error("Notification reservation changed");
+      }
       if (!records.has(key) && records.size >= max)
         throw new Error("Notification message capacity reached");
       records.set(key, { ...record });

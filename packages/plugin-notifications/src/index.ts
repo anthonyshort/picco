@@ -2,6 +2,7 @@ import * as z from "zod";
 import { createDeliveries } from "./delivery.js";
 import { createNotificationTool } from "./tool.js";
 import { createMessages } from "./messages.js";
+import { createPersistentMessageStore } from "./message-store.js";
 import type {
   NotificationOptions,
   NotificationPlugin,
@@ -62,15 +63,23 @@ export function notifications(options: NotificationOptions): NotificationPlugin 
     notify,
     delivery: (deliveryId) =>
       ensureDeliveries().delivery(deliveryId) ?? messages!.delivery(deliveryId),
-    start() {
+    start(ctx) {
+      const store = createPersistentMessageStore(
+        options.messageStorePath ?? ctx.filePath("messages.sqlite"),
+        limits.max,
+      );
       deliveries = createDeliveries(destinations, {
         ...limits,
         ttl: limits.retentionDays * 86_400_000,
       });
-      messages = createMessages(options.resolveDestinations ?? (() => options.destinations), {
-        max: limits.max,
-        timeoutMs: limits.timeoutMs,
-      });
+      messages = createMessages(
+        options.resolveDestinations ?? (() => options.destinations),
+        {
+          max: limits.max,
+          timeoutMs: limits.timeoutMs,
+        },
+        store,
+      );
     },
     async stop() {
       await Promise.all([deliveries?.stop(), messages?.stop()]);
