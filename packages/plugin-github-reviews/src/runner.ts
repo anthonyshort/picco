@@ -15,7 +15,7 @@ import {
 const HEARTBEAT_MS = 60_000;
 
 /**
- * Bound application reporting after durable review completion.
+ * Bound application lifecycle reporting.
  */
 const CALLBACK_TIMEOUT_MS = 30_000;
 
@@ -35,6 +35,7 @@ interface RunnerOptions {
   reviewsDirectory: string;
   timeoutMs: number;
   prompt?: GithubReviewsOptions["prompt"];
+  onRunStart?: GithubReviewsOptions["onRunStart"];
   onRunComplete?: GithubReviewsOptions["onRunComplete"];
 }
 
@@ -73,6 +74,8 @@ export function runReview(opts: RunnerOptions) {
     heartbeat.unref();
     try {
       await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
+      if (abortReason) throw new Error(abortReason);
+      await reportStart(opts, selection);
       if (abortReason) throw new Error(abortReason);
       turn = opts.ctx.sessions.run(
         opts.run.sessionKey,
@@ -151,12 +154,26 @@ function createCompletionDeclaration(opts: RunnerOptions, abortReason: () => str
 }
 
 /**
+ * Attempt start reporting without making notification delivery a review prerequisite.
+ */
+async function reportStart(opts: RunnerOptions, selection: ReviewSelection) {
+  if (!opts.onRunStart) return;
+  try {
+    await deliverCallback(opts.onRunStart, selection);
+  } catch {
+    opts.ctx.logger.error("review start callback failed; delivery will not be retried", {
+      runId: opts.run.id,
+    });
+  }
+}
+
+/**
  * Record one callback attempt after the review outcome is durable.
  */
 async function reportCompletion(opts: RunnerOptions, result: GithubReviewResult) {
   if (opts.onRunComplete && opts.store.recordNotificationAttempt(opts.run.id)) {
     try {
-      await deliverCompletion(opts.onRunComplete, result);
+      await deliverCallback(opts.onRunComplete, result);
       opts.store.completeNotification(opts.run.id, "confirmed");
     } catch {
       opts.store.completeNotification(
@@ -189,18 +206,18 @@ function buildPrompt(selection: ReviewSelection): string {
 /**
  * A stalled notification must not retain a review worker slot indefinitely.
  */
-async function deliverCompletion(
-  callback: NonNullable<GithubReviewsOptions["onRunComplete"]>,
-  result: GithubReviewResult,
+async function deliverCallback<Input>(
+  callback: (input: Input) => void | Promise<void>,
+  input: Input,
 ) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = Promise.withResolvers<never>();
   timer = setTimeout(
-    () => deadline.reject(new Error("Review completion callback timed out")),
+    () => deadline.reject(new Error("Review lifecycle callback timed out")),
     CALLBACK_TIMEOUT_MS,
   );
   try {
-    const delivery = callback(result);
+    const delivery = callback(input);
     await Promise.race([delivery, deadline.promise]);
   } finally {
     if (timer) clearTimeout(timer);

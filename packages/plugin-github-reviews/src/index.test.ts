@@ -12,7 +12,11 @@ import { z } from "zod";
 import { githubReviews, GithubReviewsSettingsSchema } from "./index.js";
 import { createReviewStore } from "./store.js";
 import { type GithubExecute } from "./github.js";
-import { type GithubReviewResult, type GithubReviewsOptions } from "./types.js";
+import {
+  type GithubReviewResult,
+  type GithubReviewsOptions,
+  type ReviewSelection,
+} from "./types.js";
 
 const Repository = "owner/project";
 const Head = "a".repeat(40);
@@ -140,6 +144,7 @@ async function complete(ctx: FakePluginContext, key: string) {
  */
 async function start(execute: GithubExecute, overrides: Partial<GithubReviewsOptions> = {}) {
   const results: GithubReviewResult[] = [];
+  const starts: ReviewSelection[] = [];
   const ctx = createFakePluginContext({
     source: "github-reviews",
     reply: async ({ key }) => {
@@ -152,6 +157,9 @@ async function start(execute: GithubExecute, overrides: Partial<GithubReviewsOpt
     repositories: [{ name: Repository, skill: "review" }],
     reviewsDirectory: directory,
     github: { execute },
+    onRunStart: (selection) => {
+      starts.push(selection);
+    },
     onRunComplete: (result) => {
       results.push(result);
     },
@@ -159,7 +167,7 @@ async function start(execute: GithubExecute, overrides: Partial<GithubReviewsOpt
   });
   await plugin.start!(ctx);
   plugins.push(plugin);
-  return { plugin, ctx, results };
+  return { plugin, ctx, results, starts };
 }
 
 /**
@@ -296,12 +304,14 @@ describe("GitHub reviews plugin", () => {
     await vi.waitFor(() => expect(first.results).toHaveLength(1));
     await invoke(first.plugin, "github_reviews_poll");
     expect(first.ctx.turns).toHaveLength(1);
+    expect(first.starts).toEqual([first.results[0].selection]);
     expect(first.results[0].status).toBe("completed");
     expect(first.ctx.sessions.list()).toHaveLength(0);
     await first.plugin.stop!();
     const restarted = await start(fixture.execute);
     await invoke(restarted.plugin, "github_reviews_poll");
     expect(restarted.ctx.turns).toHaveLength(0);
+    expect(restarted.starts).toEqual([]);
     const reviewed = await invoke(restarted.plugin, "github_reviews_list");
     expect(reviewed).toContain("already-reviewed");
     expect(reviewed).toContain('"status":"completed"');

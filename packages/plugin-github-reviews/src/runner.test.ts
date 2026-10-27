@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { type ToolContext } from "@picco-agent/core";
 import { createFakePluginContext, type FakePluginContext } from "@picco-agent/core/testing";
 import { type Candidate } from "./github.js";
@@ -82,6 +82,93 @@ function gate() {
 }
 
 describe("runReview", () => {
+  test("awaits start reporting with the reservation held before starting the worker", async () => {
+    const state = fixture();
+    const started = gate();
+    const release = gate();
+    const worker = runReview({
+      ...state.options,
+      onRunStart: async (selection) => {
+        expect(selection.run).toEqual(state.run);
+        expect(selection.skill).toBe("review");
+        expect(state.store.status().reservations).toMatchObject([{ runId: state.run.id }]);
+        expect(state.ctx.turns).toEqual([]);
+        started.release();
+        await release.promise;
+      },
+    });
+    try {
+      await started.promise;
+      expect(state.ctx.turns).toEqual([]);
+      release.release();
+      await worker.completion;
+      expect(state.ctx.turns).toHaveLength(1);
+    } finally {
+      release.release();
+      await worker.completion;
+      state.cleanup();
+    }
+  });
+
+  test.each(["throw", "timeout"])(
+    "start callback %s does not prevent review or retry delivery",
+    async (failure) => {
+      vi.useFakeTimers();
+      const entered = gate();
+      const state = fixture(async (ctx, run) => {
+        await complete(ctx, run);
+        return "Done";
+      });
+      let attempts = 0;
+      const worker = runReview({
+        ...state.options,
+        onRunStart: () => {
+          attempts++;
+          entered.release();
+          if (failure === "throw") throw new Error("Notification unavailable");
+          return new Promise<void>(() => {});
+        },
+      });
+      try {
+        await entered.promise;
+        if (failure === "timeout") await vi.advanceTimersByTimeAsync(30_000);
+        expect((await worker.completion).status).toBe("completed");
+        expect(attempts).toBe(1);
+        expect(state.ctx.turns).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+        state.cleanup();
+      }
+    },
+  );
+
+  test("abort during start reporting prevents worker startup", async () => {
+    const state = fixture();
+    const entered = gate();
+    const release = gate();
+    const worker = runReview({
+      ...state.options,
+      onRunStart: async () => {
+        entered.release();
+        await release.promise;
+      },
+    });
+    try {
+      await entered.promise;
+      worker.abort("Host stopping");
+      release.release();
+      expect(await worker.completion).toMatchObject({
+        status: "interrupted",
+        error: "Host stopping",
+      });
+      expect(state.ctx.turns).toEqual([]);
+    } finally {
+      release.release();
+      await worker.completion;
+      state.cleanup();
+    }
+  });
+
   test("records an explicit reviewed declaration and closes the session before completion", async () => {
     const state = fixture(async (ctx, run) => {
       await complete(ctx, run);

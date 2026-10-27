@@ -21,7 +21,7 @@ const MAX_BACKOFF_MS = 60 * 60_000;
  * Poll personal GitHub review requests and dispatch only unreviewed PR heads.
  */
 export function githubReviews(opts: GithubReviewsOptions): Plugin {
-  const { github, prompt, onRunComplete, ...input } = opts;
+  const { github, prompt, onRunStart, onRunComplete, ...input } = opts;
   const settings = GithubReviewsSettingsSchema.parse(input);
   const source = createGithubSource(github);
   const owner = randomUUID();
@@ -242,6 +242,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
       reviewsDirectory,
       timeoutMs: settings.reviewTimeoutMs,
       prompt,
+      onRunStart,
       onRunComplete,
     });
     active.set(run.id, worker);
