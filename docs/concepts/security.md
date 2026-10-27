@@ -21,7 +21,7 @@ not receive those credentials. Tool arguments are validated against the tool's Z
 execution.
 
 Each live session receives a bearer token scoped to its identity and session tools. The runtime
-writes it to a mode-`0600` `bridge.json` file rather than process arguments. Picco revokes the
+writes it to a mode-`0600` `{session}/.picco/bridge.json` file rather than process arguments. Picco revokes the
 token when the session process is released.
 
 ## Runtime boundary

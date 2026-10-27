@@ -138,7 +138,7 @@ function normalizeMounts(mounts: MountEntry[] = []): NormalizedMount[] {
 }
 
 /**
- * Write pi's session config files under `dir` (the session's `.pi/agent` directory). Every field
+ * Write Pi configuration under `dir` and the bridge connection under `{cwd}/.picco`. Every field
  * passes through to pi verbatim — pi owns models/auth/mcp resolution. Each file is written only
  * when the spec carries data for it.
  */
@@ -169,12 +169,12 @@ export function writeSessionConfig(spec: SpawnRequest, dir: string): void {
     );
   }
 
-  // bridge.json carries the per-session bearer token value; the extension reads it and
-  // authenticates its /call requests. Written 0600 in the session's private dir (mounted into
-  // the sandbox), so the token never rides argv.
+  // The connection belongs to the session, independently of Pi configuration.
   if (spec.bridge.token) {
+    const bridgeDir = path.join(spec.cwd, ".picco");
+    mkdirSync(bridgeDir, { recursive: true, mode: 0o700 });
     writeFileSync(
-      path.join(dir, "bridge.json"),
+      path.join(bridgeDir, "bridge.json"),
       JSON.stringify(
         { url: spec.bridge.url, token: spec.bridge.token, tools: spec.tools ?? [] },
         null,
@@ -329,11 +329,13 @@ export function buildSessionArgs(options: BwrapOptions, spec: SpawnRequest): str
   const agentDir = path.join(spec.cwd, ".pi", "agent");
   for (const mount of mounts) {
     const target = resolveMountTarget(spec.cwd, mount);
-    const configPath = path.relative(target, agentDir);
-    if (configPath === "" || (!configPath.startsWith("..") && !path.isAbsolute(configPath))) {
-      throw new Error(
-        `Mount target ${target} hides Pi's generated configuration at ${agentDir}; mount only extension-owned subdirectories`,
-      );
+    for (const directory of [agentDir, path.join(spec.cwd, ".picco")]) {
+      const configPath = path.relative(target, directory);
+      if (configPath === "" || (!configPath.startsWith("..") && !path.isAbsolute(configPath))) {
+        throw new Error(
+          `Mount target ${target} hides generated session configuration at ${directory}; mount only extension-owned subdirectories`,
+        );
+      }
     }
   }
 
