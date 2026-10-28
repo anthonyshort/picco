@@ -4,6 +4,7 @@ import path from "node:path";
 import { hostname } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
+import { RateLimitSchema } from "./github-contracts.js";
 import { FeedbackCandidateSchema, type FeedbackCandidate } from "./feedback-source.js";
 import {
   FeedbackCompletionSchema,
@@ -33,9 +34,7 @@ const PollSchema = z.object({
   successfulAt: z.iso.datetime().optional(),
   nextPollAt: z.iso.datetime().optional(),
   error: z.string().nullable().optional(),
-  rateLimit: z
-    .object({ cost: z.number(), remaining: z.number(), resetAt: z.iso.datetime() })
-    .optional(),
+  rateLimit: RateLimitSchema.optional(),
 });
 
 /**
