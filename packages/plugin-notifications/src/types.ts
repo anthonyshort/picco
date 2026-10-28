@@ -85,6 +85,10 @@ export interface NotificationOptions {
    */
   resolveDestinations?: (scope: string) => Record<string, NotificationAdapter>;
   /**
+   * Keyed message handles survive restarts. Defaults to the plugin's messages.sqlite file.
+   */
+  messageStorePath?: string;
+  /**
    * Bound each attempt, including adapters that ignore cancellation (default 15 seconds).
    */
   timeoutMs?: number;
