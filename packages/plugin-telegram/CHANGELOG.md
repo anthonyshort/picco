@@ -1,5 +1,17 @@
 # @picco-agent/plugin-telegram
 
+## 0.3.0
+
+### Minor Changes
+
+- b2e6fa6: Support editing an existing Telegram notification and expose its configured target identity for persistent message tracking.
+
+### Patch Changes
+
+- Updated dependencies [552a03a]
+- Updated dependencies [5e3a62b]
+  - @picco-agent/plugin-notifications@0.3.0
+
 ## 0.2.1
 
 ### Patch Changes

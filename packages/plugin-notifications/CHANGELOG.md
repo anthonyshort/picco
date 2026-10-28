@@ -1,5 +1,12 @@
 # @picco-agent/plugin-notifications
 
+## 0.3.0
+
+### Minor Changes
+
+- 552a03a: Broadcast notifications to host-bound channels and maintain scoped messages with stable keys. Preserve directed sends, isolate per-channel failures, and add optional adapter update support.
+- 5e3a62b: Persist scoped notification message handles across restarts. Commit recipient-bound reservations before transport and prevent uncertain or concurrently reserved writes from being replayed automatically.
+
 ## 0.2.1
 
 ### Patch Changes
