@@ -39,16 +39,14 @@ const review = {
 };
 const RequestSchema = z.object({ query: z.string(), variables: z.record(z.string(), z.unknown()) });
 
-function searchResponse(
+function discoveryResponse(
   nodes = [pull],
-  count = nodes.length,
   pagination: { hasNextPage: boolean; endCursor: string | null } = pageInfo,
 ) {
   return {
     data: {
-      viewer: { login: "Owner" },
+      viewer: { login: "Owner", pullRequests: { nodes, pageInfo: pagination } },
       rateLimit: budget,
-      search: { issueCount: count, nodes, pageInfo: pagination },
     },
   };
 }
@@ -78,7 +76,7 @@ describe("authored feedback source", () => {
         assert.deepEqual(args, ["api", "graphql", "--input", "-"]);
         const request = RequestSchema.parse(JSON.parse(input!));
         requests.push(request);
-        if (request.query.includes("AuthoredFeedback")) return JSON.stringify(searchResponse());
+        if (request.query.includes("AuthoredFeedback")) return JSON.stringify(discoveryResponse());
         return JSON.stringify(
           reviewsResponse([
             review,
@@ -102,25 +100,29 @@ describe("authored feedback source", () => {
     );
     assert.equal(result.candidates[0]!.reviews[0]!.author, "robot[bot]");
     assert.equal(result.rateLimit.cost, 2);
-    assert.match(String(requests[0]!.variables.query), /author:@me/);
-    assert.doesNotMatch(String(requests[0]!.variables.query), /draft:false|updated:|created:>=/);
+    assert.match(
+      requests[0]!.query,
+      /pullRequests\(first: 100, after: \$after, states: \[OPEN\]\)/,
+    );
+    assert.doesNotMatch(requests[0]!.query, /search\(|created:|updated:|draft:false/);
+    assert.deepEqual(requests[0]!.variables, { after: null });
     assert.equal(requests.length, 2);
   });
 
-  test("paginates PR search and reviews without dropping eligible reviews", async () => {
-    let searchPages = 0;
+  test("paginates authored PRs and reviews without dropping eligible reviews", async () => {
+    let discoveryPages = 0;
     let reviewPages = 0;
     const source = createGithubFeedbackSource({
       execute: async (_args, input) => {
         const request = RequestSchema.parse(JSON.parse(input!));
         if (request.query.includes("AuthoredFeedback")) {
-          searchPages++;
+          discoveryPages++;
           if (!request.variables.after)
             return JSON.stringify(
-              searchResponse([], 1, { hasNextPage: true, endCursor: "search-next" }),
+              discoveryResponse([], { hasNextPage: true, endCursor: "pull-next" }),
             );
-          assert.equal(request.variables.after, "search-next");
-          return JSON.stringify(searchResponse());
+          assert.equal(request.variables.after, "pull-next");
+          return JSON.stringify(discoveryResponse());
         }
         reviewPages++;
         if (!request.variables.after)
@@ -132,43 +134,74 @@ describe("authored feedback source", () => {
       },
     });
     const result = await source.discover();
-    assert.equal(searchPages, 2);
+    assert.equal(discoveryPages, 2);
     assert.equal(reviewPages, 2);
     assert.equal(result.candidates[0]!.reviews.length, 2);
     assert.equal(result.rateLimit.cost, 4);
   });
 
-  test("partitions searches above 1,000 results into disjoint creation windows", async () => {
-    const searches: string[] = [];
+  test("paginates more than 1,000 authored PRs without a search limit", async () => {
+    const pulls = Array.from({ length: 1001 }, (_, index) => ({
+      ...pull,
+      number: index + 1,
+      url: `https://github.com/example/project/pull/${index + 1}`,
+    }));
+    let discoveryPages = 0;
     const source = createGithubFeedbackSource({
-      now: () => 10_000,
       execute: async (_args, input) => {
         const request = RequestSchema.parse(JSON.parse(input!));
         if (request.query.includes("AuthoredFeedback")) {
-          searches.push(String(request.variables.query));
+          discoveryPages++;
+          assert.equal(request.variables.query, undefined);
+          const offset = Number(request.variables.after ?? 0);
+          const next = offset + 100;
           return JSON.stringify(
-            searches.length === 1 ? searchResponse([], 1001) : searchResponse([]),
+            discoveryResponse(pulls.slice(offset, next), {
+              hasNextPage: next < pulls.length,
+              endCursor: next < pulls.length ? String(next) : null,
+            }),
           );
         }
-        throw new Error("Empty search must not inspect reviews");
+        const metadata = pulls[Number(request.variables.number) - 1]!;
+        return JSON.stringify(
+          reviewsResponse(
+            [
+              {
+                ...review,
+                id: `R_${metadata.number}`,
+                url: `${metadata.url}#pullrequestreview-${metadata.number}`,
+              },
+            ],
+            pageInfo,
+            metadata,
+          ),
+        );
       },
     });
     const result = await source.discover();
-    assert.deepEqual(searches, [
-      "is:pr is:open author:@me created:1970-01-01T00:00:00Z..1970-01-01T00:00:10Z",
-      "is:pr is:open author:@me created:1970-01-01T00:00:00Z..1970-01-01T00:00:05Z",
-      "is:pr is:open author:@me created:1970-01-01T00:00:06Z..1970-01-01T00:00:10Z",
-    ]);
-    assert.deepEqual(result.candidates, []);
-    assert.equal(result.rateLimit.cost, 3);
+    assert.equal(discoveryPages, 11);
+    assert.deepEqual(
+      result.candidates.map((item) => item.number),
+      pulls.map((item) => item.number),
+    );
+    assert.equal(result.rateLimit.cost, 1012);
   });
 
-  test("fails rather than truncates when a one-second partition exceeds the search cap", async () => {
-    const source = createGithubFeedbackSource({
-      now: () => 0,
-      execute: async () => JSON.stringify(searchResponse([], 1001)),
+  test("rejects repeated discovery cursors and account changes between pages", async () => {
+    const repeated = createGithubFeedbackSource({
+      execute: async () =>
+        JSON.stringify(discoveryResponse([], { hasNextPage: true, endCursor: "same" })),
     });
-    await assert.rejects(source.discover(), /1,000 results in one second/);
+    await assert.rejects(repeated.discover(), /invalid pagination/);
+    let pages = 0;
+    const changed = createGithubFeedbackSource({
+      execute: async () => {
+        const response = discoveryResponse([], { hasNextPage: true, endCursor: "next" });
+        if (pages++) response.data.viewer.login = "another";
+        return JSON.stringify(response);
+      },
+    });
+    await assert.rejects(changed.discover(), /author changed/);
   });
 
   test("comments without submitted reviews do not create candidates", async () => {
@@ -176,7 +209,7 @@ describe("authored feedback source", () => {
       execute: async (_args, input) => {
         const request = RequestSchema.parse(JSON.parse(input!));
         return JSON.stringify(
-          request.query.includes("AuthoredFeedback") ? searchResponse() : reviewsResponse([]),
+          request.query.includes("AuthoredFeedback") ? discoveryResponse() : reviewsResponse([]),
         );
       },
     });
@@ -222,7 +255,7 @@ describe("authored feedback source", () => {
       now: () => Date.parse("2026-01-01T00:00:00Z"),
       execute: async () =>
         JSON.stringify({
-          ...searchResponse(),
+          ...discoveryResponse(),
           errors: [{ type: "RATE_LIMITED", message: "private upstream details" }],
         }),
     });

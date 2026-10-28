@@ -9,10 +9,6 @@ import {
 import { executeGithub, GithubReviewSourceError } from "./github-query.js";
 
 /**
- * GitHub search exposes at most this many results per query.
- */
-const MAX_SEARCH_RESULTS = 1_000;
-/**
  * Bound malformed or unexpectedly large connection scans.
  */
 const MAX_PAGES = 10_000;
@@ -57,7 +53,7 @@ export type FeedbackReview = z.infer<typeof FeedbackReviewSchema>;
  */
 export type FeedbackCandidate = z.infer<typeof FeedbackCandidateSchema>;
 /**
- * Forward connection pagination shared by search and reviews.
+ * Forward connection pagination shared by authored PRs and reviews.
  */
 const PageSchema = z.object({ hasNextPage: z.boolean(), endCursor: z.string().nullable() });
 /**
@@ -82,13 +78,14 @@ const BaseDataSchema = z.object({
   rateLimit: RateLimitSchema,
 });
 /**
- * Search returns metadata; reviews are paginated separately.
+ * Authored PRs return metadata; reviews are paginated separately.
  */
-const SearchDataSchema = BaseDataSchema.extend({
-  search: z.object({
-    issueCount: z.number().int().nonnegative(),
-    nodes: z.array(PullSchema).max(PAGE_SIZE),
-    pageInfo: PageSchema,
+const DiscoveryDataSchema = BaseDataSchema.extend({
+  viewer: BaseDataSchema.shape.viewer.extend({
+    pullRequests: z.object({
+      nodes: z.array(PullSchema).max(PAGE_SIZE),
+      pageInfo: PageSchema,
+    }),
   }),
 });
 /**
@@ -132,13 +129,15 @@ const EnvelopeSchema = z.object({
 const PULL_FIELDS =
   "repository { nameWithOwner } number url title state author { login } headRefOid headRepository { nameWithOwner } headRefName";
 /**
- * Partitionable advanced search for every open authored PR, including drafts.
+ * Cursor pagination covers open authored PRs without a search-result cap.
  */
-const SEARCH_DOCUMENT = `query AuthoredFeedback($query: String!, $after: String) {
-  viewer { login }
-  search(query: $query, type: ISSUE_ADVANCED, first: ${PAGE_SIZE}, after: $after) {
-    issueCount nodes { ... on PullRequest { ${PULL_FIELDS} } }
-    pageInfo { hasNextPage endCursor }
+const DISCOVERY_DOCUMENT = `query AuthoredFeedback($after: String) {
+  viewer {
+    login
+    pullRequests(first: ${PAGE_SIZE}, after: $after, states: [OPEN]) {
+      nodes { ${PULL_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
   }
   rateLimit { cost remaining resetAt }
 }`;
@@ -268,53 +267,44 @@ export function createGithubFeedbackSource(opts: GithubSourceOptions = {}) {
     throw new Error("GitHub feedback review pagination exceeded its limit");
   }
 
-  async function discover(signal?: AbortSignal) {
+  async function discoverPullRequests(signal?: AbortSignal) {
     const found = new Map<string, FeedbackCandidate>();
+    const cursors = new Set<string>();
     let author: string | undefined;
+    let after: string | null = null;
     let cost = 0;
-    let budget: z.infer<typeof RateLimitSchema> | undefined;
-    const windows: [number, number][] = [[0, Math.floor(now() / 1_000)]];
-    while (windows.length) {
-      const [start, finish] = windows.pop()!;
-      const queryText = `is:pr is:open author:@me created:${timestamp(start)}..${timestamp(finish)}`;
-      let after: string | null = null;
-      const cursors = new Set<string>();
-      for (let page = 0; page < MAX_SEARCH_RESULTS / PAGE_SIZE; page++) {
-        const data = await query(
-          SEARCH_DOCUMENT,
-          { query: queryText, after },
-          SearchDataSchema,
-          signal,
-        );
-        author ??= data.viewer.login.toLowerCase();
-        ensureAuthor(data.viewer.login, author);
-        cost += data.rateLimit.cost;
-        budget = data.rateLimit;
-        if (data.search.issueCount > MAX_SEARCH_RESULTS) {
-          if (start === finish)
-            throw new Error("GitHub feedback search exceeds 1,000 results in one second");
-          const middle = Math.floor((start + finish) / 2);
-          windows.push([middle + 1, finish], [start, middle]);
-          break;
-        }
-        for (const pull of data.search.nodes) {
-          const candidate = createCandidate(pull, author);
-          if (!candidate) continue;
-          const key = `${candidate.repository}#${candidate.number}`;
-          const previous = found.get(key);
-          if (previous && previous.head !== candidate.head)
-            throw new Error("GitHub feedback search changed during pagination");
-          found.set(key, candidate);
-        }
-        if (!data.search.pageInfo.hasNextPage) break;
-        after = nextCursor(data.search.pageInfo, cursors);
-        if (page === MAX_SEARCH_RESULTS / PAGE_SIZE - 1)
-          throw new Error("GitHub feedback search pagination incomplete");
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const data = await query(DISCOVERY_DOCUMENT, { after }, DiscoveryDataSchema, signal);
+      author ??= data.viewer.login.toLowerCase();
+      ensureAuthor(data.viewer.login, author);
+      cost += data.rateLimit.cost;
+      for (const pull of data.viewer.pullRequests.nodes) {
+        const candidate = createCandidate(pull, author);
+        if (!candidate) continue;
+        const key = `${candidate.repository}#${candidate.number}`;
+        const previous = found.get(key);
+        if (previous && previous.head !== candidate.head)
+          throw new Error("GitHub feedback discovery changed during pagination");
+        found.set(key, candidate);
       }
+      if (!data.viewer.pullRequests.pageInfo.hasNextPage)
+        return {
+          author,
+          candidates: [...found.values()],
+          rateLimit: { ...data.rateLimit, cost },
+        };
+      after = nextCursor(data.viewer.pullRequests.pageInfo, cursors);
     }
-    if (!author || !budget) throw new Error("GitHub feedback discovery returned no identity");
+    throw new Error("GitHub feedback discovery pagination exceeded its limit");
+  }
+
+  async function discover(signal?: AbortSignal) {
+    const found = await discoverPullRequests(signal);
+    const { author } = found;
+    let budget = found.rateLimit;
+    let cost = budget.cost;
     const candidates: FeedbackCandidate[] = [];
-    for (const candidate of found.values()) {
+    for (const candidate of found.candidates) {
       const inspected = await inspect(candidate, author, signal);
       cost += inspected.rateLimit.cost;
       budget = inspected.rateLimit;
@@ -389,11 +379,4 @@ function nextCursor(page: z.infer<typeof PageSchema>, seen: Set<string>) {
     throw new Error("GitHub feedback returned invalid pagination");
   seen.add(page.endCursor);
   return page.endCursor;
-}
-
-/**
- * Search partitions use disjoint inclusive windows at GitHub's second precision.
- */
-function timestamp(seconds: number) {
-  return new Date(seconds * 1_000).toISOString().replace(".000Z", "Z");
 }
