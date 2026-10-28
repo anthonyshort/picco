@@ -18,6 +18,31 @@ export const NotificationInputSchema = z
 export type NotificationInput = z.infer<typeof NotificationInputSchema>;
 
 /**
+ * Broadcast to host-bound channels; a stable key updates their existing messages.
+ */
+export const NotificationBroadcastSchema = z
+  .object({
+    scope: z.string().min(1).max(1000),
+    messageKey: z.string().min(1).max(200).optional(),
+    text: NotificationInputSchema.shape.text,
+  })
+  .strict();
+
+/**
+ * Hosts choose a scope; the model tool derives it from its authenticated caller.
+ */
+export type NotificationBroadcast = z.infer<typeof NotificationBroadcastSchema>;
+
+/**
+ * Each channel reports independently, including partial broadcast delivery.
+ */
+export interface NotificationBroadcastResult {
+  scope: string;
+  messageKey?: string;
+  deliveries: NotificationResult[];
+}
+
+/**
  * Delivery states include attempts whose transport outcome remains unknown.
  */
 export const DELIVERY_STATUSES = ["in-flight", "confirmed", "rejected", "uncertain"] as const;
@@ -42,7 +67,12 @@ export type AdapterResult = { status: "confirmed"; externalId?: string } | { sta
  * One host-configured recipient. Honour cancellation and keep credentials in the adapter.
  */
 export interface NotificationAdapter {
+  /**
+   * Stable recipient identity, required for keyed messages. Never include credentials.
+   */
+  readonly targetId?: string;
   send(text: string, signal: AbortSignal): Promise<AdapterResult>;
+  update?(externalId: string, text: string, signal: AbortSignal): Promise<AdapterResult>;
 }
 
 /**
@@ -50,6 +80,10 @@ export interface NotificationAdapter {
  */
 export interface NotificationOptions {
   destinations: Record<string, NotificationAdapter>;
+  /**
+   * Bind channels to an authorised run or session; only the host chooses recipients.
+   */
+  resolveDestinations?: (scope: string) => Record<string, NotificationAdapter>;
   /**
    * Bound each attempt, including adapters that ignore cancellation (default 15 seconds).
    */
@@ -69,5 +103,6 @@ export interface NotificationOptions {
  */
 export interface NotificationPlugin extends Plugin {
   notify(input: NotificationInput): Promise<NotificationResult>;
+  notify(input: NotificationBroadcast): Promise<NotificationBroadcastResult>;
   delivery(deliveryId: string): NotificationResult | undefined;
 }

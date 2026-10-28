@@ -311,6 +311,23 @@ Receipt expiry starts when an attempt completes and defaults to 30 days, set wit
 
 A definite rejection differs from uncertain delivery after a timeout or broken connection. Attempts time out after 15 seconds by default, set with `timeoutMs`, and the plugin never retries automatically. Inspect an uncertain result before deliberately sending again. The cache and tool diagnostics exclude message text, credentials and raw provider errors.
 
+### Broadcast and maintain progress messages
+
+Omit `destination` to send to every host-bound channel in one call. A stable `messageKey` creates each message once and updates it when the text changes:
+
+```typescript
+notify({ action: "send", messageKey: "progress", text: "Researching the change" });
+notify({ action: "send", messageKey: "progress", text: "Verifying findings" });
+```
+
+Host code supplies a scope: `updates.notify({ scope: run.id, messageKey: "progress", text })`. The tool derives its scope from the authenticated session, so matching keys in different sessions remain separate. Broadcast results contain a `deliveries` array with an independent receipt for each channel. Unkeyed broadcasts send a new message each time.
+
+For keyed messages, adapters must supply a stable, non-secret `targetId` and return an `externalId` on creation. Implement optional `update(externalId, text, signal)` to edit a message. Changed recipients or unsupported edits are rejected without sending another message. Text reaches each adapter unchanged so the adapter owns platform formatting.
+
+Use `resolveDestinations(scope)` for host-owned per-run routing. It returns the adapters authorised for that scope, for example a fixed chat and the selected PR. Recreate these bindings when the host restarts; the model cannot supply recipients or scope overrides.
+
+Edits are serialised per scoped message/channel. Unchanged content causes no write. Uncertain attempts remain blocked for inspection, including when a timed-out adapter finishes later; another channel can still succeed. Message handles are bounded by `maxDeliveryRecords` and are never silently evicted to permit duplicate creation. In this version they last until plugin shutdown; restart-safe storage is a separate addition. Receipt inspection remains bounded and process-local.
+
 ### Add a notification adapter
 
 An adapter sends to a recipient you configure on the host. Implement `NotificationAdapter` to add another transport without registering another agent tool:

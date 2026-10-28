@@ -13,6 +13,58 @@ const ctx: ToolContext = {
 };
 
 describe("notifications plugin", () => {
+  test("broadcast tool scopes logical messages by authenticated caller and host-bound routing", async () => {
+    const scopes: string[] = [];
+    const calls: string[] = [];
+    const adapter = {
+      targetId: "recipient",
+      async send(text: string) {
+        calls.push(text);
+        return { status: "confirmed" as const, externalId: "77" };
+      },
+    };
+    const plugin = notifications({
+      destinations: { updates: adapter },
+      resolveDestinations(scope) {
+        scopes.push(scope);
+        return { updates: adapter };
+      },
+    });
+    await plugin.start?.(createFakePluginContext());
+    try {
+      const tool = plugin.tools![0];
+      const input = tool.input.parse({
+        action: "send",
+        messageKey: "progress",
+        text: "Researching",
+      });
+      const first = JSON.parse(String(await tool.execute(input, ctx)));
+      await tool.execute(input, ctx);
+      await tool.execute(input, {
+        ...ctx,
+        caller: { kind: "session", ref: { source: "cron", key: "other" } },
+      });
+      expect(first.deliveries).toMatchObject([{ destination: "updates", status: "confirmed" }]);
+      expect(calls).toEqual(["Researching", "Researching"]);
+      expect(scopes).toEqual([
+        JSON.stringify(["session", "cron", "example"]),
+        JSON.stringify(["session", "cron", "example"]),
+        JSON.stringify(["session", "cron", "other"]),
+      ]);
+      expect(
+        tool.input.safeParse({
+          action: "send",
+          text: "Researching",
+          messageKey: "progress",
+          scope: "another-session",
+        }).success,
+      ).toBe(false);
+      await expect(plugin.notify({ scope: "", text: "Invalid" })).rejects.toThrow();
+    } finally {
+      await plugin.stop?.();
+    }
+  });
+
   test("one tool sends through configured destinations and inspects host receipts", async () => {
     const calls: string[] = [];
     const plugin = notifications({
@@ -90,7 +142,8 @@ describe("notifications plugin", () => {
         { action: "send", destination: "updates", text: "hello", chatId: 999 },
         { action: "send", destination: "updates", text: "   " },
         { action: "send", destination: "updates", text: "x".repeat(65_537) },
-        { action: "send", text: "hello" },
+        { action: "send", text: "hello", deduplicationKey: "direct-only" },
+        { action: "send", destination: "updates", text: "hello", messageKey: "broadcast-only" },
         { action: "send", destination: "updates" },
         { action: "status" },
         { action: "status", deliveryId: host.deliveryId, text: "hello" },
