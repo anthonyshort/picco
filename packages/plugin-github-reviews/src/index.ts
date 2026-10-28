@@ -423,3 +423,12 @@ export type {
   ReviewSelection,
 } from "./types.js";
 export type { GithubExecute } from "./github.js";
+
+export { githubFeedback } from "./feedback.js";
+export { GithubFeedbackSettingsSchema } from "./feedback-types.js";
+export type {
+  GithubFeedbackOptions,
+  GithubFeedbackSettings,
+  FeedbackSelection,
+  GithubFeedbackResult,
+} from "./feedback-types.js";

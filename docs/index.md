@@ -25,6 +25,7 @@ extensions, skills, or packages.
 - [Tools](./guides/tools.md) — expose controlled host-side capabilities.
 - [Plugins](./guides/plugins.md) — add gateways, services, commands, and session behaviour.
 - [GitHub reviews](./guides/github-reviews.md) — poll personal review requests and run persistent queued work.
+- [PR feedback](./guides/github-feedback.md) — debounce submitted reviews on authored PRs and run a feedback skill.
 - [Identity](./guides/identity.md) — connect services using each sender's credentials.
 - [Runtimes](./guides/runtimes/index.md) — choose local execution or a bubblewrap sandbox.
 - [Providers](./guides/providers.md) — make model credentials and custom providers available.

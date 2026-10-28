@@ -2,6 +2,8 @@
 
 The GitHub reviews plugin polls review requests for the host's authenticated GitHub account and starts a session when an eligible pull request is ready. It records reviewed commits in SQLite so normal polling does not need to scan GitHub comments or reviews. An empty poll does not start a model session. It requires no repository webhook or GitHub App.
 
+To address reviews on your own PRs, use the separate [feedback workflow](./github-feedback.md).
+
 ## Start a review assistant
 
 Install Pi and the packages used by the assistant:

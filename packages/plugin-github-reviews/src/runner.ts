@@ -1,3 +1,4 @@
+import { deliverCallback } from "./callback.js";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { tool, type PluginContext, type Turn } from "@picco-agent/core";
@@ -13,11 +14,6 @@ import {
  * Heartbeats continue until the worker has actually been closed.
  */
 const HEARTBEAT_MS = 60_000;
-
-/**
- * Bound application lifecycle reporting.
- */
-const CALLBACK_TIMEOUT_MS = 30_000;
 
 /**
  * A worker must explicitly declare completion after its review workflow succeeds.
@@ -201,25 +197,4 @@ function buildPrompt(selection: ReviewSelection): string {
     `Keep artifacts in ${selection.artifactDirectory}; use ${selection.publisherStateFile} for publisher state when the skill supports it.`,
     "After the entire workflow succeeds, call github_review_complete once with a concise summary. If blocked or uncertain, do not call it. The host reports the outcome; do not send a separate notification.",
   ].join("\n\n");
-}
-
-/**
- * A stalled notification must not retain a review worker slot indefinitely.
- */
-async function deliverCallback<Input>(
-  callback: (input: Input) => void | Promise<void>,
-  input: Input,
-) {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = Promise.withResolvers<never>();
-  timer = setTimeout(
-    () => deadline.reject(new Error("Review lifecycle callback timed out")),
-    CALLBACK_TIMEOUT_MS,
-  );
-  try {
-    const delivery = callback(input);
-    await Promise.race([delivery, deadline.promise]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
