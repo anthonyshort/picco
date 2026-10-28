@@ -44,6 +44,32 @@ export interface MessageOptions {
 }
 
 /**
+ * Mutable queue ownership shared by accepted broadcasts and shutdown.
+ */
+interface MessageQueue {
+  tails: Map<string, Promise<NotificationResult>>;
+  receipts: Map<string, NotificationResult>;
+  pendingDeliveries: number;
+  stopped: boolean;
+}
+
+/**
+ * One resolved channel operation, including its scoped message identity.
+ */
+interface ChannelRequest {
+  key: string;
+  destination: string;
+  adapter: NotificationAdapter;
+  text: string;
+  keyed: boolean;
+}
+
+/**
+ * Preparation either returns an existing/refused receipt or a new attempt to reserve.
+ */
+type MessagePreparation = { result: NotificationResult } | { record: MessageRecord };
+
+/**
  * Broadcast independently and serialise edits to each scoped channel message.
  */
 export function createMessages(
@@ -51,123 +77,247 @@ export function createMessages(
   options: MessageOptions,
   store: MessageStore = createMessageStore(options.max),
 ) {
-  const tails = new Map<string, Promise<NotificationResult>>();
-  const receipts = new Map<string, NotificationResult>();
-  let pendingDeliveries = 0;
-  let stopped = false;
-
-  async function deliver(
-    key: string,
-    destination: string,
-    adapter: NotificationAdapter,
-    text: string,
-    keyed: boolean,
-  ): Promise<NotificationResult> {
-    const digest = createHash("sha256").update(text).digest("hex");
-    const previous = keyed ? store.get(key) : undefined;
-    const targetId = adapter.targetId;
-    if (
-      keyed &&
-      (!targetId || targetId.length > 1000 || (previous && previous.targetId !== targetId))
-    ) {
-      return rejected(destination);
-    }
-    // Unresolved attempts quarantine changed text as well as repeated content.
-    if (
-      previous &&
-      (previous.status === "uncertain" ||
-        previous.status === "in-flight" ||
-        previous.digest === digest)
-    ) {
-      return receipt(previous, true);
-    }
-    const record: MessageRecord = {
-      targetId: targetId ?? destination,
-      digest,
-      deliveryId: randomUUID(),
-      destination,
-      status: "in-flight",
-      externalId: previous?.externalId ?? null,
-    };
-    if (previous?.externalId && !adapter.update) return rejected(destination);
-    if (keyed) store.set(key, record);
-    try {
-      const result = await callAdapterWithTimeout(
-        adapter,
-        record.externalId,
-        text,
-        options.timeoutMs,
-      );
-      record.status = result.status;
-      if (result.status === "confirmed") {
-        record.externalId = result.externalId ?? record.externalId;
-        if (keyed && !record.externalId) record.status = "uncertain";
-      }
-    } catch {
-      record.status = "uncertain";
-    }
-    if (keyed) store.set(key, record);
-    return receipt(record, false);
-  }
-
+  const queue: MessageQueue = {
+    tails: new Map(),
+    receipts: new Map(),
+    pendingDeliveries: 0,
+    stopped: false,
+  };
   return {
-    async notify(input: NotificationBroadcast): Promise<NotificationBroadcastResult> {
-      if (stopped) throw new Error("Notifications are stopped");
-      const checked = NotificationBroadcastSchema.parse(input);
-      const destinations = Object.entries(resolveDestinations(checked.scope));
-      z.array(z.string().min(1).max(200))
-        .min(1)
-        .max(100)
-        .parse(destinations.map(([name]) => name));
-      if (pendingDeliveries + destinations.length > options.max)
-        throw new Error("Notification capacity reached; wait for active attempts");
-      pendingDeliveries += destinations.length;
-      const deliveries = await Promise.all(
-        destinations.map(([destination, adapter]) => {
-          const key = JSON.stringify([
-            checked.scope,
-            checked.messageKey ?? randomUUID(),
-            destination,
-          ]);
-          const previousTail = tails.get(key);
-          const completion = (previousTail ?? Promise.resolve())
-            .then(async () => {
-              try {
-                return await deliver(
-                  key,
-                  destination,
-                  adapter,
-                  checked.text,
-                  checked.messageKey !== undefined,
-                );
-              } catch {
-                return { ...rejected(destination), status: "uncertain" as const };
-              }
-            })
-            .finally(() => {
-              pendingDeliveries--;
-              // An older completion must not remove a newer request's queue tail.
-              if (tails.get(key) === completion) tails.delete(key);
-            });
-          tails.set(key, completion);
-          return completion;
-        }),
-      );
-      for (const delivery of deliveries) {
-        receipts.delete(delivery.deliveryId);
-        receipts.set(delivery.deliveryId, delivery);
-        if (receipts.size > options.max) receipts.delete(receipts.keys().next().value!);
-      }
-      return { scope: checked.scope, messageKey: checked.messageKey, deliveries };
-    },
-    delivery: (deliveryId: string) => receipts.get(deliveryId),
+    notify: (input: NotificationBroadcast) =>
+      broadcastMessage(input, resolveDestinations, queue, options, store),
+    delivery: (deliveryId: string) => queue.receipts.get(deliveryId),
     async stop() {
-      stopped = true;
-      await Promise.allSettled([...tails.values()]);
+      queue.stopped = true;
+      await Promise.allSettled([...queue.tails.values()]);
       store.close();
-      receipts.clear();
+      queue.receipts.clear();
     },
   };
+}
+
+/**
+ * Reserve the entire broadcast before registering any asynchronous channel work.
+ */
+async function broadcastMessage(
+  input: NotificationBroadcast,
+  resolveDestinations: (scope: string) => Record<string, NotificationAdapter>,
+  queue: MessageQueue,
+  options: MessageOptions,
+  store: MessageStore,
+): Promise<NotificationBroadcastResult> {
+  if (queue.stopped) {
+    throw new Error("Notifications are stopped");
+  }
+  const checked = NotificationBroadcastSchema.parse(input);
+  const channels = resolveChannels(resolveDestinations, checked.scope);
+  reserveBatchCapacity(queue, channels.length, options.max);
+  const pending = channels.map((channel) =>
+    enqueueMessage(createChannelRequest(channel, checked), queue, store, options.timeoutMs),
+  );
+  const deliveries = await Promise.all(pending);
+  rememberReceipts(queue.receipts, deliveries, options.max);
+  return { scope: checked.scope, messageKey: checked.messageKey, deliveries };
+}
+
+/**
+ * Validate host-resolved channel names before reserving capacity or invoking adapters.
+ */
+function resolveChannels(
+  resolveDestinations: (scope: string) => Record<string, NotificationAdapter>,
+  scope: string,
+): [string, NotificationAdapter][] {
+  const channels = Object.entries(resolveDestinations(scope));
+  z.array(z.string().min(1).max(200))
+    .min(1)
+    .max(100)
+    .parse(channels.map(([name]) => name));
+  return channels;
+}
+
+/**
+ * Count queued channel deliveries rather than broadcasts or cached receipts.
+ */
+function reserveBatchCapacity(queue: MessageQueue, count: number, max: number): void {
+  if (queue.pendingDeliveries + count > max) {
+    throw new Error("Notification capacity reached; wait for active attempts");
+  }
+  queue.pendingDeliveries += count;
+}
+
+/**
+ * Unkeyed broadcasts receive fresh channel identities on every call.
+ */
+function createChannelRequest(
+  [destination, adapter]: [string, NotificationAdapter],
+  input: NotificationBroadcast,
+): ChannelRequest {
+  return {
+    key: JSON.stringify([input.scope, input.messageKey ?? randomUUID(), destination]),
+    destination,
+    adapter,
+    text: input.text,
+    keyed: input.messageKey !== undefined,
+  };
+}
+
+/**
+ * Register the new tail synchronously so concurrent updates retain their submission order.
+ */
+function enqueueMessage(
+  request: ChannelRequest,
+  queue: MessageQueue,
+  store: MessageStore,
+  timeoutMs: number,
+): Promise<NotificationResult> {
+  const previousTail = queue.tails.get(request.key);
+  const completion = (previousTail ?? Promise.resolve())
+    .then(() => deliverMessageSafely(request, store, timeoutMs))
+    .finally(() => releaseQueueTail(queue, request.key, completion));
+  queue.tails.set(request.key, completion);
+  return completion;
+}
+
+/**
+ * Release this delivery's capacity without deleting a newer request's tail.
+ */
+function releaseQueueTail(
+  queue: MessageQueue,
+  key: string,
+  completion: Promise<NotificationResult>,
+): void {
+  queue.pendingDeliveries--;
+  if (queue.tails.get(key) === completion) {
+    queue.tails.delete(key);
+  }
+}
+
+/**
+ * Keep one channel's failure from rejecting the sibling deliveries in its broadcast.
+ */
+async function deliverMessageSafely(
+  request: ChannelRequest,
+  store: MessageStore,
+  timeoutMs: number,
+): Promise<NotificationResult> {
+  try {
+    return await deliverMessage(request, store, timeoutMs);
+  } catch {
+    return { ...rejected(request.destination), status: "uncertain" as const };
+  }
+}
+
+/**
+ * Keep preparation, reservation, invocation and confirmation in effect order.
+ */
+async function deliverMessage(
+  request: ChannelRequest,
+  store: MessageStore,
+  timeoutMs: number,
+): Promise<NotificationResult> {
+  const previous = request.keyed ? store.get(request.key) : undefined;
+  const preparation = prepareMessage(request, previous);
+  if ("result" in preparation) {
+    return preparation.result;
+  }
+  const record = preparation.record;
+  if (request.keyed) {
+    store.set(request.key, record);
+  }
+  await invokeAdapter(request, record, timeoutMs);
+  if (request.keyed) {
+    store.set(request.key, record);
+  }
+  return receipt(record, false);
+}
+
+/**
+ * Decide whether the bound recipient can reuse or update an existing message.
+ */
+function prepareMessage(
+  request: ChannelRequest,
+  previous: MessageRecord | undefined,
+): MessagePreparation {
+  const digest = createHash("sha256").update(request.text).digest("hex");
+  const targetId = request.adapter.targetId;
+  if (
+    request.keyed &&
+    (!targetId || targetId.length > 1000 || (previous && previous.targetId !== targetId))
+  ) {
+    return { result: rejected(request.destination) };
+  }
+  // Unresolved attempts quarantine changed text as well as repeated content.
+  if (
+    previous &&
+    (previous.status === "uncertain" ||
+      previous.status === "in-flight" ||
+      previous.digest === digest)
+  ) {
+    return { result: receipt(previous, true) };
+  }
+  const record: MessageRecord = {
+    targetId: targetId ?? request.destination,
+    digest,
+    deliveryId: randomUUID(),
+    destination: request.destination,
+    status: "in-flight",
+    externalId: previous?.externalId ?? null,
+  };
+  if (previous?.externalId && !request.adapter.update) {
+    return { result: rejected(request.destination) };
+  }
+  return { record };
+}
+
+/**
+ * Apply transport results without swallowing reservation or confirmation-store failures.
+ */
+async function invokeAdapter(
+  request: ChannelRequest,
+  record: MessageRecord,
+  timeoutMs: number,
+): Promise<void> {
+  try {
+    const result = await callAdapterWithTimeout(
+      request.adapter,
+      record.externalId,
+      request.text,
+      timeoutMs,
+    );
+    applyAdapterResult(record, result, request.keyed);
+  } catch {
+    record.status = "uncertain";
+  }
+}
+
+/**
+ * A keyed success needs a provider ID before future edits can safely address it.
+ */
+function applyAdapterResult(record: MessageRecord, result: AdapterResult, keyed: boolean): void {
+  record.status = result.status;
+  if (result.status === "confirmed") {
+    record.externalId = result.externalId ?? record.externalId;
+    if (keyed && !record.externalId) {
+      record.status = "uncertain";
+    }
+  }
+}
+
+/**
+ * Bound receipt inspection independently of retained editable-message handles.
+ */
+function rememberReceipts(
+  receipts: Map<string, NotificationResult>,
+  deliveries: NotificationResult[],
+  max: number,
+): void {
+  for (const delivery of deliveries) {
+    receipts.delete(delivery.deliveryId);
+    receipts.set(delivery.deliveryId, delivery);
+    if (receipts.size > max) {
+      receipts.delete(receipts.keys().next().value!);
+    }
+  }
 }
 
 /**
