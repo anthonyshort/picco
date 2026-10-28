@@ -1,5 +1,13 @@
 # smoke-tests
 
+## 0.1.5
+
+### Patch Changes
+
+- Updated dependencies [552a03a]
+- Updated dependencies [5e3a62b]
+  - @picco-agent/plugin-notifications@0.3.0
+
 ## 0.1.4
 
 ### Patch Changes
