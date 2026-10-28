@@ -147,6 +147,8 @@ describe("persistent notification messages", () => {
       expect(() => second.set("key", record(), stale.deliveryId)).toThrow("reservation changed");
       expect(() => second.set("key", record(), null)).toThrow();
       expect(second.get("key")).toMatchObject({ deliveryId: next.deliveryId, status: "uncertain" });
+      second.set("key", original, next.deliveryId);
+      expect(first.get("key")).toEqual(original);
     } finally {
       first.close();
       second.close();
