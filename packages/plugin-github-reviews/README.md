@@ -35,4 +35,5 @@ Install and authenticate the GitHub CLI on the host, and provide the configured 
 ## Docs
 
 - [Run requested GitHub reviews](../../docs/guides/github-reviews.md)
+- [Address feedback on authored PRs](../../docs/guides/github-feedback.md)
 - [Plugins](../../docs/guides/plugins.md)

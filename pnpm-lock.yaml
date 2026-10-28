@@ -123,6 +123,9 @@ importers:
       '@picco-agent/plugin-cron':
         specifier: workspace:*
         version: link:../packages/plugin-cron
+      '@picco-agent/plugin-github-reviews':
+        specifier: workspace:*
+        version: link:../packages/plugin-github-reviews
       '@picco-agent/runtime-bwrap':
         specifier: workspace:*
         version: link:../packages/runtime-bwrap

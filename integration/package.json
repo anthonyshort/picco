@@ -7,6 +7,7 @@
     "@picco-agent/core": "workspace:*",
     "@picco-agent/identity": "workspace:*",
     "@picco-agent/plugin-cron": "workspace:*",
+    "@picco-agent/plugin-github-reviews": "workspace:*",
     "@picco-agent/runtime-bwrap": "workspace:*",
     "@picco-agent/runtime-local": "workspace:*",
     "zod": "^4.4.3"
