@@ -102,6 +102,40 @@ describe("notification messages", () => {
     }
   });
 
+  test("drains queued edits on shutdown while unrelated keys run independently", async () => {
+    const gate = Promise.withResolvers<AdapterResult>();
+    const first = channel();
+    first.adapter.send = async (text) => {
+      first.calls.push(`send:${text}`);
+      return text === "Researching" ? gate.promise : { status: "confirmed", externalId: "88" };
+    };
+    const messages = createMessages(() => ({ first: first.adapter }), { max: 3, timeoutMs: 1000 });
+    const starting = messages.notify(input);
+    const updating = messages.notify({ ...input, text: "Verifying" });
+    const unrelated = messages.notify({ ...input, messageKey: "other", text: "Unrelated" });
+    try {
+      await expect(messages.notify({ ...input, messageKey: "overflow" })).rejects.toThrow(
+        "capacity",
+      );
+      expect((await unrelated).deliveries[0].status).toBe("confirmed");
+      expect(first.calls).toEqual(["send:Researching", "send:Unrelated"]);
+      let stopped = false;
+      const stopping = messages.stop().then(() => {
+        stopped = true;
+      });
+      await Promise.resolve();
+      expect(stopped).toBe(false);
+      await expect(messages.notify(input)).rejects.toThrow("stopped");
+      gate.resolve({ status: "confirmed", externalId: "77" });
+      await Promise.all([starting, updating, stopping]);
+      expect(stopped).toBe(true);
+      expect(first.calls).toEqual(["send:Researching", "send:Unrelated", "update:77:Verifying"]);
+    } finally {
+      gate.resolve({ status: "rejected" });
+      await messages.stop();
+    }
+  });
+
   test("rejects recipient changes, unbound keys and unsupported edits without new sends", async () => {
     const first = channel();
     let adapter = first.adapter;

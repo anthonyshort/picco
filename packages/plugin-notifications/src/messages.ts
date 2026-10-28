@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as z from "zod";
+import PQueue from "p-queue";
 import { NotificationBroadcastSchema, DELIVERY_STATUSES } from "./types.js";
 import type {
   AdapterResult,
@@ -47,7 +48,7 @@ export interface MessageOptions {
  * Mutable queue ownership shared by accepted broadcasts and shutdown.
  */
 interface MessageQueue {
-  tails: Map<string, Promise<NotificationResult>>;
+  channels: Map<string, PQueue>;
   receipts: Map<string, NotificationResult>;
   pendingDeliveries: number;
   stopped: boolean;
@@ -78,7 +79,7 @@ export function createMessages(
   store: MessageStore = createMessageStore(options.max),
 ) {
   const queue: MessageQueue = {
-    tails: new Map(),
+    channels: new Map(),
     receipts: new Map(),
     pendingDeliveries: 0,
     stopped: false,
@@ -89,7 +90,7 @@ export function createMessages(
     delivery: (deliveryId: string) => queue.receipts.get(deliveryId),
     async stop() {
       queue.stopped = true;
-      await Promise.allSettled([...queue.tails.values()]);
+      await Promise.all([...queue.channels.values()].map((channel) => channel.onIdle()));
       store.close();
       queue.receipts.clear();
     },
@@ -162,7 +163,7 @@ function createChannelRequest(
 }
 
 /**
- * Register the new tail synchronously so concurrent updates retain their submission order.
+ * Each scoped channel has its own FIFO so unrelated messages can run concurrently.
  */
 function enqueueMessage(
   request: ChannelRequest,
@@ -170,40 +171,45 @@ function enqueueMessage(
   store: MessageStore,
   timeoutMs: number,
 ): Promise<NotificationResult> {
-  const previousTail = queue.tails.get(request.key);
-  const completion = (previousTail ?? Promise.resolve())
-    .then(() => deliverMessageSafely(request, store, timeoutMs))
-    .finally(() => releaseQueueTail(queue, request.key, completion));
-  queue.tails.set(request.key, completion);
-  return completion;
+  const channel = queue.channels.get(request.key) ?? createChannelQueue(queue, request.key);
+  return channel.add(() => runQueuedDelivery(request, queue, store, timeoutMs));
 }
 
 /**
- * Release this delivery's capacity without deleting a newer request's tail.
+ * Remove an idle channel without depending on add() promise-settlement timing.
  */
-function releaseQueueTail(
-  queue: MessageQueue,
-  key: string,
-  completion: Promise<NotificationResult>,
-): void {
-  queue.pendingDeliveries--;
-  if (queue.tails.get(key) === completion) {
-    queue.tails.delete(key);
-  }
+function createChannelQueue(queue: MessageQueue, key: string): PQueue {
+  const channel = new PQueue({ concurrency: 1 });
+  queue.channels.set(key, channel);
+  channel.addEventListener(
+    "idle",
+    () => {
+      if (channel.size === 0 && channel.pending === 0 && queue.channels.get(key) === channel) {
+        queue.channels.delete(key);
+      }
+    },
+    { once: true },
+  );
+  return channel;
 }
 
 /**
- * Keep one channel's failure from rejecting the sibling deliveries in its broadcast.
+ * Keep channel failures independent and release each accepted capacity reservation once.
  */
-async function deliverMessageSafely(
+async function runQueuedDelivery(
   request: ChannelRequest,
+  queue: MessageQueue,
   store: MessageStore,
   timeoutMs: number,
 ): Promise<NotificationResult> {
+  // Register every channel before an adapter can synchronously re-enter the host.
+  await Promise.resolve();
   try {
     return await deliverMessage(request, store, timeoutMs);
   } catch {
     return { ...rejected(request.destination), status: "uncertain" as const };
+  } finally {
+    queue.pendingDeliveries--;
   }
 }
 
