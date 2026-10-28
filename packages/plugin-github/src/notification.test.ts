@@ -1,4 +1,6 @@
 import { describe, expect, test } from "vitest";
+import { createFakePluginContext } from "@picco-agent/core/testing";
+import { notifications } from "../../plugin-notifications/src/index.js";
 import { githubNotifications } from "./notification.js";
 
 /**
@@ -106,6 +108,99 @@ describe("GitHub notification adapter", () => {
     ).toThrow();
   });
 
+  test.each([
+    "membership transport",
+    "membership response",
+    "membership payload",
+    "token before GET",
+    "token before PATCH",
+  ])("recovers keyed progress after %s fails before a write", async (failure) => {
+    let failing = false;
+    let tokenCalls = 0;
+    const calls: { method: string; body: RequestInit["body"] }[] = [];
+    const adapter = githubNotifications({
+      repository: "owner/project",
+      pullRequest: 42,
+      token: () => {
+        if (failing) {
+          tokenCalls++;
+          if (
+            (failure === "token before GET" && tokenCalls === 1) ||
+            (failure === "token before PATCH" && tokenCalls === 2)
+          )
+            throw new Error("Private credential lookup failure");
+        }
+        return "test-token";
+      },
+      fetch: async (_url, init) => {
+        calls.push({ method: init!.method!, body: init?.body });
+        if (failing && init?.method === "GET") {
+          if (failure === "membership transport") throw new Error("Private transport failure");
+          if (failure === "membership response") return new Response(null, { status: 503 });
+          if (failure === "membership payload") return Response.json({ id: 77 });
+        }
+        return Response.json(comment());
+      },
+    });
+    const notifier = notifications({ destinations: { github: adapter } });
+    await notifier.start?.(createFakePluginContext());
+    const progress = { scope: "review-one", messageKey: "progress" };
+    try {
+      expect(
+        (await notifier.notify({ ...progress, text: "Starting" })).deliveries[0],
+      ).toMatchObject({ status: "confirmed", externalId: "77" });
+      failing = true;
+      expect(
+        (await notifier.notify({ ...progress, text: "Checking" })).deliveries[0],
+      ).toMatchObject({ status: "rejected", externalId: "77" });
+      expect(calls.some(({ method }) => method === "PATCH")).toBe(false);
+      failing = false;
+      expect(
+        (await notifier.notify({ ...progress, text: "Finished" })).deliveries[0],
+      ).toMatchObject({ status: "confirmed", externalId: "77" });
+      expect(calls.filter(({ method }) => method === "POST")).toHaveLength(1);
+      expect(calls.filter(({ method }) => method === "PATCH")).toEqual([
+        { method: "PATCH", body: JSON.stringify({ body: "Finished" }) },
+      ]);
+    } finally {
+      await notifier.stop?.();
+    }
+  });
+
+  test("recovers an initial keyed send after token acquisition fails before fetch", async () => {
+    let tokenAvailable = false;
+    let writes = 0;
+    const adapter = githubNotifications({
+      repository: "owner/project",
+      pullRequest: 42,
+      token: () => {
+        if (!tokenAvailable) throw new Error("Private credential lookup failure");
+        return "test-token";
+      },
+      fetch: async () => {
+        writes++;
+        return Response.json(comment());
+      },
+    });
+    const notifier = notifications({ destinations: { github: adapter } });
+    await notifier.start?.(createFakePluginContext());
+    try {
+      const progress = { scope: "review-one", messageKey: "progress" };
+      expect((await notifier.notify({ ...progress, text: "Starting" })).deliveries[0].status).toBe(
+        "rejected",
+      );
+      expect(writes).toBe(0);
+      tokenAvailable = true;
+      expect((await notifier.notify({ ...progress, text: "Ready" })).deliveries[0]).toMatchObject({
+        status: "confirmed",
+        externalId: "77",
+      });
+      expect(writes).toBe(1);
+    } finally {
+      await notifier.stop?.();
+    }
+  });
+
   test.each([403, 404, 422, 429])("treats HTTP %s as definite rejection", async (status) => {
     const adapter = githubNotifications({
       repository: "owner/project",
@@ -128,6 +223,27 @@ describe("GitHub notification adapter", () => {
     await expect(adapter.send("Ready", new AbortController().signal)).rejects.toThrow(
       "outcome is uncertain",
     );
+  });
+
+  test("keeps uncertainty when an edit may already have reached GitHub", async () => {
+    for (const transport of [
+      async () => {
+        throw new Error("Private transport failure");
+      },
+      async () => new Response(null, { status: 503 }),
+      async () => Response.json({ id: 77 }),
+    ]) {
+      const adapter = githubNotifications({
+        repository: "owner/project",
+        pullRequest: 42,
+        token: "test-token",
+        fetch: async (_url, init) =>
+          init?.method === "GET" ? Response.json(comment()) : transport(),
+      });
+      await expect(adapter.update!("77", "Finished", new AbortController().signal)).rejects.toThrow(
+        /GitHub notification (transport failed|outcome is uncertain|response could not be confirmed)/,
+      );
+    }
   });
 
   test("malformed successful receipts and lost responses remain uncertain without exposing credentials", async () => {

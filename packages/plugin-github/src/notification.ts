@@ -55,9 +55,9 @@ export function githubNotifications(options: GithubNotificationOptions): Notific
     try {
       token = (typeof options.token === "function" ? await options.token() : options.token).trim();
     } catch {
-      throw new Error("GitHub notification credential unavailable");
+      return undefined;
     }
-    if (!token) throw new Error("GitHub notification requires a token");
+    if (!token) return undefined;
     let response: Response;
     try {
       response = await request(url, {
@@ -73,14 +73,18 @@ export function githubNotifications(options: GithubNotificationOptions): Notific
         signal,
       });
     } catch {
+      if (method === "GET") return undefined;
       throw new Error("GitHub notification transport failed");
     }
-    if (response.status >= 500 || response.status === 408)
+    if (response.status >= 500 || response.status === 408) {
+      if (method === "GET") return undefined;
       throw new Error("GitHub notification outcome is uncertain");
+    }
     if (!response.ok) return undefined;
     try {
       return CommentSchema.parse(await response.json());
     } catch {
+      if (method === "GET") return undefined;
       throw new Error("GitHub notification response could not be confirmed");
     }
   }
