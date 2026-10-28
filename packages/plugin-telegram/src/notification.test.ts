@@ -23,6 +23,7 @@ describe("Telegram notification adapter", () => {
     const polling = vi.spyOn(Bot.prototype, "start");
     const send = vi.spyOn(Api.prototype, "sendMessage").mockResolvedValue(receipt(456, "Ready"));
     const adapter = telegramNotifications({ botToken: "123:test-token", chatId: 456 });
+    expect(adapter.targetId).toBe("telegram:456");
     const signal = new AbortController().signal;
     expect(await adapter.send("Ready", signal)).toEqual({ status: "confirmed", externalId: "77" });
     expect(send).toHaveBeenCalledWith(
@@ -32,6 +33,69 @@ describe("Telegram notification adapter", () => {
       signal,
     );
     expect(polling).not.toHaveBeenCalled();
+  });
+
+  test("edits the existing message with cancellation without starting a polling bot", async () => {
+    const polling = vi.spyOn(Bot.prototype, "start");
+    const edit = vi
+      .spyOn(Api.prototype, "editMessageText")
+      .mockResolvedValue({ ...receipt(456, "Updated"), edit_date: 1 });
+    const adapter = telegramNotifications({ botToken: "123:test-token", chatId: 456 });
+    const signal = new AbortController().signal;
+    expect(await adapter.update!("77", "Updated", signal)).toEqual({
+      status: "confirmed",
+      externalId: "77",
+    });
+    expect(edit).toHaveBeenCalledExactlyOnceWith(
+      456,
+      77,
+      "Updated",
+      { link_preview_options: { is_disabled: true } },
+      signal,
+    );
+    expect(polling).not.toHaveBeenCalled();
+    for (const messageId of ["", "0", "-1", "1.5", "077", "9007199254740992"])
+      expect(await adapter.update!(messageId, "Updated", signal)).toEqual({ status: "rejected" });
+    expect(await adapter.update!("77", "x".repeat(4097), signal)).toEqual({ status: "rejected" });
+    expect(edit).toHaveBeenCalledTimes(1);
+  });
+
+  test("confirms unchanged edits but distinguishes Telegram rejection and network uncertainty", async () => {
+    const edit = vi.spyOn(Api.prototype, "editMessageText");
+    const adapter = telegramNotifications({ botToken: "123:test-token", chatId: 456 });
+    const signal = new AbortController().signal;
+    edit.mockRejectedValueOnce(
+      new GrammyError(
+        "edit",
+        {
+          ok: false,
+          error_code: 400,
+          description:
+            "Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message",
+        },
+        "editMessageText",
+        {},
+      ),
+    );
+    expect(await adapter.update!("77", "Updated", signal)).toEqual({
+      status: "confirmed",
+      externalId: "77",
+    });
+    edit.mockRejectedValueOnce(
+      new GrammyError(
+        "edit",
+        {
+          ok: false,
+          error_code: 400,
+          description: "Bad Request: message to edit not found",
+        },
+        "editMessageText",
+        {},
+      ),
+    );
+    expect(await adapter.update!("77", "Updated", signal)).toEqual({ status: "rejected" });
+    edit.mockRejectedValueOnce(new Error("Connection lost"));
+    await expect(adapter.update!("77", "Updated", signal)).rejects.toThrow("Connection lost");
   });
 
   test("validates the recipient and rejects oversized messages before transport", async () => {
