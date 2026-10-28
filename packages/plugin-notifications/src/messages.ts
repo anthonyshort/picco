@@ -53,7 +53,7 @@ export function createMessages(
 ) {
   const tails = new Map<string, Promise<NotificationResult>>();
   const receipts = new Map<string, NotificationResult>();
-  let pending = 0;
+  let pendingDeliveries = 0;
   let stopped = false;
 
   async function deliver(
@@ -72,6 +72,7 @@ export function createMessages(
     ) {
       return rejected(destination);
     }
+    // Unresolved attempts quarantine changed text as well as repeated content.
     if (
       previous &&
       (previous.status === "uncertain" ||
@@ -90,19 +91,13 @@ export function createMessages(
     };
     if (previous?.externalId && !adapter.update) return rejected(destination);
     if (keyed) store.set(key, record);
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        reject(new Error("Notification timed out"));
-      }, options.timeoutMs);
-    });
     try {
-      const operation: Promise<AdapterResult> = record.externalId
-        ? adapter.update!(record.externalId, text, controller.signal)
-        : adapter.send(text, controller.signal);
-      const result = await Promise.race([operation, deadline]);
+      const result = await callAdapterWithTimeout(
+        adapter,
+        record.externalId,
+        text,
+        options.timeoutMs,
+      );
       record.status = result.status;
       if (result.status === "confirmed") {
         record.externalId = result.externalId ?? record.externalId;
@@ -110,8 +105,6 @@ export function createMessages(
       }
     } catch {
       record.status = "uncertain";
-    } finally {
-      clearTimeout(timer);
     }
     if (keyed) store.set(key, record);
     return receipt(record, false);
@@ -126,9 +119,9 @@ export function createMessages(
         .min(1)
         .max(100)
         .parse(destinations.map(([name]) => name));
-      if (pending + destinations.length > options.max)
+      if (pendingDeliveries + destinations.length > options.max)
         throw new Error("Notification capacity reached; wait for active attempts");
-      pending += destinations.length;
+      pendingDeliveries += destinations.length;
       const deliveries = await Promise.all(
         destinations.map(([destination, adapter]) => {
           const key = JSON.stringify([
@@ -136,8 +129,8 @@ export function createMessages(
             checked.messageKey ?? randomUUID(),
             destination,
           ]);
-          const previous = tails.get(key);
-          const completion = (previous ?? Promise.resolve())
+          const previousTail = tails.get(key);
+          const completion = (previousTail ?? Promise.resolve())
             .then(async () => {
               try {
                 return await deliver(
@@ -152,7 +145,8 @@ export function createMessages(
               }
             })
             .finally(() => {
-              pending--;
+              pendingDeliveries--;
+              // An older completion must not remove a newer request's queue tail.
               if (tails.get(key) === completion) tails.delete(key);
             });
           tails.set(key, completion);
@@ -174,6 +168,33 @@ export function createMessages(
       receipts.clear();
     },
   };
+}
+
+/**
+ * Bound an adapter call and release its timer regardless of the transport outcome.
+ */
+async function callAdapterWithTimeout(
+  adapter: NotificationAdapter,
+  externalId: string | null,
+  text: string,
+  timeoutMs: number,
+): Promise<AdapterResult> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error("Notification timed out"));
+    }, timeoutMs);
+  });
+  try {
+    const operation = externalId
+      ? adapter.update!(externalId, text, controller.signal)
+      : adapter.send(text, controller.signal);
+    return await Promise.race([operation, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
