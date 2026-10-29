@@ -530,6 +530,48 @@ describe("createAgent", () => {
       );
     });
 
+    test("worker schemas describe raw inputs while the bridge applies transforms and defaults", async () => {
+      const normalise = tool({
+        name: "normalise",
+        description: "Normalise a repository name",
+        input: z.object({
+          repository: z.string().transform((value) => value.toLowerCase()),
+          side: z.enum(["LEFT", "RIGHT"]).default("RIGHT"),
+        }),
+        execute: (input) => JSON.stringify(input),
+      });
+      const gate = Promise.withResolvers<string>();
+      const { agent, runtime } = agentWith({
+        tools: [normalise],
+        runtime: new FakeRuntime({ reply: () => gate.promise }),
+      });
+      await agent.start({ handleSignals: false });
+
+      const turn = agent.sessions.run("k1", "hi");
+      await vi.waitFor(() => expect(runtime.spawns).toHaveLength(1));
+      const spawn = runtime.spawns[0]!;
+      expect(
+        spawn.spec.tools?.find((entry) => entry.name === "normalise")?.inputSchema,
+      ).toMatchObject({
+        type: "object",
+        properties: {
+          repository: { type: "string" },
+          side: { type: "string", enum: ["LEFT", "RIGHT"], default: "RIGHT" },
+        },
+        required: ["repository"],
+      });
+      const response = await callBridge(bridgeOf(spawn), "normalise", { repository: "Owner/Repo" });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        content: [
+          { type: "text", text: JSON.stringify({ repository: "owner/repo", side: "RIGHT" }) },
+        ],
+        isError: false,
+      });
+      gate.resolve("done");
+      await turn;
+    });
+
     test("the default reload tool is available without configured tools", async () => {
       const { agent, runtime } = agentWith({});
       await agent.start({ handleSignals: false });
