@@ -12,6 +12,9 @@ import { tool, type Tool } from "@picco-agent/core";
 import type { Plugin, PluginContext, SessionIdentity } from "@picco-agent/core";
 import { createTokenMinter, RelayEventSchema, type RelayEvent, type SocketLike } from "./relay.js";
 
+export { githubTools } from "./tools.js";
+export type { GithubToolsOptions } from "./api.js";
+
 const DEFAULT_TURN_TIMEOUT_MS = 1_800_000; // 30 minutes — reviews clone + read
 
 /**
