@@ -212,8 +212,39 @@ export function createFeedbackStore(filename: string, now = Date.now) {
     };
   }
 
+  /**
+   * Refresh one validated PR inside the caller's transaction. Preserve existing review states and
+   * observation times, withdraw missing pending IDs and clear exhausted retries.
+   */
+  function reconcileCandidate(candidate: FeedbackCandidate) {
+    const key = prKey(candidate);
+    database
+      .prepare(`INSERT INTO feedback_prs(key,data,present) VALUES (?,?,1)
+    ON CONFLICT(key) DO UPDATE SET data=excluded.data,present=1`)
+      .run(key, JSON.stringify(candidate));
+    const live = new Set(candidate.reviews.map((review) => review.id));
+    for (const review of candidate.reviews) {
+      database
+        .prepare(`INSERT OR IGNORE INTO feedback_reviews(id,prKey,observedAt,state)
+      VALUES (?,?,?,'pending')`)
+        .run(review.id, key, now());
+    }
+    for (const row of database
+      .prepare("SELECT id FROM feedback_reviews WHERE prKey=? AND state='pending'")
+      .all(key)) {
+      const { id } = z.object({ id: z.string() }).parse(row);
+      if (!live.has(id))
+        database.prepare("UPDATE feedback_reviews SET state='withdrawn' WHERE id=?").run(id);
+    }
+    const retry = z
+      .object({ resumeRunId: z.string().nullable() })
+      .parse(database.prepare("SELECT resumeRunId FROM feedback_prs WHERE key=?").get(key));
+    if (retry.resumeRunId && !selectedPending(candidate).length) {
+      database.prepare("UPDATE feedback_prs SET resumeRunId=NULL WHERE key=?").run(key);
+    }
+  }
+
   return {
-    bindAuthor,
     /**
      * Replace PR presence and metadata using a successful discovery result, and insert new review
      * IDs as pending without resetting existing IDs or observation times. Pending reviews missing
@@ -225,34 +256,18 @@ export function createFeedbackStore(filename: string, now = Date.now) {
       if (!bindAuthor(author)) throw new Error("Authenticated GitHub author changed");
       transaction(() => {
         database.prepare("UPDATE feedback_prs SET present=0").run();
-        for (const candidate of checked) {
-          const key = prKey(candidate);
-          database
-            .prepare(`INSERT INTO feedback_prs(key,data,present) VALUES (?,?,1)
-            ON CONFLICT(key) DO UPDATE SET data=excluded.data,present=1`)
-            .run(key, JSON.stringify(candidate));
-          const live = new Set(candidate.reviews.map((review) => review.id));
-          for (const review of candidate.reviews) {
-            database
-              .prepare(`INSERT OR IGNORE INTO feedback_reviews(id,prKey,observedAt,state)
-              VALUES (?,?,?,'pending')`)
-              .run(review.id, key, now());
-          }
-          for (const row of database
-            .prepare("SELECT id FROM feedback_reviews WHERE prKey=? AND state='pending'")
-            .all(key)) {
-            const { id } = z.object({ id: z.string() }).parse(row);
-            if (!live.has(id))
-              database.prepare("UPDATE feedback_reviews SET state='withdrawn' WHERE id=?").run(id);
-          }
-          const retry = z
-            .object({ resumeRunId: z.string().nullable() })
-            .parse(database.prepare("SELECT resumeRunId FROM feedback_prs WHERE key=?").get(key));
-          if (retry.resumeRunId && !selectedPending(candidate).length) {
-            database.prepare("UPDATE feedback_prs SET resumeRunId=NULL WHERE key=?").run(key);
-          }
-        }
+        for (const candidate of checked) reconcileCandidate(candidate);
       });
+    },
+    /**
+     * Refresh the inspected PR before admission without changing other PRs' presence. Newly
+     * observed reviews restart this PR's quiet period, and withdrawn reviews cannot enter its next
+     * batch. Account changes persist a pause before rejecting.
+     */
+    refresh(author: string, candidate: FeedbackCandidate) {
+      const checked = FeedbackCandidateSchema.parse(candidate);
+      if (!bindAuthor(author)) throw new Error("Authenticated GitHub author changed");
+      transaction(() => reconcileCandidate(checked));
     },
     /**
      * Read present, unblocked PRs whose pending reviews satisfy debounce, oldest first. This is a

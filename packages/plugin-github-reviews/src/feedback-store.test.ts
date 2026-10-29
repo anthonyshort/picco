@@ -106,6 +106,40 @@ describe("createFeedbackStore", () => {
     ).toEqual(["review:one", "review:two"]);
   });
 
+  test("refreshes one PR without resetting its observation time or another PR's presence", () => {
+    const f = fixture();
+    const other = {
+      ...candidate,
+      number: 43,
+      url: "https://github.com/example/project/pull/43",
+      reviews: [{ ...candidate.reviews[0], id: "review:other" }],
+    };
+    f.store.reconcile("author", [candidate, other]);
+    f.advance(540_000);
+    f.store.refresh("author", { ...candidate, title: "Updated title" });
+    f.advance(60_000);
+    expect(f.store.next(DEBOUNCE_MS, MAX_WAIT_MS).map((item) => item.number)).toEqual([42, 43]);
+
+    const updated = withReview("review:two");
+    f.store.refresh("author", updated);
+    expect(f.store.next(DEBOUNCE_MS, MAX_WAIT_MS).map((item) => item.number)).toEqual([43]);
+    expect(f.store.list().map((item) => [item.number, item.present, item.pending])).toEqual([
+      [42, true, ["review:one", "review:two"]],
+      [43, true, ["review:other"]],
+    ]);
+
+    f.store.refresh("author", { ...updated, reviews: [updated.reviews[1]] });
+    f.advance(DEBOUNCE_MS);
+    expect(
+      f
+        .open()
+        .next(DEBOUNCE_MS, MAX_WAIT_MS)
+        .map((item) => item.reviews.map((review) => review.id)),
+    ).toEqual([["review:other"], ["review:two"]]);
+    f.store.reconcile("author", []);
+    expect(f.store.next(DEBOUNCE_MS, MAX_WAIT_MS)).toEqual([]);
+  });
+
   test("caps continuous batching at thirty minutes from the first observation", () => {
     const f = fixture();
     let current = candidate;
@@ -154,7 +188,7 @@ describe("createFeedbackStore", () => {
     f.advance(DEBOUNCE_MS);
     const first = f.store.admit(candidate, "author", DEBOUNCE_MS, MAX_WAIT_MS)!;
     const updated = withReview("review:two");
-    f.store.reconcile("author", [updated]);
+    f.store.refresh("author", updated);
     f.advance(DEBOUNCE_MS);
     const queued = f.store.next(DEBOUNCE_MS, MAX_WAIT_MS)[0];
     expect(queued.reviews.map((review) => review.id)).toEqual(["review:two"]);
@@ -269,9 +303,11 @@ describe("createFeedbackStore", () => {
     expect(f.open().status()).toMatchObject({ author: "author", paused: true });
     expect(f.store.admit(candidate, "author", DEBOUNCE_MS, MAX_WAIT_MS)).toBeNull();
     f.store.pause(false);
-    expect(f.store.bindAuthor("another-author")).toBe(false);
-    expect(f.store.status()).toMatchObject({ author: "author", paused: true });
     expect(() => f.store.reconcile("another-author", [])).toThrow("author changed");
+    expect(f.store.status()).toMatchObject({ author: "author", paused: true });
+    f.store.pause(false);
+    expect(() => f.store.refresh("another-author", candidate)).toThrow("author changed");
+    expect(f.open().status()).toMatchObject({ author: "author", paused: true });
     expect(f.store.list()).toHaveLength(1);
   });
 
@@ -289,6 +325,7 @@ describe("createFeedbackStore", () => {
     expect(second.claimDispatcher("two")).toBe(false);
     expect(() => f.store.pause(false)).toThrow("ownership was lost");
     expect(() => f.store.reconcile("author", [])).toThrow("ownership was lost");
+    expect(() => f.store.refresh("author", candidate)).toThrow("ownership was lost");
     f.store.releaseDispatcher("one");
     expect(second.claimDispatcher("two")).toBe(true);
     expect(() => f.store.pause(false)).toThrow("ownership was lost");

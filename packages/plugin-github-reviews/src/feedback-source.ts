@@ -230,20 +230,10 @@ export function createGithubFeedbackSource(opts: GithubSourceOptions = {}) {
       identity,
     );
     for await (const { data, rateLimit } of pages) {
-      const pull = data.repository?.pullRequest;
-      if (!data.repository || data.repository.nameWithOwner !== selected.repository || !pull)
-        return { candidate: selected, blockedReason: "pull-request-unavailable", rateLimit };
-      const live = createCandidate(pull, identity);
-      if (!live)
-        return { candidate: selected, blockedReason: "no-longer-open-or-owned", rateLimit };
-      if (live.repository !== selected.repository || live.number !== selected.number)
-        throw new Error("GitHub feedback inspection returned another pull request");
-      if (
-        live.head !== selected.head ||
-        live.headRepository !== selected.headRepository ||
-        live.headBranch !== selected.headBranch
-      )
-        return { candidate: selected, blockedReason: "head-changed", rateLimit };
+      const validated = validatePullRequest(data.repository, selected, identity);
+      if (typeof validated === "string")
+        return { candidate: selected, blockedReason: validated, rateLimit };
+      const { candidate: live, pull } = validated;
       for (const review of pull.reviews.nodes) {
         const feedback = createFeedbackReview(review, identity);
         if (!feedback) continue;
@@ -369,6 +359,32 @@ function createCandidate(
   });
   ensureUrl(candidate);
   return candidate;
+}
+
+/**
+ * Validate one review page against the selected PR and head before collecting reviews. Return its
+ * live metadata and review connection, or the reason admission is blocked. A different PR identity
+ * is an upstream routing error and fails the scan.
+ */
+function validatePullRequest(
+  repository: z.infer<typeof ReviewDataSchema>["repository"],
+  selected: FeedbackCandidate,
+  author: string,
+) {
+  const pull = repository?.pullRequest;
+  if (!repository || repository.nameWithOwner !== selected.repository || !pull)
+    return "pull-request-unavailable";
+  const live = createCandidate(pull, author);
+  if (!live) return "no-longer-open-or-owned";
+  if (live.repository !== selected.repository || live.number !== selected.number)
+    throw new Error("GitHub feedback inspection returned another pull request");
+  if (
+    live.head !== selected.head ||
+    live.headRepository !== selected.headRepository ||
+    live.headBranch !== selected.headBranch
+  )
+    return "head-changed";
+  return { candidate: live, pull };
 }
 
 /**
