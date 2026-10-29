@@ -1,5 +1,11 @@
 # @picco-agent/plugin-github
 
+## 0.2.0
+
+### Minor Changes
+
+- 3b14b95: Add standalone GitHub tools for creating and updating PR conversation comments, adding inline diff comments, and submitting comment, approval or changes-requested reviews without starting the mention gateway.
+
 ## 0.1.3
 
 ### Patch Changes
