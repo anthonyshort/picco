@@ -250,6 +250,38 @@ describe("authored feedback source", () => {
     await assert.rejects(broken.inspect(candidate, "owner"), /invalid pagination/);
   });
 
+  test("revalidates each review page and retains accumulated cost when the head changes", async () => {
+    let pages = 0;
+    const source = createGithubFeedbackSource({
+      execute: async () => {
+        pages++;
+        return JSON.stringify(
+          pages === 1
+            ? reviewsResponse([review], { hasNextPage: true, endCursor: "next" })
+            : reviewsResponse([], pageInfo, { ...pull, headRefOid: "b".repeat(40) }),
+        );
+      },
+    });
+    const result = await source.inspect(candidate, "owner");
+    assert.equal(pages, 2);
+    assert.equal(result.blockedReason, "head-changed");
+    assert.deepEqual(result.candidate, candidate);
+    assert.equal(result.rateLimit.cost, 2);
+  });
+
+  test("rejects account changes between review pages", async () => {
+    let pages = 0;
+    const source = createGithubFeedbackSource({
+      execute: async () => {
+        const response = reviewsResponse([review], { hasNextPage: true, endCursor: "next" });
+        if (pages++) response.data.viewer.login = "another";
+        return JSON.stringify(response);
+      },
+    });
+    await assert.rejects(source.inspect(candidate, "owner"), /author changed/);
+    assert.equal(pages, 2);
+  });
+
   test("rejects partial API data and preserves rate-limit guidance without private errors", async () => {
     const source = createGithubFeedbackSource({
       now: () => Date.parse("2026-01-01T00:00:00Z"),

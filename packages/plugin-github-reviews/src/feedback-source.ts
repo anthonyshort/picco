@@ -89,6 +89,18 @@ const DiscoveryDataSchema = BaseDataSchema.extend({
   }),
 });
 /**
+ * Review metadata includes unsubmitted and dismissed reviews for explicit filtering.
+ */
+const ReviewSchema = z.object({
+  id: z.string().min(1),
+  url: z.url(),
+  author: z.object({ login: LoginSchema }).nullable(),
+  submittedAt: z.iso.datetime().nullable(),
+  body: z.string(),
+  state: z.string(),
+  comments: z.object({ totalCount: z.number().int().nonnegative() }),
+});
+/**
  * Review wire data includes pending and dismissed reviews for explicit filtering.
  */
 const ReviewDataSchema = BaseDataSchema.extend({
@@ -97,19 +109,7 @@ const ReviewDataSchema = BaseDataSchema.extend({
       nameWithOwner: RepositorySchema,
       pullRequest: PullSchema.extend({
         reviews: z.object({
-          nodes: z
-            .array(
-              z.object({
-                id: z.string().min(1),
-                url: z.url(),
-                author: z.object({ login: LoginSchema }).nullable(),
-                submittedAt: z.iso.datetime().nullable(),
-                body: z.string(),
-                state: z.string(),
-                comments: z.object({ totalCount: z.number().int().nonnegative() }),
-              }),
-            )
-            .max(PAGE_SIZE),
+          nodes: z.array(ReviewSchema).max(PAGE_SIZE),
           pageInfo: PageSchema,
         }),
       }).nullable(),
@@ -203,19 +203,18 @@ export function createGithubFeedbackSource(opts: GithubSourceOptions = {}) {
     const identity = LoginSchema.parse(author).toLowerCase();
     const [owner, name] = selected.repository.split("/");
     const reviews = new Map<string, FeedbackReview>();
-    const cursors = new Set<string>();
-    let after: string | null = null;
-    let cost = 0;
-    for (let page = 0; page < MAX_PAGES; page++) {
-      const data = await query(
-        REVIEWS_DOCUMENT,
-        { owner, name, number: selected.number, after },
-        ReviewDataSchema,
-        signal,
-      );
-      ensureAuthor(data.viewer.login, identity);
-      cost += data.rateLimit.cost;
-      const rateLimit = { ...data.rateLimit, cost };
+    const pages = paginate(
+      (after) =>
+        query(
+          REVIEWS_DOCUMENT,
+          { owner, name, number: selected.number, after },
+          ReviewDataSchema,
+          signal,
+        ),
+      (data) => data.repository?.pullRequest?.reviews.pageInfo,
+      identity,
+    );
+    for await (const { data, rateLimit } of pages) {
       const pull = data.repository?.pullRequest;
       if (!data.repository || data.repository.nameWithOwner !== selected.repository || !pull)
         return { candidate: selected, blockedReason: "pull-request-unavailable", rateLimit };
@@ -231,20 +230,8 @@ export function createGithubFeedbackSource(opts: GithubSourceOptions = {}) {
       )
         return { candidate: selected, blockedReason: "head-changed", rateLimit };
       for (const review of pull.reviews.nodes) {
-        if (!review.author || review.author.login.toLowerCase() === identity || !review.submittedAt)
-          continue;
-        const state = z.enum(REVIEW_STATES).safeParse(review.state);
-        if (
-          !state.success ||
-          (review.state === "APPROVED" && !review.body.trim() && !review.comments.totalCount)
-        )
-          continue;
-        const feedback = FeedbackReviewSchema.parse({
-          ...review,
-          author: review.author.login,
-          state: state.data,
-          inlineCommentCount: review.comments.totalCount,
-        });
+        const feedback = createFeedbackReview(review, identity);
+        if (!feedback) continue;
         const previous = reviews.get(feedback.id);
         if (previous && JSON.stringify(previous) !== JSON.stringify(feedback))
           throw new Error("GitHub returned conflicting review IDs");
@@ -262,22 +249,17 @@ export function createGithubFeedbackSource(opts: GithubSourceOptions = {}) {
           },
           rateLimit,
         };
-      after = nextCursor(pull.reviews.pageInfo, cursors);
     }
     throw new Error("GitHub feedback review pagination exceeded its limit");
   }
 
   async function discoverPullRequests(signal?: AbortSignal) {
     const found = new Map<string, FeedbackCandidate>();
-    const cursors = new Set<string>();
-    let author: string | undefined;
-    let after: string | null = null;
-    let cost = 0;
-    for (let page = 0; page < MAX_PAGES; page++) {
-      const data = await query(DISCOVERY_DOCUMENT, { after }, DiscoveryDataSchema, signal);
-      author ??= data.viewer.login.toLowerCase();
-      ensureAuthor(data.viewer.login, author);
-      cost += data.rateLimit.cost;
+    const pages = paginate(
+      (after) => query(DISCOVERY_DOCUMENT, { after }, DiscoveryDataSchema, signal),
+      (data) => data.viewer.pullRequests.pageInfo,
+    );
+    for await (const { data, author, rateLimit } of pages) {
       for (const pull of data.viewer.pullRequests.nodes) {
         const candidate = createCandidate(pull, author);
         if (!candidate) continue;
@@ -291,9 +273,8 @@ export function createGithubFeedbackSource(opts: GithubSourceOptions = {}) {
         return {
           author,
           candidates: [...found.values()],
-          rateLimit: { ...data.rateLimit, cost },
+          rateLimit,
         };
-      after = nextCursor(data.viewer.pullRequests.pageInfo, cursors);
     }
     throw new Error("GitHub feedback discovery pagination exceeded its limit");
   }
@@ -372,11 +353,50 @@ function ensureAuthor(actual: string, expected: string) {
 }
 
 /**
- * Reject missing and repeated cursors instead of accepting partial evidence.
+ * Keep account identity and API cost consistent while following connection cursors.
  */
-function nextCursor(page: z.infer<typeof PageSchema>, seen: Set<string>) {
-  if (!page.endCursor || seen.has(page.endCursor))
-    throw new Error("GitHub feedback returned invalid pagination");
-  seen.add(page.endCursor);
-  return page.endCursor;
+async function* paginate<Data extends z.infer<typeof BaseDataSchema>>(
+  loadPage: (after: string | null) => Promise<Data>,
+  getPageInfo: (data: Data) => z.infer<typeof PageSchema> | undefined,
+  author?: string,
+) {
+  const cursors = new Set<string>();
+  let after: string | null = null;
+  let cost = 0;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const data = await loadPage(after);
+    author ??= data.viewer.login.toLowerCase();
+    ensureAuthor(data.viewer.login, author);
+    cost += data.rateLimit.cost;
+    yield { data, author, rateLimit: { ...data.rateLimit, cost } };
+
+    const pageInfo = getPageInfo(data);
+    if (!pageInfo?.hasNextPage) return;
+    if (!pageInfo.endCursor || cursors.has(pageInfo.endCursor))
+      throw new Error("GitHub feedback returned invalid pagination");
+    cursors.add(pageInfo.endCursor);
+    after = pageInfo.endCursor;
+  }
+  throw new Error("GitHub feedback pagination exceeded its limit");
+}
+
+/**
+ * Retain submitted feedback from other authors, excluding empty approvals.
+ */
+function createFeedbackReview(
+  review: z.infer<typeof ReviewSchema>,
+  author: string,
+): FeedbackReview | undefined {
+  if (!review.author || review.author.login.toLowerCase() === author || !review.submittedAt)
+    return undefined;
+  const state = FeedbackReviewSchema.shape.state.safeParse(review.state);
+  if (!state.success) return undefined;
+  if (state.data === "APPROVED" && !review.body.trim() && !review.comments.totalCount)
+    return undefined;
+  return FeedbackReviewSchema.parse({
+    ...review,
+    author: review.author.login,
+    state: state.data,
+    inlineCommentCount: review.comments.totalCount,
+  });
 }
