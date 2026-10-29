@@ -1,5 +1,11 @@
 # @picco-agent/plugin-github-reviews
 
+## 0.3.0
+
+### Minor Changes
+
+- f37911d: Add automatic handling of submitted reviews on authored PRs, with persistent debouncing, separate feedback state and retryable skill artifacts.
+
 ## 0.2.0
 
 ### Minor Changes
