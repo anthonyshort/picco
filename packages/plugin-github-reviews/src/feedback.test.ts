@@ -1,12 +1,14 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type Plugin } from "@picco-agent/core";
 import { createFakePluginContext, type FakePluginContext } from "@picco-agent/core/testing";
 import { z } from "zod";
 import { githubFeedback } from "./feedback.js";
 import { type GithubExecute } from "./github-contracts.js";
+import { createFeedbackStore } from "./feedback-store.js";
 import {
   type FeedbackSelection,
   type GithubFeedbackOptions,
@@ -70,13 +72,14 @@ function githubFixture() {
     if (request.query.includes("AuthoredFeedback"))
       return JSON.stringify({
         data: {
-          viewer: { login: state.author },
-          rateLimit,
-          search: {
-            issueCount: 1,
-            nodes: [pull],
-            pageInfo: { hasNextPage: false, endCursor: null },
+          viewer: {
+            login: state.author,
+            pullRequests: {
+              nodes: [pull],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
           },
+          rateLimit,
         },
       });
     state.inspections++;
@@ -166,6 +169,56 @@ async function start(execute: GithubExecute, overrides: Partial<GithubFeedbackOp
 }
 
 describe("githubFeedback", () => {
+  test("closes the store when persisted dispatcher state makes claiming fail", async () => {
+    const filename = path.join(directory, "feedback.sqlite");
+    createFeedbackStore(filename).close();
+    const database = new DatabaseSync(filename);
+    database
+      .prepare("INSERT INTO feedback_dispatcher VALUES (1,?,?,?,?)")
+      .run("other", 0, "host", 0);
+    database.close();
+    const close = vi.spyOn(DatabaseSync.prototype, "close");
+    try {
+      const plugin = githubFeedback({ feedbackDirectory: directory });
+      await expect(plugin.start!(createFakePluginContext())).rejects.toMatchObject({
+        name: "ZodError",
+      });
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      close.mockRestore();
+    }
+  });
+
+  test("preserves the setup error and closes the store if lease cleanup also fails", async () => {
+    const filename = path.join(directory, "feedback.sqlite");
+    createFeedbackStore(filename).close();
+    const database = new DatabaseSync(filename);
+    database
+      .prepare("INSERT INTO feedback_state VALUES ('poll',?)")
+      .run(JSON.stringify({ attemptedAt: "invalid" }));
+    database.close();
+    const prepare = DatabaseSync.prototype.prepare;
+    const failedRelease = vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(function (
+      this: DatabaseSync,
+      sql: string,
+    ) {
+      if (sql.startsWith("DELETE FROM feedback_dispatcher"))
+        throw new Error("Lease cleanup failed");
+      return prepare.call(this, sql);
+    });
+    const close = vi.spyOn(DatabaseSync.prototype, "close");
+    try {
+      const plugin = githubFeedback({ feedbackDirectory: directory });
+      await expect(plugin.start!(createFakePluginContext())).rejects.toMatchObject({
+        name: "ZodError",
+      });
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      close.mockRestore();
+      failedRelease.mockRestore();
+    }
+  });
+
   test("disabled feedback exposes tools without GitHub or model calls", async () => {
     const github = githubFixture();
     const current = await start(github.execute, { enabled: false });
@@ -252,6 +305,8 @@ describe("githubFeedback", () => {
     await expect(other.start!(createFakePluginContext())).rejects.toThrow(
       "Another GitHub feedback dispatcher",
     );
+    await invoke(first.plugin, "github_feedback_poll");
+    expect(await invoke(first.plugin, "github_feedback_status")).toContain('"ownershipLost":false');
     await first.plugin.stop!();
     github.state.author = "another-owner";
     const next = await start(github.execute);

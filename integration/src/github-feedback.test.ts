@@ -58,10 +58,12 @@ describe("feedback plugin with a real Pi worker", () => {
         return JSON.stringify({
           data: {
             ...data,
-            search: {
-              issueCount: 1,
-              nodes: [pull],
-              pageInfo: { hasNextPage: false, endCursor: null },
+            viewer: {
+              ...data.viewer,
+              pullRequests: {
+                nodes: [pull],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
             },
           },
         });
@@ -147,7 +149,22 @@ describe("feedback plugin with a real Pi worker", () => {
         caller: { kind: "host" },
         logger: silentLogger(),
       });
-      expect(result).toBeDefined();
+      const status = z
+        .object({
+          activeRuns: z.array(z.string()).max(1),
+          queue: z
+            .array(
+              z.object({
+                key: z.string(),
+                blockedRunId: z.string().nullable(),
+                pending: z.number(),
+              }),
+            )
+            .max(100_000),
+        })
+        .parse(JSON.parse(String(result)));
+      expect(status.activeRuns).toEqual([]);
+      expect(status.queue).toEqual([{ key: "fixture/project#1", blockedRunId: null, pending: 0 }]);
       expect(workerRequests).toBe(callsBeforeRestart);
       expect(outcomes).toHaveLength(1);
     } finally {

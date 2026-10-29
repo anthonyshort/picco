@@ -59,7 +59,7 @@ function fixture(
       skill: "address-pr-feedback",
       feedbackDirectory: directory,
       timeoutMs: 60_000,
-      ownsDispatcher: () => true,
+      renewDispatcherLease: () => true,
     },
     cleanup() {
       store.close();
@@ -130,6 +130,24 @@ describe("runFeedback", () => {
     }
   });
 
+  test("an abort during setup records interruption without starting a session", async () => {
+    const state = fixture();
+    try {
+      const worker = runFeedback(state.options);
+      worker.abort("Dispatcher stopped during setup");
+      const result = await worker.completion;
+      expect(result).toMatchObject({
+        status: "interrupted",
+        error: "Dispatcher stopped during setup",
+      });
+      expect(state.ctx.turns).toEqual([]);
+      expect(state.store.details(state.run.id)).toMatchObject({ state: "interrupted" });
+      expect(state.store.next(0, 0)).toEqual([]);
+    } finally {
+      state.cleanup();
+    }
+  });
+
   test("rejects another session and a lost dispatcher before recording completion", async () => {
     const state = fixture(async (ctx, run) => {
       await expect(complete(ctx, run, { kind: "host" })).rejects.toThrow(
@@ -152,8 +170,10 @@ describe("runFeedback", () => {
     });
     let checks = 0;
     try {
-      const result = await runFeedback({ ...lost.options, ownsDispatcher: () => ++checks === 1 })
-        .completion;
+      const result = await runFeedback({
+        ...lost.options,
+        renewDispatcherLease: () => ++checks === 1,
+      }).completion;
       expect(result.status).toBe("interrupted");
       expect(lost.store.details(lost.run.id).declaration).toBeUndefined();
     } finally {
