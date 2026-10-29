@@ -43,7 +43,10 @@ const PollSchema = z.object({
 const DataRowSchema = z.object({ data: z.string() });
 
 /**
- * Persist feedback batches independently of PR head changes.
+ * Open the SQLite queue shared by discovery, the dispatcher and worker completion. PR metadata is
+ * refreshed from GitHub; review IDs retain their handling state across head changes and restarts.
+ * Admission freezes one batch in a transaction, and uncertain attempts block that PR until an
+ * operator records a resolution.
  */
 export function createFeedbackStore(filename: string, now = Date.now) {
   mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
@@ -87,6 +90,11 @@ export function createFeedbackStore(filename: string, now = Date.now) {
     }
   }
 
+  /**
+   * Commit each queue transition atomically, rolling back on failure. Once this store has claimed a
+   * dispatcher lease, mutations normally require that lease to remain live; claiming the lease
+   * itself must run without that ownership check.
+   */
   function transaction<Result>(operation: () => Result, requireOwnership = true): Result {
     database.exec("BEGIN IMMEDIATE");
     try {
@@ -113,6 +121,10 @@ export function createFeedbackStore(filename: string, now = Date.now) {
       .run(key, JSON.stringify(data));
   }
 
+  /**
+   * Bind persisted review history to one account. A different login pauses admissions and returns
+   * false so reconciliation cannot mix feedback from different accounts.
+   */
   function bindAuthor(author: string) {
     return transaction(() => {
       const login = author.toLowerCase();
@@ -126,6 +138,10 @@ export function createFeedbackStore(filename: string, now = Date.now) {
     });
   }
 
+  /**
+   * Intersect the latest GitHub reviews with IDs still pending in SQLite. Completed IDs remain
+   * handled even when discovery sees them again at another PR head.
+   */
   function pending(candidate: FeedbackCandidate) {
     const ids = new Set(
       database
@@ -136,6 +152,10 @@ export function createFeedbackStore(filename: string, now = Date.now) {
     return candidate.reviews.filter((review) => ids.has(review.id));
   }
 
+  /**
+   * Select pending reviews for a fresh batch, or only the original batch's IDs on retry. New
+   * reviews must wait for a later run rather than expand resumed work.
+   */
   function selectedPending(candidate: FeedbackCandidate) {
     const row = database
       .prepare("SELECT resumeRunId FROM feedback_prs WHERE key=?")
@@ -147,6 +167,11 @@ export function createFeedbackStore(filename: string, now = Date.now) {
     return reviews.filter((review) => originalIds.has(review.id));
   }
 
+  /**
+   * Measure debounce from when pending review IDs were first observed locally. A PR is ready after
+   * the last observation's quiet period or the first observation's maximum wait, whichever comes
+   * first. Repeated polls of the same IDs do not reset it.
+   */
   function eligible(candidate: FeedbackCandidate, debounceMs: number, maxWaitMs: number) {
     const row = database
       .prepare(`SELECT MIN(observedAt) AS first, MAX(observedAt) AS last
@@ -189,6 +214,12 @@ export function createFeedbackStore(filename: string, now = Date.now) {
 
   return {
     bindAuthor,
+    /**
+     * Replace PR presence and metadata using a successful discovery result, and insert new review
+     * IDs as pending without resetting existing IDs or observation times. Pending reviews missing
+     * from a supplied PR's current reviews become withdrawn; PRs absent from the result cannot be
+     * admitted. No worker starts here.
+     */
     reconcile(author: string, candidates: FeedbackCandidate[]) {
       const checked = z.array(FeedbackCandidateSchema).max(100_000).parse(candidates);
       if (!bindAuthor(author)) throw new Error("Authenticated GitHub author changed");
@@ -223,6 +254,11 @@ export function createFeedbackStore(filename: string, now = Date.now) {
         }
       });
     },
+    /**
+     * Read present, unblocked PRs whose pending reviews satisfy debounce, oldest first. This is a
+     * preview, not a reservation: the dispatcher reinspects GitHub and calls admit before starting
+     * a worker. Retries retain only the original batch's pending IDs.
+     */
     next(debounceMs: number, maxWaitMs: number) {
       return database
         .prepare(`SELECT p.data FROM feedback_prs p JOIN feedback_reviews r ON r.prKey=p.key
@@ -233,6 +269,12 @@ export function createFeedbackStore(filename: string, now = Date.now) {
         .filter((candidate) => eligible(candidate, debounceMs, maxWaitMs))
         .map((candidate) => ({ ...candidate, reviews: selectedPending(candidate) }));
     },
+    /**
+     * Atomically reserve a batch after the dispatcher has rechecked GitHub and reconciled it.
+     * Recheck account, pause, debounce and PR blocking state, and reject admission while any run is
+     * running. Freeze the supplied head and selected pending reviews in a new run, marking those
+     * IDs running so later discoveries cannot expand this batch.
+     */
     admit(candidate: FeedbackCandidate, author: string, debounceMs: number, maxWaitMs: number) {
       const checked = FeedbackCandidateSchema.parse(candidate);
       return transaction(() => {
@@ -280,6 +322,12 @@ export function createFeedbackStore(filename: string, now = Date.now) {
         return run;
       });
     },
+    /**
+     * Save the running worker's completion declaration before teardown. This records reported
+     * evidence without performing or independently verifying GitHub writes. Declaration alone does
+     * not mark reviews handled: the normal worker path does that in finish, while an operator can
+     * separately resolve uncertain work.
+     */
     declare(runId: string, evidence: FeedbackCompletion) {
       const checked = FeedbackCompletionSchema.parse(evidence);
       return transaction(
@@ -289,6 +337,11 @@ export function createFeedbackStore(filename: string, now = Date.now) {
             .run(JSON.stringify(checked), runId).changes === 1,
       );
     },
+    /**
+     * Record the outcome after the runner attempts teardown. Completion requires a declaration and
+     * marks the batch's review IDs handled. Blocked or interrupted outcomes instead block further
+     * work on that PR until resolve records how to proceed.
+     */
     finish(runId: string, outcome: z.infer<typeof OutcomeSchema>) {
       const checked = OutcomeSchema.parse(outcome);
       transaction(() => {
@@ -310,6 +363,11 @@ export function createFeedbackStore(filename: string, now = Date.now) {
         }
       });
     },
+    /**
+     * Apply an operator's evidence-based decision for a blocked or interrupted run. Completed marks
+     * its reviews handled; retry requeues them and retains the original artifact/run reference. The
+     * caller must first confirm the prior worker has stopped.
+     */
     resolve(runId: string, action: "completed" | "retry", reason: string) {
       const checked = z
         .object({
@@ -351,6 +409,11 @@ export function createFeedbackStore(filename: string, now = Date.now) {
           .run(checked.action, checked.reason, runId);
       });
     },
+    /**
+     * On startup, mark previously running attempts interrupted and block their PRs. Never
+     * automatically replay uncertain work: a prior worker may already have pushed or published
+     * before the process lost its final outcome.
+     */
     recoverInterrupted() {
       return transaction(() => {
         const running = database
@@ -375,6 +438,10 @@ export function createFeedbackStore(filename: string, now = Date.now) {
     pause(paused: boolean) {
       transaction(() => writeState("paused", paused));
     },
+    /**
+     * Merge discovery status and retry timing into persistent state so a restart can respect the
+     * previous poll's backoff. This records status without contacting GitHub.
+     */
     poll(update: z.infer<typeof PollSchema>) {
       transaction(() =>
         writeState("poll", {
@@ -426,6 +493,11 @@ export function createFeedbackStore(filename: string, now = Date.now) {
         });
     },
     details: runRow,
+    /**
+     * Claim the single dispatcher lease for this database. Refuse another live lease; reclaim an
+     * expired foreign owner only on this host when its process is confirmed gone. Remember
+     * ownership locally so subsequent queue mutations check the live lease.
+     */
     claimDispatcher(owner: string) {
       const claimed = transaction(() => {
         const row = database
@@ -459,6 +531,10 @@ export function createFeedbackStore(filename: string, now = Date.now) {
       if (claimed) dispatcherOwner = owner;
       return claimed;
     },
+    /**
+     * Extend this owner's unexpired lease. Return false after expiry or replacement so the
+     * dispatcher can stop admissions and abort its worker instead of continuing unowned.
+     */
     renewDispatcher(owner: string) {
       return (
         database

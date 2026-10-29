@@ -29,7 +29,8 @@ export const FeedbackReviewSchema = z.object({
   inlineCommentCount: z.number().int().nonnegative(),
 });
 /**
- * An authored PR and its currently eligible submitted reviews.
+ * Live PR metadata and reviews eligible by author and submission state. Reviews may already be
+ * handled; the store tracks that separately by review ID.
  */
 export const FeedbackCandidateSchema = z.object({
   repository: RepositorySchema,
@@ -160,12 +161,19 @@ const REVIEWS_DOCUMENT = `query InspectFeedback($owner: String!, $name: String!,
 }`;
 
 /**
- * Discover authored PR feedback and revalidate ownership and head before admission.
+ * Read authored PRs and submitted reviews through the configured GitHub CLI transport. `discover`
+ * supplies the dispatcher with eligible feedback; `inspect` rechecks a PR before the store reserves
+ * a worker batch. This source does not persist or schedule work.
  */
 export function createGithubFeedbackSource(opts: GithubSourceOptions = {}) {
   const execute = opts.execute ?? executeGithub;
   const now = opts.now ?? Date.now;
 
+  /**
+   * Execute one GraphQL request and validate its response before callers use it. Reject
+   * partial/error responses rather than returning an incomplete page; rate-limit errors retain a
+   * retry delay without exposing GitHub's diagnostic text.
+   */
   async function query<Schema extends z.ZodType>(
     document: string,
     variables: Record<string, unknown>,
@@ -197,6 +205,13 @@ export function createGithubFeedbackSource(opts: GithubSourceOptions = {}) {
     return schema.parse(envelope.data);
   }
 
+  /**
+   * Read review pages while the PR remains usable, retaining feedback from other authors. Each page
+   * must still match the selected PR, owner and head repository/branch/commit. Return a blocking
+   * reason if that selection is no longer usable; otherwise return its current metadata and
+   * reviews, deduplicated by ID and sorted by submission time. The dispatcher also calls this after
+   * debounce, immediately before batch admission.
+   */
   async function inspect(candidate: FeedbackCandidate, author: string, signal?: AbortSignal) {
     const selected = FeedbackCandidateSchema.parse(candidate);
     ensureUrl(selected);
@@ -253,6 +268,11 @@ export function createGithubFeedbackSource(opts: GithubSourceOptions = {}) {
     throw new Error("GitHub feedback review pagination exceeded its limit");
   }
 
+  /**
+   * Follow all authored-PR pages for the authenticated account, retaining open PRs with usable
+   * heads, including drafts and old PRs. Deduplicate by repository/number and reject conflicting
+   * heads across pages. Reviews are fetched separately by inspect.
+   */
   async function discoverPullRequests(signal?: AbortSignal) {
     const found = new Map<string, FeedbackCandidate>();
     const pages = paginate(
@@ -279,6 +299,13 @@ export function createGithubFeedbackSource(opts: GithubSourceOptions = {}) {
     throw new Error("GitHub feedback discovery pagination exceeded its limit");
   }
 
+  /**
+   * Collect authored PRs, then inspect each PR's full review connection sequentially. Return the
+   * account, PRs with eligible feedback and the combined API cost only after all scans succeed.
+   * These are current observations across several requests, not an atomic GitHub snapshot or a list
+   * of unhandled reviews; the store owns handled IDs. PRs blocked by inspection or without eligible
+   * reviews are omitted.
+   */
   async function discover(signal?: AbortSignal) {
     const found = await discoverPullRequests(signal);
     const { author } = found;
@@ -353,7 +380,9 @@ function ensureAuthor(actual: string, expected: string) {
 }
 
 /**
- * Keep account identity and API cost consistent while following connection cursors.
+ * Yield validated pages with a stable account and accumulated connection API cost. Reject
+ * missing/repeated cursors and scans exceeding MAX_PAGES. Yield before advancing so callers can
+ * return a blocking PR result without fetching another page.
  */
 async function* paginate<Data extends z.infer<typeof BaseDataSchema>>(
   loadPage: (after: string | null) => Promise<Data>,

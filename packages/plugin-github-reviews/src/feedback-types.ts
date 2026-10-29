@@ -22,7 +22,8 @@ export const GithubFeedbackSettingsSchema = z
   .strict();
 
 /**
- * One immutable feedback batch and the session assigned to it.
+ * One batch frozen by store admission: PR head, selected review IDs and worker session. Later
+ * discoveries cannot add reviews to this run; retries refer back to its artifacts.
  */
 export const FeedbackRunSchema = FeedbackCandidateSchema.extend({
   id: z.uuid(),
