@@ -26,7 +26,7 @@ Picco includes packages for common assistant surfaces:
 | Plugin                                                           | Use                                                                          |
 | ---------------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | [`plugin-telegram`](../../packages/plugin-telegram/)             | Receive messages and keep one session per chat or topic                      |
-| [`plugin-github`](../../packages/plugin-github/)                 | Respond to GitHub mentions with scoped installation credentials              |
+| [`plugin-github`](../../packages/plugin-github/)                 | Respond to GitHub mentions or expose standalone PR comment/review tools      |
 | [`plugin-github-reviews`](../../packages/plugin-github-reviews/) | Poll personal review requests and run queued reviews                         |
 | [`plugin-agentmail`](../../packages/plugin-agentmail/)           | Receive email and expose mailbox tools                                       |
 | [`plugin-cron`](../../packages/plugin-cron/)                     | Run scheduled prompts and manage jobs                                        |
@@ -34,6 +34,21 @@ Picco includes packages for common assistant surfaces:
 
 The [identity plugin](./identity.md) adds per-user service connections. Combine plugins to build the
 assistant you need.
+
+## Use standalone GitHub PR tools
+
+Add outbound PR tools without starting the GitHub mention gateway:
+
+```ts
+import { githubTools } from "@picco-agent/plugin-github";
+
+const agent = createAgent({
+  // ...
+  plugins: [githubTools({ token: () => process.env.GITHUB_TOKEN ?? "" })],
+});
+```
+
+The agent can call `github_comment` to create or update a conversation comment, `github_inline_comment` to add a diff comment, and `github_review` to submit a comment, approval or changes-requested review with optional inline findings. Credentials remain host-side. The workflow retains returned comment/review IDs; there is no local message store or automatic retry. Inspect GitHub before retrying an uncertain write. Supply the inspected `commitId` for a known revision; an omitted inline commit is resolved from the current head, while an omitted review commit uses GitHub’s latest commit.
 
 ## Create a plugin
 

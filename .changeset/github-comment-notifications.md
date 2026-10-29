@@ -2,4 +2,4 @@
 "@picco-agent/plugin-github": minor
 ---
 
-Add a GitHub PR-comment notification adapter that creates and updates Markdown comments for a host-configured repository and pull request without starting the mention gateway.
+Add standalone GitHub tools for creating and updating PR conversation comments, adding inline diff comments, and submitting comment, approval or changes-requested reviews without starting the mention gateway.

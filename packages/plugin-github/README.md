@@ -1,6 +1,6 @@
 # `@picco-agent/plugin-github`
 
-GitHub @mention gateway plugin for picco. Listens for @mentions via a relay, creates a fresh session per mention, mints a scoped installation token, and replies with `post_comment`.
+GitHub mention gateway and standalone outbound PR tools for Picco.
 
 ## Install
 
@@ -29,6 +29,8 @@ const agent = createAgent({
   ],
 });
 ```
+
+For outbound tools without the relay, use `githubTools({ token: getGithubToken })`; see the [standalone PR tools guide](../../docs/guides/plugins.md#use-standalone-github-pr-tools).
 
 ## Docs
 

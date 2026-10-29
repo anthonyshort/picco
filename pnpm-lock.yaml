@@ -232,9 +232,6 @@ importers:
       '@picco-agent/core':
         specifier: workspace:*
         version: link:../core
-      '@picco-agent/plugin-notifications':
-        specifier: workspace:*
-        version: link:../plugin-notifications
       ws:
         specifier: ^8.21.0
         version: 8.21.1
