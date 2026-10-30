@@ -1,6 +1,6 @@
 {
   "name": "@picco-agent/plugin-notifications",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Picco plugin: notifications with shared delivery tracking and transport adapters.",
   "homepage": "https://github.com/picco-agent/picco/tree/main/packages/plugin-notifications",
   "bugs": {
