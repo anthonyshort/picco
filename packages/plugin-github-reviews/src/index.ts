@@ -19,7 +19,7 @@ const HEARTBEAT_MS = 60_000;
 const MAX_BACKOFF_MS = 60 * 60_000;
 
 /**
- * Poll personal GitHub review requests and dispatch only unreviewed PR heads.
+ * Poll personal GitHub review requests and dispatch unhandled personal review requests.
  */
 export function githubReviews(opts: GithubReviewsOptions): Plugin {
   const { github, prompt, onRunStart, onRunComplete, ...input } = opts;
@@ -204,29 +204,11 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
     }
     const { requestEventId, requestedAt } = inspection;
     store!.setCycle(item.id, requestEventId, requestedAt);
-    if (
-      store!.hasCompleted(
-        reviewer,
-        item.repository,
-        item.number,
-        item.head,
-        requestEventId,
-        requestedAt,
-      )
-    ) {
+    if (store!.hasCompleted(reviewer, item.repository, item.number, requestEventId, requestedAt)) {
       store!.markPreviouslyReviewed(item.id);
       return;
     }
-    if (
-      store!.hasAttempted(
-        reviewer,
-        item.repository,
-        item.number,
-        item.head,
-        requestEventId,
-        requestedAt,
-      )
-    ) {
+    if (store!.hasAttempted(reviewer, item.repository, item.number, requestEventId, requestedAt)) {
       store!.block(item.id, "prior-attempt-needs-reconciliation");
       return;
     }
@@ -296,7 +278,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
     tool({
       name: "github_reviews_poll",
       description:
-        "Poll requested reviews now, subject to configured enablement, API backoff and admission pause. Never bypasses reviewed-head checks.",
+        "Poll requested reviews now, subject to configured enablement, API backoff and admission pause. Never bypasses request-cycle checks.",
       input: z.object({}).strict(),
       async execute() {
         state();

@@ -181,9 +181,7 @@ describe("runReview", () => {
         summary: "Reviewed every changed file",
         output: "All done",
       });
-      expect(state.store.hasCompleted("reviewer", candidate.repository, 42, candidate.head)).toBe(
-        true,
-      );
+      expect(state.store.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
       expect(state.store.status().reservations).toEqual([]);
       expect(state.ctx.sessions.list()).toEqual([]);
       expect(state.ctx.turns[0]?.session).toMatchObject({
@@ -201,9 +199,7 @@ describe("runReview", () => {
     try {
       const result = await runReview(state.options).completion;
       expect(result.status).toBe("blocked");
-      expect(state.store.hasCompleted("reviewer", candidate.repository, 42, candidate.head)).toBe(
-        false,
-      );
+      expect(state.store.hasCompleted("reviewer", candidate.repository, 42)).toBe(false);
       expect(state.store.status().reservations).toMatchObject([
         { runId: state.run.id, uncertain: 1 },
       ]);
@@ -232,9 +228,7 @@ describe("runReview", () => {
     try {
       const result = await runReview(state.options).completion;
       expect(result.status).toBe("blocked");
-      expect(state.store.hasCompleted("reviewer", candidate.repository, 42, candidate.head)).toBe(
-        false,
-      );
+      expect(state.store.hasCompleted("reviewer", candidate.repository, 42)).toBe(false);
     } finally {
       state.cleanup();
     }
@@ -249,9 +243,7 @@ describe("runReview", () => {
     try {
       const result = await runReview(state.options).completion;
       expect(result.status).toBe("blocked");
-      expect(state.store.hasCompleted("reviewer", candidate.repository, 42, candidate.head)).toBe(
-        false,
-      );
+      expect(state.store.hasCompleted("reviewer", candidate.repository, 42)).toBe(false);
     } finally {
       state.cleanup();
     }
@@ -268,9 +260,7 @@ describe("runReview", () => {
         status: "interrupted",
         error: "Worker disconnected after completion",
       });
-      expect(state.store.hasCompleted("reviewer", candidate.repository, 42, candidate.head)).toBe(
-        true,
-      );
+      expect(state.store.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
       expect(state.store.details(state.run.id)).toMatchObject({
         runs: [{ reviewSummary: "Reviewed every changed file" }],
       });
@@ -350,9 +340,7 @@ describe("runReview", () => {
         ],
       });
       expect(state.store.recordNotificationAttempt(state.run.id)).toBe(false);
-      expect(state.store.hasCompleted("reviewer", candidate.repository, 42, candidate.head)).toBe(
-        true,
-      );
+      expect(state.store.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
     } finally {
       state.cleanup();
     }

@@ -53,7 +53,7 @@ The plugin polls once a minute by default and discovers open, non-draft pull req
 
 Candidates from all configured repositories share one queue, ordered by creation time, then repository and pull request number. The plugin checks current head and request state again before starting a session. A queued pull request that closes, becomes a draft or loses its request is no longer admitted.
 
-The database records which commit the assistant reviewed for each personal request cycle. The same commit is not reviewed again unless a strictly newer personal request makes it eligible. A new head is eligible while your personal review is still requested. Normal discovery does not scan GitHub review history or infer a reviewed commit from comments.
+The database records the commit reviewed for each personal request cycle. New commits do not trigger another review while the same request remains outstanding. A strictly newer personal request or re-request permits another review of the current head, including the same commit. Posting a review as a comment may leave the personal request outstanding. That does not start another review. Normal discovery does not scan GitHub review history or infer a completed review from comments.
 
 GraphQL combines repository discovery and returns API budget information. Targeted GraphQL reads confirm the live head, personal request and request-cycle evidence. The request event's opaque node ID identifies the cycle; it is not decoded or treated as a REST numeric identifier. Polls do not overlap, and failures back off rather than being interpreted as an empty queue. Shorter polling intervals increase API use; inspect status before reducing the interval.
 
