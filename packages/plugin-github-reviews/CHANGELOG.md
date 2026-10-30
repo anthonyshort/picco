@@ -1,5 +1,11 @@
 # @picco-agent/plugin-github-reviews
 
+## 0.4.1
+
+### Patch Changes
+
+- c5dfaad: Allow review and feedback dispatchers to restart immediately when the previous owning process on the same host has exited. Keep blocking live processes, other hosts and uncertain process checks, and preserve interrupted work for inspection.
+
 ## 0.4.0
 
 ### Minor Changes
