@@ -336,10 +336,10 @@ describe("createFeedbackStore", () => {
       nextPollAt: "2026-10-28T00:10:00Z",
     });
   });
-  test("takes over an expired dispatcher only after its local process has exited", () => {
+  test.each([0, 300_000])("takes over a dead local dispatcher after %i ms", (elapsed) => {
     const f = fixture();
     expect(f.store.claimDispatcher("one")).toBe(true);
-    f.advance(300_000);
+    f.advance(elapsed);
     const deadProcess = spawnSync(process.execPath, ["-e", ""]);
     expect(deadProcess.status).toBe(0);
     const database = new DatabaseSync(f.filename);
@@ -347,5 +347,19 @@ describe("createFeedbackStore", () => {
     database.close();
     expect(f.open().claimDispatcher("two")).toBe(true);
     expect(() => f.store.pause(false)).toThrow("ownership was lost");
+  });
+
+  test.each([0, 300_000])("refuses a dispatcher on another host after %i ms", (elapsed) => {
+    const f = fixture();
+    expect(f.store.claimDispatcher("one")).toBe(true);
+    f.advance(elapsed);
+    const deadProcess = spawnSync(process.execPath, ["-e", ""]);
+    expect(deadProcess.status).toBe(0);
+    const database = new DatabaseSync(f.filename);
+    database
+      .prepare("UPDATE feedback_dispatcher SET host=?,pid=?")
+      .run("another-host", deadProcess.pid);
+    database.close();
+    expect(f.open().claimDispatcher("two")).toBe(false);
   });
 });

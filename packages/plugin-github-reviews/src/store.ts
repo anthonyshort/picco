@@ -572,7 +572,6 @@ export function createReviewStore(filename: string, now = Date.now) {
         if (previous) {
           const lease = z.object({ owner: z.string(), expiresAt: z.number() }).parse(previous);
           if (lease.owner !== owner) {
-            if (lease.expiresAt > now()) return false;
             const identity = z
               .object({ host: z.string(), pid: z.number().int().positive() })
               .safeParse(previous);

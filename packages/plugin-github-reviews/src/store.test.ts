@@ -629,51 +629,61 @@ describe("createReviewStore", () => {
     }
   });
 
-  test("a lost dispatcher lease cannot be renewed or released by a previous owner", () => {
-    const fixtureState = fixture();
-    try {
-      expect(fixtureState.first.claimDispatcher("first")).toBe(true);
-      expect(fixtureState.second.claimDispatcher("second")).toBe(false);
-      fixtureState.advance(5 * 60_000 + 1);
-      expect(fixtureState.second.claimDispatcher("second")).toBe(false);
-      const stopped = spawnSync(process.execPath, ["-e", ""]);
-      const database = new DatabaseSync(fixtureState.filename);
-      database
-        .prepare("UPDATE poller_state SET data=? WHERE key='dispatcher'")
-        .run(
-          JSON.stringify({ owner: "first", expiresAt: 0, host: os.hostname(), pid: stopped.pid }),
-        );
-      database.close();
-      expect(fixtureState.second.claimDispatcher("second")).toBe(true);
-      expect(fixtureState.first.renewDispatcher("first")).toBe(false);
-      fixtureState.first.releaseDispatcher("first");
-      expect(fixtureState.first.claimDispatcher("first")).toBe(false);
-      fixtureState.second.releaseDispatcher("second");
-      expect(fixtureState.first.claimDispatcher("first")).toBe(true);
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
-
-  test("expired dispatcher leases with unknown host or process identity stay blocked", () => {
-    const fixtureState = fixture();
-    try {
-      fixtureState.first.claimDispatcher("first");
-      const database = new DatabaseSync(fixtureState.filename);
-      for (const identity of [
-        { host: "another-host", pid: process.pid },
-        { host: os.hostname() },
-      ]) {
-        database
-          .prepare("UPDATE poller_state SET data=? WHERE key='dispatcher'")
-          .run(JSON.stringify({ owner: "first", expiresAt: 0, ...identity }));
+  test.each([0, 5 * 60_000 + 1])(
+    "reclaims a dead local dispatcher after %i ms without allowing the previous owner back in",
+    (elapsed) => {
+      const fixtureState = fixture();
+      try {
+        expect(fixtureState.first.claimDispatcher("first")).toBe(true);
         expect(fixtureState.second.claimDispatcher("second")).toBe(false);
+        fixtureState.advance(elapsed);
+        expect(fixtureState.second.claimDispatcher("second")).toBe(false);
+        const stopped = spawnSync(process.execPath, ["-e", ""]);
+        expect(stopped.status).toBe(0);
+        const database = new DatabaseSync(fixtureState.filename);
+        database.prepare("UPDATE poller_state SET data=? WHERE key='dispatcher'").run(
+          JSON.stringify({
+            owner: "first",
+            expiresAt: Date.parse("2026-10-26T00:05:00Z"),
+            host: os.hostname(),
+            pid: stopped.pid,
+          }),
+        );
+        database.close();
+        expect(fixtureState.second.claimDispatcher("second")).toBe(true);
+        expect(fixtureState.first.renewDispatcher("first")).toBe(false);
+        fixtureState.first.releaseDispatcher("first");
+        expect(fixtureState.first.claimDispatcher("first")).toBe(false);
+        fixtureState.second.releaseDispatcher("second");
+        expect(fixtureState.first.claimDispatcher("first")).toBe(true);
+      } finally {
+        fixtureState.cleanup();
       }
-      database.close();
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
+    },
+  );
+
+  test.each([0, Date.parse("2026-10-26T00:05:00Z")])(
+    "dispatcher leases with unknown host or process identity stay blocked (expiry %i)",
+    (expiresAt) => {
+      const fixtureState = fixture();
+      try {
+        fixtureState.first.claimDispatcher("first");
+        const database = new DatabaseSync(fixtureState.filename);
+        for (const identity of [
+          { host: "another-host", pid: process.pid },
+          { host: os.hostname() },
+        ]) {
+          database
+            .prepare("UPDATE poller_state SET data=? WHERE key='dispatcher'")
+            .run(JSON.stringify({ owner: "first", expiresAt, ...identity }));
+          expect(fixtureState.second.claimDispatcher("second")).toBe(false);
+        }
+        database.close();
+      } finally {
+        fixtureState.cleanup();
+      }
+    },
+  );
 
   test("notification attempts are durable and an uncertain delivery is never implicitly repeated", () => {
     const fixtureState = fixture();
