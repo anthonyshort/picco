@@ -530,6 +530,49 @@ describe("createAgent", () => {
       );
     });
 
+    test("describes transformed tool inputs while preserving runtime normalisation", async () => {
+      const normalise = tool({
+        name: "normalise_repository",
+        description: "Normalise a repository name",
+        input: z.object({
+          repository: z
+            .string()
+            .min(1)
+            .transform((value) => value.toLowerCase()),
+        }),
+        execute: ({ repository }) => repository,
+      });
+      const gate = Promise.withResolvers<string>();
+      const { agent, runtime } = agentWith({
+        tools: [normalise],
+        runtime: new FakeRuntime({ reply: () => gate.promise }),
+      });
+      await agent.start({ handleSignals: false });
+
+      const turn = agent.sessions.run("chat", "normalise the repository");
+      try {
+        await Promise.race([turn, vi.waitFor(() => expect(runtime.spawns).toHaveLength(1))]);
+        const spawn = runtime.spawns[0]!;
+        expect(
+          spawn.spec.tools?.find(({ name }) => name === normalise.name)?.inputSchema,
+        ).toMatchObject({
+          type: "object",
+          properties: { repository: { type: "string", minLength: 1 } },
+        });
+        const response = await callBridge(bridgeOf(spawn), normalise.name, {
+          repository: "Owner/App",
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          content: [{ type: "text", text: "owner/app" }],
+          isError: false,
+        });
+      } finally {
+        gate.resolve("done");
+      }
+      await turn;
+    });
+
     test("the default reload tool is available without configured tools", async () => {
       const { agent, runtime } = agentWith({});
       await agent.start({ handleSignals: false });
