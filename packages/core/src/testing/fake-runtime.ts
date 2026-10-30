@@ -10,8 +10,12 @@ export interface FakeRuntimeProcessOptions {
    */
   reply?: (prompt: string) => string | Promise<string>;
   /**
-   * Raw RPC events emitted between the prompt ack and agent_settled (e.g. tool_execution_start/end,
-   * message_update).
+   * Override final-text retrieval to exercise continuations and deadlines during the RPC request.
+   */
+  lastAssistantText?: () => string | Promise<string>;
+  /**
+   * Raw RPC events emitted before settlement. Handled command events precede their response,
+   * modelling extension handlers that start their own agent interaction.
    */
   eventsFor?: (prompt: string) => JsonObject[];
   /**
@@ -182,6 +186,11 @@ export class FakeRuntimeProcess implements RuntimeProcess {
         const message = String(msg.message ?? "");
         this.prompts.push(message);
         this.activePrompt = true;
+        if (this.behavior.handlePrompt) {
+          for (const event of this.behavior.eventsFor?.(message) ?? []) {
+            this.push(event);
+          }
+        }
         this.push({
           type: "response",
           command: "prompt",
@@ -221,7 +230,7 @@ export class FakeRuntimeProcess implements RuntimeProcess {
           command: "get_last_assistant_text",
           id,
           success: true,
-          data: { text: this.lastReply },
+          data: { text: await (this.behavior.lastAssistantText?.() ?? this.lastReply) },
         });
         return;
       case "get_session_stats":

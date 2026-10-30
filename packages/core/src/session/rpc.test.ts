@@ -1,9 +1,300 @@
-import { describe, expect, test } from "vitest";
+import { ExecutionWork, type ExecutionHold } from "./work.js";
+import { setImmediate } from "node:timers/promises";
+import { describe, expect, test, vi, onTestFinished } from "vitest";
 import { FakeRuntimeProcess } from "../testing/index.js";
 import { RpcSession } from "./rpc.js";
 import type { TurnEvent } from "./turn.js";
 
 describe("RpcSession", () => {
+  describe("execution holds", () => {
+    test("handled responses do not settle an agent started by the command", async () => {
+      let hold!: ExecutionHold;
+      const work = new ExecutionWork(
+        { id: "command", session: { source: "test", key: "k" } },
+        new AbortController().signal,
+        [
+          (ctx) => {
+            hold = ctx.hold({ name: "command-work" });
+          },
+        ],
+      );
+      const proc = new FakeRuntimeProcess({
+        handlePrompt: true,
+        eventsFor: () => [{ type: "agent_start" }],
+      });
+      const session = new RpcSession("k", proc);
+      onTestFinished(async () => {
+        work.close();
+        await session.kill();
+      });
+      let finished = false;
+      const result = session.prompt("/command", { work, timeoutMs: 1000 }).then((text) => {
+        finished = true;
+        return text;
+      });
+      await vi.waitFor(() => expect(proc.prompts).toEqual(["/command"]));
+      hold.complete();
+      await setImmediate();
+      expect(finished).toBe(false);
+      proc.push({ type: "agent_settled" });
+      expect(await result).toBe("");
+      expect(proc.requests.map((request) => request.type)).toEqual(["prompt"]);
+    });
+
+    test.each(["complete", "fail"])("handled commands honour a hold until %s", async (outcome) => {
+      let hold!: ExecutionHold;
+      const events: string[] = [];
+      const work = new ExecutionWork(
+        { id: "command", session: { source: "test", key: "k" } },
+        new AbortController().signal,
+        [
+          (ctx) => {
+            hold = ctx.hold({ name: "host-work" });
+            return {
+              onEvent: (event) => {
+                events.push(event.type);
+              },
+            };
+          },
+        ],
+      );
+      const proc = new FakeRuntimeProcess({ handlePrompt: true });
+      const session = new RpcSession("k", proc);
+      onTestFinished(async () => {
+        work.close();
+        await session.kill();
+      });
+      let finished = false;
+      const result = session.prompt("/command", { work, timeoutMs: 1000 }).then(
+        (text) => {
+          finished = true;
+          return { text };
+        },
+        (error: unknown) => {
+          finished = true;
+          return { error };
+        },
+      );
+      await vi.waitFor(() => expect(proc.prompts).toEqual(["/command"]));
+      expect(finished).toBe(false);
+      const error = new Error("host work failed");
+      if (outcome === "complete") {
+        hold.complete();
+        expect(await result).toEqual({ text: "" });
+      } else {
+        hold.fail(error);
+        expect(await result).toEqual({ error });
+      }
+      expect(proc.requests.map((request) => request.type)).toEqual(["prompt"]);
+      expect(events).toEqual([]);
+    });
+
+    test("keeps the deadline for handled commands with unfinished work", async () => {
+      const work = new ExecutionWork(
+        { id: "command", session: { source: "test", key: "k" } },
+        new AbortController().signal,
+        [
+          (ctx) => {
+            ctx.hold({ name: "unfinished" });
+          },
+        ],
+      );
+      const session = new RpcSession("k", new FakeRuntimeProcess({ handlePrompt: true }));
+      onTestFinished(async () => {
+        work.close();
+        await session.kill();
+      });
+      await expect(session.prompt("/command", { work, timeoutMs: 20 })).rejects.toMatchObject({
+        code: "timeout",
+      });
+    });
+
+    test.each(["error", "aborted"])(
+      "rejects terminal %s without waiting for a hold",
+      async (stopReason) => {
+        const work = new ExecutionWork(
+          { id: "failure", session: { source: "test", key: "k" } },
+          new AbortController().signal,
+          [
+            (ctx) => {
+              ctx.hold({ name: "unfinished" });
+            },
+          ],
+        );
+        const proc = new FakeRuntimeProcess({
+          eventsFor: () => [{ type: "message_end", message: { role: "assistant", stopReason } }],
+        });
+        const session = new RpcSession("k", proc);
+        onTestFinished(async () => {
+          work.close();
+          await session.kill();
+        });
+        await expect(session.prompt("hello", { work, timeoutMs: 1000 })).rejects.toThrow(
+          stopReason === "error" ? "provider request failed" : "aborted",
+        );
+        expect(proc.requests.map((request) => request.type)).toEqual(["prompt"]);
+      },
+    );
+
+    test("allows provider recovery before settlement while work remains held", async () => {
+      let hold!: ExecutionHold;
+      const settled = Promise.withResolvers<void>();
+      const work = new ExecutionWork(
+        { id: "recovery", session: { source: "test", key: "k" } },
+        new AbortController().signal,
+        [
+          (ctx) => {
+            hold = ctx.hold({ name: "host-work" });
+            return {
+              onEvent(event) {
+                if (event.type === "agent_settled") {
+                  settled.resolve();
+                }
+              },
+            };
+          },
+        ],
+      );
+      const proc = new FakeRuntimeProcess({
+        eventsFor: () => [
+          { type: "message_end", message: { role: "assistant", stopReason: "error" } },
+          { type: "message_end", message: { role: "assistant", stopReason: "stop" } },
+        ],
+      });
+      const session = new RpcSession("k", proc);
+      onTestFinished(async () => {
+        work.close();
+        await session.kill();
+      });
+      const result = session.prompt("hello", { work, timeoutMs: 1000 });
+      await settled.promise;
+      expect(proc.requests.map((request) => request.type)).toEqual(["prompt"]);
+      hold.complete();
+      expect(await result).toBe("echo: hello");
+    });
+
+    test("keeps the prompt open through a background completion and continuation", async () => {
+      let hold!: ExecutionHold;
+      const firstSettlement = Promise.withResolvers<void>();
+      const work = new ExecutionWork(
+        { id: "one", session: { source: "test", key: "k" } },
+        new AbortController().signal,
+        [
+          (ctx) => {
+            hold = ctx.hold({ name: "workflow" });
+            return {
+              onEvent(event) {
+                if (event.type === "agent_settled") firstSettlement.resolve();
+                if (event.type === "custom_message") hold.complete();
+              },
+            };
+          },
+        ],
+      );
+      const proc = new FakeRuntimeProcess({ reply: () => "final reply" });
+      const session = new RpcSession("k", proc);
+      const result = session.prompt("go", { work, timeoutMs: 1000 });
+      await firstSettlement.promise;
+      expect(proc.requests.map((request) => request.type)).toEqual(["prompt"]);
+      proc.push({ type: "agent_start" });
+      // The task can finish before its parent continuation settles.
+      proc.push({
+        type: "message_end",
+        message: { role: "custom", customType: "task-completed", details: {} },
+      });
+      proc.push({ type: "agent_settled" });
+      expect(await result).toBe("final reply");
+      work.close();
+      await session.kill();
+    });
+
+    test("retrieves final text again when a continuation settles during retrieval", async () => {
+      const retrieving = Promise.withResolvers<void>();
+      const initialText = Promise.withResolvers<string>();
+      let reads = 0;
+      const proc = new FakeRuntimeProcess({
+        lastAssistantText: () => {
+          if (reads++ === 0) {
+            retrieving.resolve();
+            return initialText.promise;
+          }
+          return "final continuation";
+        },
+      });
+      const work = new ExecutionWork(
+        { id: "one", session: { source: "test", key: "k" } },
+        new AbortController().signal,
+        [],
+      );
+      const session = new RpcSession("k", proc);
+      const result = session.prompt("go", { work, timeoutMs: 1000 });
+      await retrieving.promise;
+      proc.push({ type: "agent_start" });
+      proc.push({ type: "agent_settled" });
+      initialText.resolve("stale reply");
+      expect(await result).toBe("final continuation");
+      expect(reads).toBe(2);
+      work.close();
+      await session.kill();
+    });
+
+    test("retains the deadline while retrieving final text", async () => {
+      const work = new ExecutionWork(
+        { id: "one", session: { source: "test", key: "k" } },
+        new AbortController().signal,
+        [],
+      );
+      const proc = new FakeRuntimeProcess({
+        lastAssistantText: () => {
+          proc.push({ type: "agent_start" });
+          proc.push({ type: "agent_settled" });
+          return new Promise(() => {});
+        },
+      });
+      const session = new RpcSession("k", proc);
+      await expect(session.prompt("go", { work, timeoutMs: 20 })).rejects.toThrow("timed out");
+      work.close();
+      await session.kill();
+    });
+
+    test("keeps the original deadline while waiting for background work", async () => {
+      const work = new ExecutionWork(
+        { id: "one", session: { source: "test", key: "k" } },
+        new AbortController().signal,
+        [
+          (ctx) => {
+            ctx.hold({ name: "never" });
+          },
+        ],
+      );
+      const proc = new FakeRuntimeProcess();
+      const session = new RpcSession("k", proc);
+      await expect(session.prompt("go", { work, timeoutMs: 20 })).rejects.toThrow("timed out");
+      work.close();
+      await session.kill();
+    });
+
+    test("fails when an observer throws", async () => {
+      const work = new ExecutionWork(
+        { id: "one", session: { source: "test", key: "k" } },
+        new AbortController().signal,
+        [
+          () => ({
+            onEvent() {
+              throw new Error("observer failed");
+            },
+          }),
+        ],
+      );
+      const session = new RpcSession("k", new FakeRuntimeProcess());
+      await expect(session.prompt("go", { work, timeoutMs: 1000 })).rejects.toThrow(
+        "observer failed",
+      );
+      work.close();
+      await session.kill();
+    });
+  });
+
   test("prompt resolves with the last assistant text", async () => {
     const proc = new FakeRuntimeProcess({ reply: (p) => `re: ${p}` });
     const session = new RpcSession("k", proc);

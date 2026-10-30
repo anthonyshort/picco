@@ -1,12 +1,14 @@
+import { ToolBridge } from "../tools/bridge.js";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi, onTestFinished } from "vitest";
 import { FakeRuntime } from "../testing/index.js";
 import { createAgentPaths } from "../utils/agent-paths.js";
 import { parseDuration, SessionManager, type SessionManagerOptions } from "./manager.js";
 import type { TurnEvent } from "./turn.js";
 import type { PiOptions, SessionIdentity } from "../types.js";
+import type { ExecutionHold } from "./work.js";
 
 let workspace: string;
 let managers: SessionManager[];
@@ -53,6 +55,179 @@ describe("parseDuration", () => {
 });
 
 describe("SessionManager", () => {
+  describe("execution holds", () => {
+    test("handled commands keep authority and queue ownership until their hold completes", async () => {
+      let hold!: ExecutionHold;
+      let signal!: AbortSignal;
+      let preparations = 0;
+      const finalised: string[] = [];
+      const runtime = new FakeRuntime({ handlePrompt: true });
+      const mgr = manager(runtime, {
+        observers: [
+          (ctx) => {
+            preparations++;
+            if (preparations === 1) {
+              hold = ctx.hold({ name: "command-work" });
+              signal = ctx.signal;
+            }
+          },
+        ],
+        finalisers: [
+          {
+            name: "record",
+            run: ({ execution }) => {
+              finalised.push(execution.id);
+            },
+          },
+        ],
+      });
+      const first = mgr.namespace("test").run("chat", "/command");
+      await vi.waitFor(() => expect(runtime.spawns[0]?.process.prompts).toEqual(["/command"]));
+      const second = mgr.namespace("test").run("chat", "/next");
+      expect(signal.aborted).toBe(false);
+      expect(mgr.currentExecution({ source: "test", key: "chat" })?.execution.id).toBe(
+        first.execution!.id,
+      );
+      expect(preparations).toBe(1);
+      expect(finalised).toEqual([]);
+      hold.complete();
+      expect((await first).text).toBe("");
+      expect((await second).text).toBe("");
+      expect(signal.aborted).toBe(true);
+      expect(finalised).toEqual([first.execution!.id, second.execution!.id]);
+      expect(runtime.spawns[0]!.process.prompts).toEqual(["/command", "/next"]);
+    });
+
+    test.each(["error", "aborted"])(
+      "terminal %s cancels held work and preserves the outcome",
+      async (stopReason) => {
+        let signal!: AbortSignal;
+        const outcomes: string[] = [];
+        const runtime = new FakeRuntime({
+          eventsFor: () => [{ type: "message_end", message: { role: "assistant", stopReason } }],
+        });
+        const mgr = manager(runtime, {
+          observers: [
+            (ctx) => {
+              signal = ctx.signal;
+              ctx.hold({ name: "unfinished" });
+            },
+          ],
+          finalisers: [
+            {
+              name: "record",
+              run: ({ outcome }) => {
+                outcomes.push(outcome.status);
+              },
+            },
+          ],
+        });
+        await expect(
+          mgr.namespace("test").run("chat", "hello", { timeoutMs: 1000 }),
+        ).rejects.toThrow(stopReason === "error" ? "provider request failed" : "aborted");
+        expect(signal.aborted).toBe(true);
+        expect(runtime.spawns[0]!.process.killed).toBe(true);
+        expect(outcomes).toEqual([stopReason === "error" ? "error" : "cancelled"]);
+        expect(mgr.currentExecution({ source: "test", key: "chat" })).toBeUndefined();
+      },
+    );
+
+    test("retires detached workers before admitting another sender", async () => {
+      const settled = Promise.withResolvers<void>();
+      const secondStarted = Promise.withResolvers<void>();
+      let observed = 0;
+      let complete!: () => void;
+      const runtime = new FakeRuntime();
+      const revocations: string[] = [];
+      const tokens: string[] = [];
+      const bridge = new ToolBridge({ tools: new Map() });
+      await bridge.start();
+      onTestFinished(() => bridge.stop());
+      const mgr = manager(runtime, {
+        setupSession: ({ ref }) => {
+          const token = bridge.issueToken(ref);
+          tokens.push(token);
+          return { pi: {}, bridgeToken: token };
+        },
+        revokeSession: (ref) => {
+          revocations.push(ref.key);
+          bridge.releaseSession(ref);
+        },
+        observers: [
+          (ctx) => {
+            if (ctx.execution.session.key !== "review") return;
+            if (++observed === 2) secondStarted.resolve();
+            const hold = ctx.hold({ name: "background", retireWorker: true });
+            complete = () => hold.complete();
+            return {
+              onEvent(event) {
+                if (event.type === "agent_settled") settled.resolve();
+              },
+            };
+          },
+        ],
+      });
+      const first = mgr
+        .namespace("test")
+        .run("review", "first", { user: { source: "test", id: "first-user" } });
+      await settled.promise;
+      const second = mgr
+        .namespace("test")
+        .run("review", "second", { user: { source: "test", id: "second-user" } });
+      expect(mgr.currentUser("test", "review")).toEqual({ source: "test", id: "first-user" });
+      complete();
+      await first;
+      expect(runtime.spawns[0]!.process.killed).toBe(true);
+      expect(revocations).toContain("review");
+      // The second prompt registers a distinct hold and worker after the first is retired.
+      await secondStarted.promise;
+      const staleCall = await fetch(bridge.callUrl(), {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokens[0]}` },
+        body: JSON.stringify({ tool: "stale", args: {} }),
+      });
+      expect(staleCall.status).toBe(401);
+      expect(mgr.currentUser("test", "review")).toEqual({ source: "test", id: "second-user" });
+      complete();
+      await second;
+      expect(runtime.spawns).toHaveLength(2);
+      expect(first.execution!.id).not.toBe(second.execution!.id);
+    });
+
+    test.each(["abort", "reset"])(
+      "cancels held work on %s and rejects late registration",
+      async (operation) => {
+        const settled = Promise.withResolvers<void>();
+        let register!: () => void;
+        const runtime = new FakeRuntime();
+        const mgr = manager(runtime, {
+          observers: [
+            (ctx) => {
+              ctx.hold({ name: "background" });
+              register = () => {
+                ctx.hold({ name: "late" });
+              };
+              return {
+                onEvent(event) {
+                  if (event.type === "agent_settled") settled.resolve();
+                },
+              };
+            },
+          ],
+        });
+        const turn = mgr.namespace("test").run("review", "first");
+        const rejected = expect(turn).rejects.toThrow();
+        await settled.promise;
+        if (operation === "reset") await mgr.reset("test", "review");
+        else turn.abort("cancel review");
+        await rejected;
+        expect(runtime.spawns[0]!.process.killed).toBe(true);
+        expect(mgr.currentExecution({ source: "test", key: "review" })).toBeUndefined();
+        expect(register).toThrow("no longer running");
+      },
+    );
+  });
+
   test("lazily spawns the session worker in the session cwd", async () => {
     const runtime = new FakeRuntime();
     const sessions = manager(runtime).namespace("telegram");
@@ -258,7 +433,9 @@ describe("SessionManager", () => {
     const runtime = new FakeRuntime((i) => (i === 0 ? { neverFinish: true } : {}));
     const sessions = manager(runtime).namespace("telegram");
 
-    await expect(sessions.run("42", "slow", { timeoutMs: 30 })).rejects.toThrow("Prompt timed out");
+    await expect(sessions.run("42", "slow", { timeoutMs: 1000 })).rejects.toThrow(
+      "Prompt timed out",
+    );
     const result = await sessions.run("42", "next");
 
     expect(result.text).toBe("echo: next");

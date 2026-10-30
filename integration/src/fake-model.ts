@@ -36,7 +36,7 @@ export interface ChatRequest {
 /**
  * Script callback: produce actions from the current conversation state.
  */
-export type ModelScript = (params: ChatRequest) => ModelAction[];
+export type ModelScript = (params: ChatRequest) => ModelAction[] | Promise<ModelAction[]>;
 
 /**
  * Handle on the fake model server.
@@ -61,17 +61,21 @@ export async function startFakeModel(script: ModelScript): Promise<FakeModelServ
   const server: Server = createServer((req, res) => {
     const body: Buffer[] = [];
     req.on("data", (chunk: Buffer) => body.push(chunk));
-    req.on("end", () => {
-      const params = JSON.parse(Buffer.concat(body).toString()) as ChatRequest;
-      requests.push({ params, authorization: req.headers.authorization });
-      const actions = current(params);
-      const streamed = actions.filter((action): action is StreamedAction => !("hang" in action));
-      res.writeHead(200, { "content-type": "text/event-stream" });
-      if (streamed.length < actions.length) {
-        res.write(`data: ${JSON.stringify(ROLE_PRELUDE)}\n\n`);
-        return;
+    req.on("end", async () => {
+      try {
+        const params = JSON.parse(Buffer.concat(body).toString()) as ChatRequest;
+        requests.push({ params, authorization: req.headers.authorization });
+        const actions = await current(params);
+        const streamed = actions.filter((action): action is StreamedAction => !("hang" in action));
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        if (streamed.length < actions.length) {
+          res.write(`data: ${JSON.stringify(ROLE_PRELUDE)}\n\n`);
+          return;
+        }
+        res.end(sseBody(streamed));
+      } catch (err) {
+        res.writeHead(500).end(err instanceof Error ? err.message : String(err));
       }
-      res.end(sseBody(streamed));
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
