@@ -53,7 +53,10 @@ export type ExecutionObserverFactory = (ctx: PrepareExecutionContext) => Executi
 export class ExecutionWork {
   private readonly holds = new Set<object>();
   private readonly observers: ExecutionObserver[] = [];
-  private settled = false;
+  /**
+   * Unknown until a lifecycle event or handled command response establishes worker state.
+   */
+  private workerSettled: boolean | undefined;
   private active = true;
   private failure?: Error;
   retireWorker = false;
@@ -70,7 +73,9 @@ export class ExecutionWork {
       execution,
       signal,
       hold: ({ name, retireWorker }) => {
-        if (!this.active || signal.aborted) throw new Error("Execution is no longer running");
+        if (!this.active || signal.aborted) {
+          throw new Error("Execution is no longer running");
+        }
         const token = {};
         this.holds.add(token);
         this.retireWorker ||= Boolean(retireWorker);
@@ -82,7 +87,9 @@ export class ExecutionWork {
         this.changed();
         return {
           complete: () => {
-            if (!this.active || !this.holds.delete(token)) return;
+            if (!this.active || !this.holds.delete(token)) {
+              return;
+            }
             logger?.log("execution hold completed", {
               executionId: execution.id,
               name,
@@ -91,7 +98,9 @@ export class ExecutionWork {
             this.changed();
           },
           fail: (error) => {
-            if (!this.active || !this.holds.delete(token)) return;
+            if (!this.active || !this.holds.delete(token)) {
+              return;
+            }
             logger?.log("execution hold failed", {
               executionId: execution.id,
               name,
@@ -105,7 +114,9 @@ export class ExecutionWork {
     };
     for (const factory of factories) {
       const observer = factory(ctx);
-      if (observer) this.observers.push(observer);
+      if (observer) {
+        this.observers.push(observer);
+      }
     }
   }
 
@@ -113,18 +124,39 @@ export class ExecutionWork {
    * True when every hold is released and the worker is settled.
    */
   ready(): boolean {
-    if (this.failure) throw this.failure;
-    return this.settled && this.holds.size === 0;
+    if (this.failure) {
+      throw this.failure;
+    }
+    return this.workerSettled === true && this.holds.size === 0;
+  }
+
+  /**
+   * Mark an event-free command idle without overriding agent activity started by its handler.
+   */
+  settleWorker(): void {
+    if (!this.active || this.workerSettled !== undefined) {
+      return;
+    }
+    this.workerSettled = true;
+    this.changed();
   }
 
   /**
    * Process observers before allowing this event to settle the execution.
    */
   emit(event: WorkerEvent): void {
-    if (!this.active) return;
-    if (event.type === "agent_start") this.settled = false;
-    if (event.type === "agent_settled") this.settled = true;
-    for (const observer of this.observers) observer.onEvent(event);
+    if (!this.active) {
+      return;
+    }
+    if (event.type === "agent_start") {
+      this.workerSettled = false;
+    }
+    if (event.type === "agent_settled") {
+      this.workerSettled = true;
+    }
+    for (const observer of this.observers) {
+      observer.onEvent(event);
+    }
     this.changed();
   }
 

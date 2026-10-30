@@ -14,8 +14,8 @@ export interface FakeRuntimeProcessOptions {
    */
   lastAssistantText?: () => string | Promise<string>;
   /**
-   * Raw RPC events emitted between the prompt ack and agent_settled (e.g. tool_execution_start/end,
-   * message_update).
+   * Raw RPC events emitted before settlement. Handled command events precede their response,
+   * modelling extension handlers that start their own agent interaction.
    */
   eventsFor?: (prompt: string) => JsonObject[];
   /**
@@ -186,6 +186,11 @@ export class FakeRuntimeProcess implements RuntimeProcess {
         const message = String(msg.message ?? "");
         this.prompts.push(message);
         this.activePrompt = true;
+        if (this.behavior.handlePrompt) {
+          for (const event of this.behavior.eventsFor?.(message) ?? []) {
+            this.push(event);
+          }
+        }
         this.push({
           type: "response",
           command: "prompt",

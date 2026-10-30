@@ -8,6 +8,7 @@ import { createAgentPaths } from "../utils/agent-paths.js";
 import { parseDuration, SessionManager, type SessionManagerOptions } from "./manager.js";
 import type { TurnEvent } from "./turn.js";
 import type { PiOptions, SessionIdentity } from "../types.js";
+import type { ExecutionHold } from "./work.js";
 
 let workspace: string;
 let managers: SessionManager[];
@@ -55,6 +56,82 @@ describe("parseDuration", () => {
 
 describe("SessionManager", () => {
   describe("execution holds", () => {
+    test("handled commands keep authority and queue ownership until their hold completes", async () => {
+      let hold!: ExecutionHold;
+      let signal!: AbortSignal;
+      let preparations = 0;
+      const finalised: string[] = [];
+      const runtime = new FakeRuntime({ handlePrompt: true });
+      const mgr = manager(runtime, {
+        observers: [
+          (ctx) => {
+            preparations++;
+            if (preparations === 1) {
+              hold = ctx.hold({ name: "command-work" });
+              signal = ctx.signal;
+            }
+          },
+        ],
+        finalisers: [
+          {
+            name: "record",
+            run: ({ execution }) => {
+              finalised.push(execution.id);
+            },
+          },
+        ],
+      });
+      const first = mgr.namespace("test").run("chat", "/command");
+      await vi.waitFor(() => expect(runtime.spawns[0]?.process.prompts).toEqual(["/command"]));
+      const second = mgr.namespace("test").run("chat", "/next");
+      expect(signal.aborted).toBe(false);
+      expect(mgr.currentExecution({ source: "test", key: "chat" })?.execution.id).toBe(
+        first.execution!.id,
+      );
+      expect(preparations).toBe(1);
+      expect(finalised).toEqual([]);
+      hold.complete();
+      expect((await first).text).toBe("");
+      expect((await second).text).toBe("");
+      expect(signal.aborted).toBe(true);
+      expect(finalised).toEqual([first.execution!.id, second.execution!.id]);
+      expect(runtime.spawns[0]!.process.prompts).toEqual(["/command", "/next"]);
+    });
+
+    test.each(["error", "aborted"])(
+      "terminal %s cancels held work and preserves the outcome",
+      async (stopReason) => {
+        let signal!: AbortSignal;
+        const outcomes: string[] = [];
+        const runtime = new FakeRuntime({
+          eventsFor: () => [{ type: "message_end", message: { role: "assistant", stopReason } }],
+        });
+        const mgr = manager(runtime, {
+          observers: [
+            (ctx) => {
+              signal = ctx.signal;
+              ctx.hold({ name: "unfinished" });
+            },
+          ],
+          finalisers: [
+            {
+              name: "record",
+              run: ({ outcome }) => {
+                outcomes.push(outcome.status);
+              },
+            },
+          ],
+        });
+        await expect(
+          mgr.namespace("test").run("chat", "hello", { timeoutMs: 1000 }),
+        ).rejects.toThrow(stopReason === "error" ? "provider request failed" : "aborted");
+        expect(signal.aborted).toBe(true);
+        expect(runtime.spawns[0]!.process.killed).toBe(true);
+        expect(outcomes).toEqual([stopReason === "error" ? "error" : "cancelled"]);
+        expect(mgr.currentExecution({ source: "test", key: "chat" })).toBeUndefined();
+      },
+    );
+
     test("retires detached workers before admitting another sender", async () => {
       const settled = Promise.withResolvers<void>();
       const secondStarted = Promise.withResolvers<void>();
@@ -356,7 +433,9 @@ describe("SessionManager", () => {
     const runtime = new FakeRuntime((i) => (i === 0 ? { neverFinish: true } : {}));
     const sessions = manager(runtime).namespace("telegram");
 
-    await expect(sessions.run("42", "slow", { timeoutMs: 30 })).rejects.toThrow("Prompt timed out");
+    await expect(sessions.run("42", "slow", { timeoutMs: 1000 })).rejects.toThrow(
+      "Prompt timed out",
+    );
     const result = await sessions.run("42", "next");
 
     expect(result.text).toBe("echo: next");

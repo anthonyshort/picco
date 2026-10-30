@@ -85,7 +85,7 @@ export class RpcSession {
   private promptFailure: Error | undefined;
   private reloadFailure: Error | undefined;
   private reloading = false;
-  private agentSettled: { resolve: () => void; reject: (err: Error) => void } | null = null;
+  private executionReady: { resolve: () => void; reject: (err: Error) => void } | null = null;
   private onEvent: ((event: TurnEvent) => void) | null = null;
   private work?: ExecutionWork;
   private rejectPrompt?: (err: Error) => void;
@@ -150,18 +150,25 @@ export class RpcSession {
       const wait = () => {
         const pending = Promise.withResolvers<void>();
         pending.promise.catch(() => {});
-        this.agentSettled = pending;
+        this.executionReady = pending;
         return pending.promise;
       };
-      let done = wait();
-      if (this.work) this.work.onChange = () => this.checkSettlement();
+      let ready = wait();
+      if (this.work) {
+        this.work.onChange = () => this.checkReadiness();
+      }
       const response = await Promise.race([
         this.request({ type: "prompt", message: text }, opts.timeoutMs),
         failure.promise,
       ]);
       switch (response.data.disposition) {
         case "handled":
-          return "";
+          if (this.work) {
+            this.work.settleWorker();
+          } else {
+            this.executionReady?.resolve();
+          }
+          break;
         case "started":
         case "queued":
           break;
@@ -169,8 +176,18 @@ export class RpcSession {
           throw new Error(`Unknown prompt disposition: ${response.data.disposition}`);
       }
       while (true) {
-        await Promise.race([done, failure.promise]);
-        if (this.promptFailure) throw this.promptFailure;
+        await Promise.race([ready, failure.promise]);
+        if (this.promptFailure) {
+          throw this.promptFailure;
+        }
+        if (response.data.disposition === "handled") {
+          if (!this.work || this.work.ready()) {
+            return "";
+          }
+          ready = wait();
+          this.checkReadiness();
+          continue;
+        }
         const version = this.work?.version;
         const resp = await Promise.race([
           this.request({ type: "get_last_assistant_text" }),
@@ -179,15 +196,19 @@ export class RpcSession {
         if (!this.work || (this.work.ready() && version === this.work.version)) {
           return resp.data.text || "(no text response)";
         }
-        done = wait();
-        this.checkSettlement();
+        ready = wait();
+        this.checkReadiness();
       }
     } finally {
-      if (deadline) clearTimeout(deadline);
-      this.agentSettled = null;
+      if (deadline) {
+        clearTimeout(deadline);
+      }
+      this.executionReady = null;
       this.promptInFlight = false;
       this.onEvent = null;
-      if (this.work) this.work.onChange = undefined;
+      if (this.work) {
+        this.work.onChange = undefined;
+      }
       this.work = undefined;
       this.rejectPrompt = undefined;
     }
@@ -307,18 +328,22 @@ export class RpcSession {
   }
 
   /**
-   * Dispatch one stdout message: responses, agent_settled, live progress events.
+   * Wake the prompt when execution work is ready, or reject a failed hold.
    */
-  private checkSettlement(): void {
+  private checkReadiness(): void {
     try {
-      if (this.work?.ready()) this.agentSettled?.resolve();
+      if (this.work?.ready()) {
+        this.executionReady?.resolve();
+      }
     } catch (err) {
       this.rejectPrompt?.(err instanceof Error ? err : new Error(String(err)));
     }
   }
 
   private observeWorker(msg: JsonObject): void {
-    if (!this.work) return;
+    if (!this.work) {
+      return;
+    }
     if (msg.type === "agent_start" || msg.type === "agent_settled") {
       this.work.emit({ type: msg.type });
     } else if (
@@ -348,15 +373,19 @@ export class RpcSession {
       const custom = z
         .object({ role: z.literal("custom"), customType: z.string(), details: z.unknown() })
         .safeParse(msg.message);
-      if (custom.success)
+      if (custom.success) {
         this.work.emit({
           type: "custom_message",
           customType: custom.data.customType,
           details: custom.data.details,
         });
+      }
     }
   }
 
+  /**
+   * Dispatch one stdout message: responses, agent_settled, live progress events.
+   */
   private handleMessage(msg: JsonObject): void {
     try {
       this.observeWorker(msg);
@@ -402,7 +431,11 @@ export class RpcSession {
 
     // agent_settled signals a running prompt has finished
     if (msg.type === "agent_settled") {
-      if (!this.work) this.agentSettled?.resolve();
+      if (this.promptFailure) {
+        this.rejectPrompt?.(this.promptFailure);
+      } else if (!this.work) {
+        this.executionReady?.resolve();
+      }
       return;
     }
 
@@ -519,7 +552,7 @@ export class RpcSession {
     this.pending.clear();
 
     this.rejectPrompt?.(err);
-    this.agentSettled?.reject(err);
-    this.agentSettled = null;
+    this.executionReady?.reject(err);
+    this.executionReady = null;
   }
 }
