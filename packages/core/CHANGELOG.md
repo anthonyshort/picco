@@ -1,5 +1,11 @@
 # @picco-agent/core
 
+## 0.3.2
+
+### Patch Changes
+
+- c582315: Describe tool inputs in JSON Schema so transforms such as repository-name normalisation do not prevent sessions from starting. Runtime validation and transforms still apply when tools execute.
+
 ## 0.3.1
 
 ### Patch Changes

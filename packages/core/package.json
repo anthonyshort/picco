@@ -1,6 +1,6 @@
 {
   "name": "@picco-agent/core",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "AI assistant framework core handling agent sessions, plugins, and tools.",
   "homepage": "https://github.com/picco-agent/picco/tree/main/packages/core",
   "bugs": {
