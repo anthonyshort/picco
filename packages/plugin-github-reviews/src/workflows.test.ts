@@ -120,8 +120,39 @@ describe("review workflows", () => {
     expect(run.holds.length).toBe(1);
   });
 
+  test("a pre-launch rejection permits a corrected launch in the same execution", () => {
+    const run = execution();
+    run.emit({
+      type: "tool_start",
+      tool: "SubagentWorkflow",
+      toolCallId: "rejected",
+      args: { name: "missing-review" },
+    });
+    run.emit({
+      type: "tool_end",
+      tool: "SubagentWorkflow",
+      toolCallId: "rejected",
+      isError: false,
+      result: { content: [{ type: "text", text: "Unknown saved workflow: missing-review" }] },
+    });
+    expect(run.holds).toEqual([]);
+    run.launch({ call: "corrected" });
+    expect(run.holds.length).toBe(1);
+    run.emit(notification({ id: "task-one", status: "completed" }));
+    expect(run.holds[0].completed).toBe(0);
+    run.emit({ type: "agent_settled" });
+    expect(run.holds[0].completed).toBe(1);
+  });
+
   test("malformed accepted launches and reused task IDs fail visibly", () => {
-    for (const result of [undefined, {}, { details: {} }, { details: { taskId: "" } }]) {
+    for (const result of [
+      undefined,
+      {},
+      { content: [] },
+      { details: {} },
+      { details: { taskId: "" } },
+      { content: [{ type: "text", text: "Workflow accepted" }], details: { taskId: "" } },
+    ]) {
       const run = execution();
       run.emit({ type: "tool_start", tool: "SubagentWorkflow", toolCallId: "call-one", args: {} });
       expect(() =>

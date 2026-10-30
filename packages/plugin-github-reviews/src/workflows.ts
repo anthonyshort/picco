@@ -7,6 +7,17 @@ import { z } from "zod";
 const WorkflowStartSchema = z.object({ details: z.object({ taskId: z.string().min(1) }) });
 
 /**
+ * Pi returns pre-launch validation failures as text-only results without task metadata.
+ */
+const WorkflowRejectionSchema = z.object({
+  content: z
+    .array(z.object({ type: z.literal("text"), text: z.string() }))
+    .min(1)
+    .max(100),
+  details: z.undefined().optional(),
+});
+
+/**
  * Terminal notifications identify the task and optionally explain a failure.
  */
 const CompletionSchema = z.object({
@@ -57,6 +68,9 @@ export function observeWorkflows(ctx: PrepareExecutionContext): ExecutionObserve
             break;
           }
           if (event.isError) {
+            break;
+          }
+          if (WorkflowRejectionSchema.safeParse(event.result).success) {
             break;
           }
           const started = WorkflowStartSchema.parse(event.result);

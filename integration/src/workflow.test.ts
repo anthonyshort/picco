@@ -66,6 +66,18 @@ describe.skipIf(!extension)(
           .run("proof", "Start the review", { timeoutMs: 20_000 });
         await firstSettlement.promise;
         await childStarted.promise;
+        const launches = events.filter(
+          (event) => event.type === "tool_end" && event.tool === "SubagentWorkflow",
+        );
+        expect(launches).toHaveLength(2);
+        expect(launches[0]).toMatchObject({
+          isError: false,
+          result: { content: [{ type: "text", text: expect.any(String) }] },
+        });
+        expect(launches[1]).toMatchObject({
+          isError: false,
+          result: { details: { taskId: expect.any(String) } },
+        });
         if (!held) {
           await turn;
         }
@@ -126,9 +138,12 @@ async function createWorkflowProof(opts: WorkflowProofOptions) {
     }
     parentCalls++;
     if (parentCalls === 1) {
-      return [{ toolCall: { name: "SubagentWorkflow", args: { script } } }];
+      return [{ toolCall: { name: "SubagentWorkflow", args: { script: "return null;" } } }];
     }
     if (parentCalls === 2) {
+      return [{ toolCall: { name: "SubagentWorkflow", args: { script } } }];
+    }
+    if (parentCalls === 3) {
       return [{ text: "started in background" }];
     }
     if (
