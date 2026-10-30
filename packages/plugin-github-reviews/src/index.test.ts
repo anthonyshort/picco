@@ -58,6 +58,7 @@ function createGithubFixture() {
     request: "request:first",
     requestedAt: "2026-10-25T12:00:00Z",
     ready: true,
+    timeline: true,
     remaining: 4000,
     fail: false,
     empty: false,
@@ -113,13 +114,15 @@ function createGithubFixture() {
               pageInfo: { hasNextPage: false, endCursor: null },
             },
             timelineItems: {
-              nodes: [
-                {
-                  id: state.request,
-                  createdAt: state.requestedAt,
-                  requestedReviewer: { login: state.reviewer },
-                },
-              ],
+              nodes: state.timeline
+                ? [
+                    {
+                      id: state.request,
+                      createdAt: state.requestedAt,
+                      requestedReviewer: { login: state.reviewer },
+                    },
+                  ]
+                : [],
               pageInfo: { hasPreviousPage: false, startCursor: null },
             },
           },
@@ -381,18 +384,76 @@ describe("GitHub reviews plugin", () => {
     expect(reviewed).toContain('"status":"completed"');
   });
 
-  test("a new commit is reviewed while the personal request remains outstanding", async () => {
+  test("new commits do not repeat a completed request across polls and restarts", async () => {
     const fixture = createGithubFixture();
     const current = await start(fixture.execute);
     await invoke(current.plugin, "github_reviews_poll");
     await vi.waitFor(() => expect(current.results).toHaveLength(1));
     fixture.state.head = "b".repeat(40);
     await invoke(current.plugin, "github_reviews_poll");
-    await vi.waitFor(() => expect(current.results).toHaveLength(2));
-    expect(current.results.map((result) => result.selection.run.head)).toEqual([
-      Head,
-      fixture.state.head,
+    await invoke(current.plugin, "github_reviews_poll");
+    expect(current.ctx.turns).toHaveLength(1);
+    await current.plugin.stop!();
+    const restarted = await start(fixture.execute);
+    await invoke(restarted.plugin, "github_reviews_poll");
+    expect(restarted.ctx.turns).toHaveLength(0);
+    expect(await invoke(restarted.plugin, "github_reviews_list")).toContain("already-reviewed");
+
+    vi.setSystemTime(new Date("2026-10-26T12:01:00Z"));
+    fixture.state.request = "request:second";
+    fixture.state.requestedAt = "2026-10-26T12:00:30Z";
+    await invoke(restarted.plugin, "github_reviews_poll");
+    await vi.waitFor(() => expect(restarted.results).toHaveLength(1));
+    expect(restarted.results[0].selection.run).toMatchObject({
+      head: fixture.state.head,
+      requestEventId: "request:second",
+    });
+  });
+
+  test("missing timeline evidence does not repeat a completed request at a new head", async () => {
+    const fixture = createGithubFixture();
+    fixture.state.timeline = false;
+    const current = await start(fixture.execute);
+    await invoke(current.plugin, "github_reviews_poll");
+    await vi.waitFor(() => expect(current.results).toHaveLength(1));
+    fixture.state.head = "b".repeat(40);
+    await invoke(current.plugin, "github_reviews_poll");
+    expect(await invoke(current.plugin, "github_reviews_list")).toContain("already-reviewed");
+    expect(current.ctx.turns).toHaveLength(1);
+  });
+
+  test("a new head does not bypass an earlier unresolved attempt for the same request", async () => {
+    const store = createReviewStore(path.join(directory, "reviews.sqlite"));
+    store.reconcile("reviewer", [
+      {
+        repository: Repository,
+        number: 42,
+        title: "Requested change",
+        url: `https://github.com/${Repository}/pull/42`,
+        head: Head,
+        createdAt: "2026-10-25T10:00:00Z",
+      },
     ]);
+    const item = store.next()[0];
+    store.setCycle(item.id, "request:first", "2026-10-25T12:00:00Z");
+    const run = store.admit(item.id, "reviewer", 1)!;
+    store.finish(run.id, { status: "blocked", reason: "review-not-confirmed" });
+    store.close();
+    const fixture = createGithubFixture();
+    fixture.state.head = "b".repeat(40);
+    const current = await start(fixture.execute);
+    await invoke(current.plugin, "github_reviews_poll");
+    expect(current.ctx.turns).toHaveLength(0);
+    expect(await invoke(current.plugin, "github_reviews_list")).toContain(
+      "prior-attempt-needs-reconciliation",
+    );
+
+    vi.setSystemTime(new Date("2026-10-26T12:01:00Z"));
+    fixture.state.request = "request:second";
+    fixture.state.requestedAt = "2026-10-26T12:00:30Z";
+    await invoke(current.plugin, "github_reviews_poll");
+    await vi.waitFor(() => expect(current.results).toHaveLength(1));
+    expect(current.results[0].selection.run.head).toBe(fixture.state.head);
   });
 
   test("a strictly newer personal request permits another review of the same commit", async () => {
