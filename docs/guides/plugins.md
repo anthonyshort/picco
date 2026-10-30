@@ -365,3 +365,17 @@ Pass the adapter under a name in `destinations`. Return `rejected` only when you
 ### Move existing Telegram notifications
 
 Replace `telegram({ notificationChatId, ... })` with a `notifications(...)` plugin containing a `telegramNotifications({ botToken, chatId })` destination. Move delivery limits to the notifications plugin, renaming `notificationTimeoutMs` to `timeoutMs`. Replace `telegram_notify` calls with `notify({ action: "send", destination, ... })` and `telegram_delivery` with `notify({ action: "status", deliveryId })`; provider message IDs now use the string `externalId` field.
+
+## Keep asynchronous work inside a turn
+
+Use `observeExecution` when a worker starts work that outlives its initial reply. The hook runs for every execution, so filter `ctx.execution.session.source` when your plugin should only handle a particular session source.
+
+Register a hold synchronously when the worker accepts the work. Complete it when the work finishes, or fail it with its error. Picco keeps the original execution and tool authority until all holds finish and the worker settles. A hold uses the original turn deadline and cancellation signal.
+
+Worker event callbacks must return immediately. Waiting inside them would prevent Picco from reading the event that completes the work. Tool results and custom-message details are `unknown`; validate the fields your plugin recognises.
+
+If a completion message triggers a worker continuation, call `hold.complete({ after: "next-settlement" })`. Picco then waits for a later settlement before returning the final assistant reply. Ordinary host work can use `hold.complete()` without another model turn.
+
+Use `ctx.hold({ name, retireWorker: true })` for detached worker tasks. Picco revokes that worker's token and terminates it before another turn can run on the same session. This prevents stale work from gaining the next execution's authority. Host-only work normally does not need worker retirement. Holds occupy their session's queue; other session keys remain independent.
+
+`finaliseExecution` still runs after tool authority ends. Use it for cleanup, rather than registering work that needs to call host tools.

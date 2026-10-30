@@ -1,4 +1,5 @@
 import { ExecutionError } from "./execution.js";
+import type { ExecutionWork } from "./work.js";
 import * as z from "zod";
 import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
 import { parseJsonl, JsonlWriter, type JsonObject } from "./jsonl.js";
@@ -61,6 +62,10 @@ export interface PromptOptions {
    * Receives live TurnEvents (tool_start/tool_end/text) while the prompt runs.
    */
   onEvent?: (event: TurnEvent) => void;
+  /**
+   * Execution holds and unbuffered worker observers.
+   */
+  work?: ExecutionWork;
 }
 
 /**
@@ -82,6 +87,8 @@ export class RpcSession {
   private reloading = false;
   private agentSettled: { resolve: () => void; reject: (err: Error) => void } | null = null;
   private onEvent: ((event: TurnEvent) => void) | null = null;
+  private work?: ExecutionWork;
+  private rejectPrompt?: (err: Error) => void;
 
   constructor(key: string, proc: RuntimeProcess, opts: RpcSessionOptions = {}) {
     this.key = key;
@@ -127,48 +134,62 @@ export class RpcSession {
     this.promptFailure = undefined;
     this.onEvent = opts.onEvent ?? null;
 
+    this.work = opts.work;
+    const failure = Promise.withResolvers<never>();
+    failure.promise.catch(() => {});
+    this.rejectPrompt = failure.reject;
+    const deadline = opts.timeoutMs
+      ? setTimeout(() => {
+          this.abortTurn();
+          this.rejectPrompt?.(
+            new ExecutionError("timeout", `Prompt timed out after ${opts.timeoutMs! / 1000}s`),
+          );
+        }, opts.timeoutMs)
+      : undefined;
     try {
-      // Register the agent_settled waiter before sending, so a fast completion
-      // can't slip past between the preflight response and the await.
-      const { promise: done, resolve, reject } = Promise.withResolvers<void>();
-      // If the preflight fails, `done` is never awaited — register a handler
-      // so a rejection from markDead doesn't surface as unhandled.
-      done.catch(() => {});
-      const timer = opts.timeoutMs
-        ? setTimeout(() => {
-            // The turn is still running inside pi — abort it, or the next
-            // prompt would overlap it and be resolved by its agent_settled.
-            this.request({ type: "abort" }).catch(() => {});
-            reject(
-              new ExecutionError("timeout", `Prompt timed out after ${opts.timeoutMs! / 1000}s`),
-            );
-          }, opts.timeoutMs)
-        : null;
-      this.agentSettled = { resolve, reject };
-
-      try {
-        const response = await this.request({ type: "prompt", message: text }, opts.timeoutMs);
-        switch (response.data.disposition) {
-          case "handled":
-            return "";
-          case "started":
-          case "queued":
-            await done;
-            break;
-          default:
-            throw new Error(`Unknown prompt disposition: ${response.data.disposition}`);
-        }
-      } finally {
-        if (timer) clearTimeout(timer);
-        this.agentSettled = null;
+      const wait = () => {
+        const pending = Promise.withResolvers<void>();
+        pending.promise.catch(() => {});
+        this.agentSettled = pending;
+        return pending.promise;
+      };
+      let done = wait();
+      if (this.work) this.work.onChange = () => this.checkSettlement();
+      const response = await Promise.race([
+        this.request({ type: "prompt", message: text }, opts.timeoutMs),
+        failure.promise,
+      ]);
+      switch (response.data.disposition) {
+        case "handled":
+          return "";
+        case "started":
+        case "queued":
+          break;
+        default:
+          throw new Error(`Unknown prompt disposition: ${response.data.disposition}`);
       }
-
-      if (this.promptFailure) throw this.promptFailure;
-      const resp = await this.request({ type: "get_last_assistant_text" });
-      return resp.data.text || "(no text response)";
+      while (true) {
+        await Promise.race([done, failure.promise]);
+        if (this.promptFailure) throw this.promptFailure;
+        const version = this.work?.version;
+        const resp = await Promise.race([
+          this.request({ type: "get_last_assistant_text" }),
+          failure.promise,
+        ]);
+        if (!this.work || (this.work.ready() && version === this.work.version)) {
+          return resp.data.text || "(no text response)";
+        }
+        done = wait();
+        this.checkSettlement();
+      }
     } finally {
+      if (deadline) clearTimeout(deadline);
+      this.agentSettled = null;
       this.promptInFlight = false;
       this.onEvent = null;
+      if (this.work) this.work.onChange = undefined;
+      this.work = undefined;
+      this.rejectPrompt = undefined;
     }
   }
 
@@ -288,7 +309,61 @@ export class RpcSession {
   /**
    * Dispatch one stdout message: responses, agent_settled, live progress events.
    */
+  private checkSettlement(): void {
+    try {
+      if (this.work?.ready()) this.agentSettled?.resolve();
+    } catch (err) {
+      this.rejectPrompt?.(err instanceof Error ? err : new Error(String(err)));
+    }
+  }
+
+  private observeWorker(msg: JsonObject): void {
+    if (!this.work) return;
+    if (msg.type === "agent_start" || msg.type === "agent_settled") {
+      this.work.emit({ type: msg.type });
+    } else if (
+      msg.type === "tool_execution_start" &&
+      typeof msg.toolName === "string" &&
+      typeof msg.toolCallId === "string"
+    ) {
+      this.work.emit({
+        type: "tool_start",
+        tool: msg.toolName,
+        toolCallId: msg.toolCallId,
+        args: msg.args,
+      });
+    } else if (
+      msg.type === "tool_execution_end" &&
+      typeof msg.toolName === "string" &&
+      typeof msg.toolCallId === "string"
+    ) {
+      this.work.emit({
+        type: "tool_end",
+        tool: msg.toolName,
+        toolCallId: msg.toolCallId,
+        isError: Boolean(msg.isError),
+        result: msg.result,
+      });
+    } else if (msg.type === "message_end") {
+      const custom = z
+        .object({ role: z.literal("custom"), customType: z.string(), details: z.unknown() })
+        .safeParse(msg.message);
+      if (custom.success)
+        this.work.emit({
+          type: "custom_message",
+          customType: custom.data.customType,
+          details: custom.data.details,
+        });
+    }
+  }
+
   private handleMessage(msg: JsonObject): void {
+    try {
+      this.observeWorker(msg);
+    } catch (err) {
+      this.rejectPrompt?.(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
     const ended = AssistantEndSchema.safeParse(msg);
     if (ended.success && this.promptInFlight) {
       switch (ended.data.message.stopReason) {
@@ -327,8 +402,7 @@ export class RpcSession {
 
     // agent_settled signals a running prompt has finished
     if (msg.type === "agent_settled") {
-      this.agentSettled?.resolve();
-      this.agentSettled = null;
+      if (!this.work) this.agentSettled?.resolve();
       return;
     }
 
@@ -444,6 +518,7 @@ export class RpcSession {
     }
     this.pending.clear();
 
+    this.rejectPrompt?.(err);
     this.agentSettled?.reject(err);
     this.agentSettled = null;
   }

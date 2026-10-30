@@ -226,6 +226,9 @@ export function createAgent(config: AgentConfig): AgentHandle {
       maxRuns: config.sessions?.maxRuns,
       finalisationTimeoutMs: config.sessions?.finalisationTimeoutMs,
       quiesceExecution: (execution) => bridge!.settleExecution(execution.id),
+      observers: plugins
+        .filter((plugin) => plugin.observeExecution)
+        .map((plugin) => (ctx) => plugin.observeExecution!(ctx)),
       finalisers: plugins
         .filter((plugin) => plugin.finaliseExecution)
         .map((plugin) => ({

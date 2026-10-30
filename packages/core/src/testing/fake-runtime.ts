@@ -10,6 +10,10 @@ export interface FakeRuntimeProcessOptions {
    */
   reply?: (prompt: string) => string | Promise<string>;
   /**
+   * Override final-text retrieval to exercise continuations and deadlines during the RPC request.
+   */
+  lastAssistantText?: () => string | Promise<string>;
+  /**
    * Raw RPC events emitted between the prompt ack and agent_settled (e.g. tool_execution_start/end,
    * message_update).
    */
@@ -221,7 +225,7 @@ export class FakeRuntimeProcess implements RuntimeProcess {
           command: "get_last_assistant_text",
           id,
           success: true,
-          data: { text: this.lastReply },
+          data: { text: await (this.behavior.lastAssistantText?.() ?? this.lastReply) },
         });
         return;
       case "get_session_stats":

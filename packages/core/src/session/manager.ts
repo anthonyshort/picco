@@ -1,3 +1,4 @@
+import { ExecutionWork, type ExecutionObserverFactory } from "./work.js";
 import { randomUUID } from "node:crypto";
 import {
   ExecutionFailure,
@@ -139,6 +140,10 @@ export interface SessionManagerOptions {
    */
   finalisationTimeoutMs?: number;
   /**
+   * Observe each execution before its prompt starts, across all session sources.
+   */
+  observers?: ExecutionObserverFactory[];
+  /**
    * Settle admitted host operations; failure quarantines ownership and skips release hooks.
    */
   quiesceExecution?: (execution: ExecutionRef) => Promise<void>;
@@ -210,6 +215,7 @@ interface ManagedExecution {
   cancelled: Promise<never>;
   cancel(reason: string): void;
   phase: "queued" | "running" | "finalising";
+  retireWorker?: boolean;
 }
 
 /**
@@ -286,7 +292,7 @@ export class SessionManager {
         async () => {
           const live = await this.ensureLive(slot, opts?.session);
           live.lastActiveAt = new Date();
-          const result = await this.driveTurn(controller, live.rpc, prompt, opts?.timeoutMs);
+          const result = await this.driveTurn(execution, live.rpc, prompt, opts?.timeoutMs);
           live.turns++;
           live.lastActiveAt = new Date();
           return result;
@@ -403,7 +409,7 @@ export class SessionManager {
               env: opts.env,
               tools: opts.tools,
             });
-            return this.driveTurn(controller, live.rpc, prompt, opts.timeoutMs);
+            return this.driveTurn(execution, live.rpc, prompt, opts.timeoutMs);
           },
           true,
         );
@@ -584,7 +590,14 @@ export class SessionManager {
       }
     }
     if (!close && !primary && !errors.length) await this.performReload(slot);
-    if (close || primary || errors.length || slot.closing || this.stopped) {
+    if (
+      close ||
+      execution.retireWorker ||
+      primary ||
+      errors.length ||
+      slot.closing ||
+      this.stopped
+    ) {
       try {
         await this.killLive(slot, !quarantined);
         this.opts.revokeSession?.(slot.ref);
@@ -706,18 +719,31 @@ export class SessionManager {
    * caller settles the controller (sessions settle after bookkeeping, one-shots after teardown).
    */
   private async driveTurn(
-    controller: TurnController,
+    execution: ManagedExecution,
     rpc: RpcSession,
     prompt: string,
     timeoutMs?: number,
   ): Promise<TurnResult> {
     const startedAt = Date.now();
+    const { controller } = execution;
+    const work = new ExecutionWork(
+      execution.ref,
+      execution.abort.signal,
+      this.opts.observers ?? [],
+      this.logger,
+    );
     controller.emit({ type: "turn_start" });
-    const text = await rpc.prompt(prompt, {
-      timeoutMs: timeoutMs ?? this.turnTimeoutMs,
-      onEvent: (event) => controller.emit(event),
-    });
-    return { text, durationMs: Date.now() - startedAt };
+    try {
+      const text = await rpc.prompt(prompt, {
+        timeoutMs: timeoutMs ?? this.turnTimeoutMs,
+        onEvent: (event) => controller.emit(event),
+        work,
+      });
+      return { text, durationMs: Date.now() - startedAt };
+    } finally {
+      execution.retireWorker = work.retireWorker;
+      work.close();
+    }
   }
 
   /**
