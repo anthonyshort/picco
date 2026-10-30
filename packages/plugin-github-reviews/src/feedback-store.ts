@@ -509,9 +509,9 @@ export function createFeedbackStore(filename: string, now = Date.now) {
     },
     details: runRow,
     /**
-     * Claim the single dispatcher lease for this database. Refuse another live lease; reclaim an
-     * expired foreign owner only on this host when its process is confirmed gone. Remember
-     * ownership locally so subsequent queue mutations check the live lease.
+     * Claim the single dispatcher lease for this database. Reclaim another owner only on this host
+     * when its process is confirmed gone, without waiting for lease expiry. Remember ownership
+     * locally so subsequent queue mutations check the live lease.
      */
     claimDispatcher(owner: string) {
       const claimed = transaction(() => {
@@ -528,7 +528,7 @@ export function createFeedbackStore(filename: string, now = Date.now) {
             })
             .parse(row);
           if (previous.owner !== owner) {
-            if (previous.expiresAt > now() || previous.host !== hostname()) return false;
+            if (previous.host !== hostname()) return false;
             try {
               process.kill(previous.pid, 0);
               return false;
