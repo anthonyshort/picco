@@ -1,5 +1,12 @@
 # @picco-agent/plugin-github
 
+## 0.2.2
+
+### Patch Changes
+
+- Updated dependencies [a6d3f12]
+  - @picco-agent/core@0.4.0
+
 ## 0.2.1
 
 ### Patch Changes

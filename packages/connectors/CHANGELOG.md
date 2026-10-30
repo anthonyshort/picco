@@ -1,5 +1,11 @@
 # @picco-agent/connectors
 
+## 0.1.5
+
+### Patch Changes
+
+- @picco-agent/identity@0.2.4
+
 ## 0.1.4
 
 ### Patch Changes
