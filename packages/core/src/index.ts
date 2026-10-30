@@ -49,7 +49,7 @@ export type { ReloadOperation } from "./session/reload.js";
 
 export type {
   ExecutionHold,
-  ExecutionObservation,
+  PrepareExecutionContext,
   ExecutionObserver,
   WorkerEvent,
 } from "./session/work.js";

@@ -43,6 +43,8 @@ describe("observeWorkflows", () => {
       execution.emit(completion);
       execution.emit(completion);
       expect(execution.ready()).toBe(false);
+      execution.emit({ type: "custom_message", customType: "unrelated", details: {} });
+      expect(execution.ready()).toBe(false);
       execution.emit({ type: "agent_start" });
       execution.emit({ type: "agent_settled" });
       expect(execution.ready()).toBe(true);
@@ -61,6 +63,30 @@ describe("observeWorkflows", () => {
       expect(execution.ready()).toBe(true);
       launch(execution, "second");
       expect(execution.ready()).toBe(false);
+    });
+
+    it("should keep remaining workflows held across separate continuations", () => {
+      const execution = work();
+      launch(execution, "first");
+      launch(execution, "second");
+      execution.emit({ type: "agent_settled" });
+      execution.emit({
+        type: "custom_message",
+        customType: "subagent-notification",
+        details: { id: "first", status: "completed" },
+      });
+      execution.emit({ type: "agent_start" });
+      execution.emit({ type: "agent_settled" });
+      expect(execution.ready()).toBe(false);
+      execution.emit({
+        type: "custom_message",
+        customType: "subagent-notification",
+        details: { id: "second", status: "completed" },
+      });
+      expect(execution.ready()).toBe(false);
+      execution.emit({ type: "agent_start" });
+      execution.emit({ type: "agent_settled" });
+      expect(execution.ready()).toBe(true);
     });
   });
 

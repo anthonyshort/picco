@@ -134,6 +134,38 @@ describe("createAgent", () => {
   });
 
   describe("plugin lifecycle", () => {
+    test("prepareExecution registers work before the prompt and observes settlement", async () => {
+      const settled = Promise.withResolvers<void>();
+      let complete!: () => void;
+      const calls: string[] = [];
+      const plugin: Plugin = {
+        name: "background-work",
+        prepareExecution(ctx) {
+          calls.push(`prepare:${ctx.execution.session.source}`);
+          const hold = ctx.hold({ name: "background" });
+          complete = () => hold.complete();
+          return {
+            onEvent(event) {
+              if (event.type === "agent_settled") {
+                calls.push("settled");
+                settled.resolve();
+              }
+            },
+          };
+        },
+      };
+      const { agent, runtime } = agentWith({ plugins: [plugin] });
+      await agent.start();
+      const turn = agent.run("hello");
+      await settled.promise;
+      expect(calls).toEqual(["prepare:host", "settled"]);
+      expect(runtime.spawns[0]!.process.requests.map((request) => request.type)).not.toContain(
+        "get_last_assistant_text",
+      );
+      complete();
+      expect((await turn).text).toBe("echo: hello");
+    });
+
     test("resolves configuration once before collecting commands", async () => {
       const contexts: PluginResolveContext[] = [];
       const plugin: Plugin = {

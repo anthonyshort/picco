@@ -227,8 +227,8 @@ export function createAgent(config: AgentConfig): AgentHandle {
       finalisationTimeoutMs: config.sessions?.finalisationTimeoutMs,
       quiesceExecution: (execution) => bridge!.settleExecution(execution.id),
       observers: plugins
-        .filter((plugin) => plugin.observeExecution)
-        .map((plugin) => (ctx) => plugin.observeExecution!(ctx)),
+        .filter((plugin) => plugin.prepareExecution)
+        .map((plugin) => (ctx) => plugin.prepareExecution!(ctx)),
       finalisers: plugins
         .filter((plugin) => plugin.finaliseExecution)
         .map((plugin) => ({

@@ -11,7 +11,7 @@ import {
   createAgentPaths,
   tool,
   type WorkerEvent,
-  type ExecutionObservation,
+  type PrepareExecutionContext,
 } from "@picco-agent/core";
 import { bridgeExtensionBundle } from "./bridge-bundle.js";
 import { startFakeModel, type ModelAction } from "./fake-model.js";
@@ -116,7 +116,7 @@ describe.skipIf(!extension)(
         });
         await bridge.start();
         cleanups.push(() => bridge.stop());
-        const observe = (ctx: ExecutionObservation) => {
+        const observe = (ctx: PrepareExecutionContext) => {
           const adapter = held ? observeWorkflows(ctx) : undefined;
           return {
             onEvent(event: WorkerEvent) {

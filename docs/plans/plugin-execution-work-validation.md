@@ -4,11 +4,11 @@ Core supports generic execution observers and holds. The Pi-subagents adapter li
 
 ## What changed
 
-Core creates observers before sending a prompt and processes structured worker events synchronously. Holds keep the original execution running through background work. Completion can require another settlement so the parent can inspect results and declare completion. One deadline covers waiting, continuation and final-text retrieval.
+Core calls each plugin's `prepareExecution` hook before sending a prompt and processes structured worker events synchronously. Holds keep the original execution running through background work. Completing a hold releases it; the execution waits until all holds are released and the worker is settled. One deadline covers waiting, continuation and final-text retrieval.
 
 Detached-work holds explicitly request worker retirement. Picco revokes the session token and stops the worker before resolving the turn and advancing its queue. Ordinary host holds keep the warm worker. Existing bridge admission, draining and finalisation remain in place.
 
-The adapter validates accepted `SubagentWorkflow` launch results, matches tool-call IDs and tracks task IDs. It consumes the existing `subagent-notification` custom messages, including batched `others`, and waits for the next settlement. It filters for `github-reviews` sessions. Duplicate completions are ignored; malformed launches, reused task IDs and terminal workflow failures reject the operation.
+The adapter validates accepted `SubagentWorkflow` launch results, matches tool-call IDs and tracks task IDs. It consumes the existing `subagent-notification` custom messages, including batched `others`, and releases successful tasks' holds on the following worker settlement. This keeps the parent's completion declaration inside the execution without putting continuation-specific options in core. It filters for `github-reviews` sessions. Duplicate completions are ignored; malformed launches, reused task IDs and terminal workflow failures reject the operation.
 
 ## Reproduce the workflow regression
 
@@ -38,7 +38,7 @@ No remote model requests, real GitHub publications, notifications or service res
 
 Focused tests cover parallel and sequential holds, batched and duplicate completions, terminal errors, malformed launches, cancellation, reset, deadlines and worker retirement. The queued-sender test uses a real ToolBridge: after the second sender becomes active, the old worker's token receives HTTP 401. RPC tests also start and settle a continuation while final-text retrieval is pending, then verify the final reply is retrieved again. A hung final-text request remains bounded by the original deadline.
 
-`pnpm validate` passed build, formatting, type checks, lint, 694 unit tests and 35 integration tests. The saved-workflow cases ran with Pi 1.4.0 and `PICCO_SUBAGENTS_EXTENSION` configured, rather than skipping. They also passed against the repository's Pi 1.0.0. Bubblewrap integration used a temporary outer sandbox to expose installed Pi and Node under `/usr/local`, without changing host installation or skipping required bubblewrap cases.
+`pnpm validate` passed build, formatting, type checks, lint, 695 unit tests and 36 integration tests. The saved-workflow cases ran with Pi 1.4.0 and `PICCO_SUBAGENTS_EXTENSION` configured, rather than skipping. They also passed against the repository's Pi 1.0.0. Bubblewrap integration used a temporary outer sandbox to expose installed Pi and Node under `/usr/local`, without changing host installation or skipping required bubblewrap cases.
 
 ## Remaining release work
 

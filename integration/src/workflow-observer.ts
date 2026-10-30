@@ -1,5 +1,5 @@
 import * as z from "zod";
-import type { ExecutionHold, ExecutionObservation, ExecutionObserver } from "@picco-agent/core";
+import type { ExecutionHold, PrepareExecutionContext, ExecutionObserver } from "@picco-agent/core";
 
 /**
  * Pi-subagents 0.22 returns this metadata after accepting a saved workflow.
@@ -23,7 +23,7 @@ const BatchSchema = z.object({ others: z.array(z.unknown()).max(1000).optional()
 /**
  * Track saved workflows using existing structured RPC events, without dependency changes.
  */
-export function observeWorkflows(ctx: ExecutionObservation): ExecutionObserver | void {
+export function observeWorkflows(ctx: PrepareExecutionContext): ExecutionObserver | void {
   if (ctx.execution.session.source !== "github-reviews") return;
   const launches = new Set<string>();
   const tasks = new Map<string, { hold: ExecutionHold; terminal: boolean }>();
@@ -55,16 +55,22 @@ export function observeWorkflows(ctx: ExecutionObservation): ExecutionObserver |
             const task = tasks.get(completion.data.id);
             if (!task || task.terminal) continue;
             task.terminal = true;
-            if (completion.data.status === "completed") {
-              task.hold.complete({ after: "next-settlement" });
-            } else {
+            if (completion.data.status !== "completed") {
               task.hold.fail(new Error(completion.data.error ?? "Workflow stopped"));
             }
           }
           break;
         }
+        case "agent_settled": {
+          // Completion starts a parent continuation; release its work after that turn settles.
+          for (const task of tasks.values()) {
+            if (task.terminal) {
+              task.hold.complete();
+            }
+          }
+          break;
+        }
         case "agent_start":
-        case "agent_settled":
           break;
       }
     },

@@ -5,16 +5,15 @@ const execution = { id: "execution-1", session: { source: "test", key: "one" } }
 
 describe("ExecutionWork", () => {
   describe("settlement", () => {
-    it("should require a later settlement rather than any later event", () => {
+    it("should wait for worker settlement after a hold completes", () => {
       let hold!: ExecutionHold;
       const work = new ExecutionWork(execution, new AbortController().signal, [
         (ctx) => {
           hold = ctx.hold({ name: "workflow" });
         },
       ]);
-      work.emit({ type: "agent_settled" });
       expect(work.ready()).toBe(false);
-      hold.complete({ after: "next-settlement" });
+      hold.complete();
       work.emit({ type: "custom_message", customType: "unrelated", details: {} });
       expect(work.ready()).toBe(false);
       work.emit({ type: "agent_settled" });

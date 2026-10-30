@@ -16,16 +16,16 @@ export type WorkerEvent =
  */
 export interface ExecutionHold {
   /**
-   * Finish work; after next-settlement also awaits the continuation following this call.
+   * Release this hold. The execution still waits for other holds and worker settlement.
    */
-  complete(options?: { after: "next-settlement" }): void;
+  complete(): void;
   fail(error: Error): void;
 }
 
 /**
  * Execution identity and cancellation shared with synchronous observers.
  */
-export interface ExecutionObservation {
+export interface PrepareExecutionContext {
   execution: ExecutionRef;
   signal: AbortSignal;
   /**
@@ -43,9 +43,9 @@ export interface ExecutionObserver {
 }
 
 /**
- * Creates an observer before an execution sends its prompt.
+ * Prepare execution-owned work and optionally return an event observer before the prompt starts.
  */
-export type ExecutionObserverFactory = (ctx: ExecutionObservation) => ExecutionObserver | void;
+export type ExecutionObserverFactory = (ctx: PrepareExecutionContext) => ExecutionObserver | void;
 
 /**
  * Tracks holds and worker settlement for one execution, without retaining result payloads.
@@ -54,9 +54,6 @@ export class ExecutionWork {
   private readonly holds = new Set<object>();
   private readonly observers: ExecutionObserver[] = [];
   private settled = false;
-  private sequence = 0;
-  private requiredSettlement = 0;
-  private lastSettlement = 0;
   private active = true;
   private failure?: Error;
   retireWorker = false;
@@ -69,7 +66,7 @@ export class ExecutionWork {
     factories: ExecutionObserverFactory[],
     logger?: Logger,
   ) {
-    const ctx: ExecutionObservation = {
+    const ctx: PrepareExecutionContext = {
       execution,
       signal,
       hold: ({ name, retireWorker }) => {
@@ -84,16 +81,12 @@ export class ExecutionWork {
         });
         this.changed();
         return {
-          complete: (options) => {
+          complete: () => {
             if (!this.active || !this.holds.delete(token)) return;
-            if (options?.after === "next-settlement") {
-              this.requiredSettlement = this.sequence + 1;
-            }
             logger?.log("execution hold completed", {
               executionId: execution.id,
               name,
               pending: this.holds.size,
-              after: options?.after,
             });
             this.changed();
           },
@@ -117,11 +110,11 @@ export class ExecutionWork {
   }
 
   /**
-   * True only after all work and its required worker settlement have completed.
+   * True when every hold is released and the worker is settled.
    */
   ready(): boolean {
     if (this.failure) throw this.failure;
-    return this.settled && this.holds.size === 0 && this.lastSettlement >= this.requiredSettlement;
+    return this.settled && this.holds.size === 0;
   }
 
   /**
@@ -129,12 +122,8 @@ export class ExecutionWork {
    */
   emit(event: WorkerEvent): void {
     if (!this.active) return;
-    this.sequence++;
     if (event.type === "agent_start") this.settled = false;
-    if (event.type === "agent_settled") {
-      this.settled = true;
-      this.lastSettlement = this.sequence;
-    }
+    if (event.type === "agent_settled") this.settled = true;
     for (const observer of this.observers) observer.onEvent(event);
     this.changed();
   }

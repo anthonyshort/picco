@@ -1,4 +1,4 @@
-import type { ExecutionObservation, ExecutionObserver } from "./session/work.js";
+import type { PrepareExecutionContext, ExecutionObserver } from "./session/work.js";
 import type { ExecutionFinalisation } from "./session/execution.js";
 import type { ReloadOperation } from "./session/reload.js";
 import type { McpServerConfig } from "@earendil-works/pi-coding-agent";
@@ -471,10 +471,10 @@ export interface Plugin {
   finaliseExecution?(ctx: ExecutionFinalisation): void | Promise<void>;
 
   /**
-   * Observe every execution before its prompt starts. Filter ctx.execution.session to limit scope.
-   * Callbacks run synchronously and must not block the worker event reader.
+   * Prepare work and optional event observers before each prompt. Filter ctx.execution.session to
+   * limit scope. Callbacks run synchronously and must not block the worker event reader.
    */
-  observeExecution?(ctx: ExecutionObservation): ExecutionObserver | void;
+  prepareExecution?(ctx: PrepareExecutionContext): ExecutionObserver | void;
 }
 
 /**

@@ -18,6 +18,7 @@ describe("RpcSession", () => {
             return {
               onEvent(event) {
                 if (event.type === "agent_settled") firstSettlement.resolve();
+                if (event.type === "custom_message") hold.complete();
               },
             };
           },
@@ -28,8 +29,12 @@ describe("RpcSession", () => {
       const result = session.prompt("go", { work, timeoutMs: 1000 });
       await firstSettlement.promise;
       expect(proc.requests.map((request) => request.type)).toEqual(["prompt"]);
-      hold.complete({ after: "next-settlement" });
       proc.push({ type: "agent_start" });
+      // The task can finish before its parent continuation settles.
+      proc.push({
+        type: "message_end",
+        message: { role: "custom", customType: "task-completed", details: {} },
+      });
       proc.push({ type: "agent_settled" });
       expect(await result).toBe("final reply");
       work.close();

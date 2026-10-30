@@ -368,13 +368,13 @@ Replace `telegram({ notificationChatId, ... })` with a `notifications(...)` plug
 
 ## Keep asynchronous work inside a turn
 
-Use `observeExecution` when a worker starts work that outlives its initial reply. The hook runs for every execution, so filter `ctx.execution.session.source` when your plugin should only handle a particular session source.
+Use `prepareExecution` to register execution-owned work or set up an event observer before a prompt starts. The hook runs for every execution, so filter `ctx.execution.session.source` when your plugin should only handle a particular session source.
 
 Register a hold synchronously when the worker accepts the work. Complete it when the work finishes, or fail it with its error. Picco keeps the original execution and tool authority until all holds finish and the worker settles. A hold uses the original turn deadline and cancellation signal.
 
 Worker event callbacks must return immediately. Waiting inside them would prevent Picco from reading the event that completes the work. Tool results and custom-message details are `unknown`; validate the fields your plugin recognises.
 
-If a completion message triggers a worker continuation, call `hold.complete({ after: "next-settlement" })`. Picco then waits for a later settlement before returning the final assistant reply. Ordinary host work can use `hold.complete()` without another model turn.
+`hold.complete()` releases that hold. Picco finishes when every hold is released and the worker is settled. If a completion notification triggers a worker continuation, your adapter should retain the hold until it observes that continuation's settlement. Ordinary host work can release its hold as soon as it finishes.
 
 Use `ctx.hold({ name, retireWorker: true })` for detached worker tasks. Picco revokes that worker's token and terminates it before another turn can run on the same session. This prevents stale work from gaining the next execution's authority. Host-only work normally does not need worker retirement. Holds occupy their session's queue; other session keys remain independent.
 
