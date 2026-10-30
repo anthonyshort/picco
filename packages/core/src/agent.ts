@@ -267,7 +267,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
         const toolSpecs = allTools.map((t) => ({
           name: t.name,
           description: t.description,
-          inputSchema: z.toJSONSchema(t.input) as Record<string, unknown>,
+          inputSchema: z.toJSONSchema(t.input, { io: "input" }) as Record<string, unknown>,
         }));
 
         // Append core's bundled extensions after the fold.
