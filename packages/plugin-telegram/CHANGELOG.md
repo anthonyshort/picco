@@ -1,5 +1,13 @@
 # @picco-agent/plugin-telegram
 
+## 0.3.2
+
+### Patch Changes
+
+- Updated dependencies [a6d3f12]
+  - @picco-agent/core@0.4.0
+  - @picco-agent/plugin-notifications@0.3.2
+
 ## 0.3.1
 
 ### Patch Changes

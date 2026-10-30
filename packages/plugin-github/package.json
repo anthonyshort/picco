@@ -1,6 +1,6 @@
 {
   "name": "@picco-agent/plugin-github",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Picco plugin: GitHub @mention gateway — relay listener, per-mention sessions, bot auth.",
   "homepage": "https://github.com/picco-agent/picco/tree/main/packages/plugin-github",
   "bugs": {

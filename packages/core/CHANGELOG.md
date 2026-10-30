@@ -1,5 +1,11 @@
 # @picco-agent/core
 
+## 0.4.0
+
+### Minor Changes
+
+- a6d3f12: Allow plugins to observe worker events and hold an execution open until background work and its continuation finish. Keep tool calls under the original execution and optionally retire detached workers before the next queued turn.
+
 ## 0.3.2
 
 ### Patch Changes
