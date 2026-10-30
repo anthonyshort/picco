@@ -5,6 +5,7 @@ import { z } from "zod";
 import { createGithubSource, GithubReviewSourceError } from "./github.js";
 import { createReviewStore, type QueueItem } from "./store.js";
 import { runReview } from "./runner.js";
+import { observeWorkflows } from "./workflows.js";
 import { GithubReviewsSettingsSchema, type GithubReviewsOptions } from "./types.js";
 
 /**
@@ -349,6 +350,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
   return {
     name: "github-reviews",
     tools,
+    prepareExecution: settings.holdWorkflows ? observeWorkflows : undefined,
     async start(context) {
       if (!stopped) throw new Error("GitHub reviews plugin is already started");
       ctx = context;

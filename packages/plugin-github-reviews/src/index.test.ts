@@ -7,7 +7,13 @@ import {
   FakeRuntime,
   type FakePluginContext,
 } from "@picco-agent/core/testing";
-import { createAgent, silentLogger, type Plugin, type ToolContext } from "@picco-agent/core";
+import {
+  createAgent,
+  silentLogger,
+  type Plugin,
+  type PrepareExecutionContext,
+  type ToolContext,
+} from "@picco-agent/core";
 import { z } from "zod";
 import { githubReviews, GithubReviewsSettingsSchema } from "./index.js";
 import { createReviewStore } from "./store.js";
@@ -179,6 +185,64 @@ async function invoke(plugin: Plugin, name: string, input = {}) {
 }
 
 describe("GitHub reviews plugin", () => {
+  test.each([
+    { label: "default", options: {} },
+    { label: "disabled", options: { holdWorkflows: false } },
+  ])("$label workflow holding leaves plain reviews unchanged", ({ options }) => {
+    expect(githubReviews(options).prepareExecution).toBeUndefined();
+    expect(GithubReviewsSettingsSchema.parse(options).holdWorkflows).toBe(false);
+  });
+
+  test("enabled workflow holding waits until the parent handles completion", () => {
+    const plugin = githubReviews({ holdWorkflows: true });
+    expect(plugin.prepareExecution).toBeTypeOf("function");
+    expect(GithubReviewsSettingsSchema.parse({ holdWorkflows: true }).holdWorkflows).toBe(true);
+    const completeHold = vi.fn<() => void>();
+    const fail = vi.fn<(error: Error) => void>();
+    const hold = vi.fn(() => ({ complete: completeHold, fail }));
+    const ctx: PrepareExecutionContext = {
+      execution: { id: "review-one", session: { source: "github-reviews", key: "review" } },
+      signal: new AbortController().signal,
+      hold,
+    };
+    const observer = plugin.prepareExecution!(ctx);
+    if (!observer) {
+      throw new Error("Expected a review execution observer");
+    }
+    observer.onEvent({ type: "agent_start" });
+    observer.onEvent({ type: "agent_settled" });
+    expect(hold).not.toHaveBeenCalled();
+    observer.onEvent({
+      type: "tool_start",
+      tool: "SubagentWorkflow",
+      toolCallId: "launch",
+      args: {},
+    });
+    observer.onEvent({
+      type: "tool_end",
+      tool: "SubagentWorkflow",
+      toolCallId: "launch",
+      isError: false,
+      result: { details: { taskId: "review-workflow" } },
+    });
+    expect(hold).toHaveBeenCalledWith({ name: "workflow:review-workflow", retireWorker: true });
+    observer.onEvent({
+      type: "custom_message",
+      customType: "subagent-notification",
+      details: { id: "review-workflow", status: "completed" },
+    });
+    expect(completeHold).not.toHaveBeenCalled();
+    observer.onEvent({ type: "agent_settled" });
+    expect(completeHold).toHaveBeenCalledOnce();
+    expect(fail).not.toHaveBeenCalled();
+    expect(
+      plugin.prepareExecution!({
+        ...ctx,
+        execution: { id: "feedback-one", session: { source: "github-feedback", key: "review" } },
+      }),
+    ).toBeUndefined();
+  });
+
   test.each([
     { label: "omitted", repositories: undefined },
     { label: "empty", repositories: [] },

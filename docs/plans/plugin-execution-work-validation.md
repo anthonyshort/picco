@@ -1,6 +1,6 @@
 # Execution hold implementation and local proof
 
-Core supports generic execution observers and holds. The Pi-subagents adapter lives in `integration/src/workflow-observer.ts` as an integration fixture; consumer configuration is a separate release step.
+Core supports generic execution observers and holds. With `holdWorkflows: true`, the GitHub reviews package owns its Pi-subagents adapter through `prepareExecution`; applications supply their workflow prompt and installed resources.
 
 ## What changed
 
@@ -27,7 +27,7 @@ PICCO_SUBAGENTS_EXTENSION=/tmp/picco-workflow-proof/node_modules/@tintinweb/pi-s
 
 CI installs those pinned workflow dependencies in a separate temporary directory and supplies both variables to the integration step, so the acceptance cases run there too. They use a local fake model and fake delivery tools.
 
-The controlled fake model starts a real saved workflow and blocks its child until after the parent's first settlement. Both acceptance cases passed locally:
+The controlled fake model starts a real saved workflow and blocks its child until after the parent's first settlement. The held case uses the actual `githubReviews().prepareExecution` hook rather than a test-only adapter. Both acceptance cases passed locally:
 
 - Without holds, the detached child's fake publication receives HTTP 409 and the host publication callback never runs.
 - With holds, the child's fake `github_comment` and the parent's fake `github_review_complete` execute under the original execution ID. Publication precedes declaration, declaration precedes finalisation, final text comes from the continuation and the detached worker is retired before the turn returns.
@@ -42,10 +42,10 @@ Focused tests cover parallel and sequential holds, batched and duplicate complet
 
 Handled-command regressions cover successful and failed holds, the original deadline, and queue ownership until accepted work completes. Commands preserve their empty response without inventing an agent event or fetching assistant text. Commands that start their own agent interaction still wait for its real settlement. Terminal provider errors and model aborts reject even while a hold remains, preserving cleanup and the original outcome. Recovery before worker settlement remains supported. Regression cases failed before the corresponding fixes and passed afterwards.
 
-`pnpm validate` passed build, formatting, type checks, lint, 705 unit tests and 36 integration tests. The saved-workflow cases ran with Pi 1.4.0 and `PICCO_SUBAGENTS_EXTENSION` configured, rather than skipping. They also passed against the repository's Pi 1.0.0. Bubblewrap integration used a temporary outer sandbox to expose installed Pi and Node under `/usr/local`, without changing host installation or skipping required bubblewrap cases.
+Validation covers build, formatting, type checks, lint, unit tests and integration tests. The saved-workflow cases run with Pi 1.4.0 and `PICCO_SUBAGENTS_EXTENSION` configured, rather than skipping. Bubblewrap integration uses a temporary outer sandbox to expose installed Pi and Node under `/usr/local`, without changing host installation or skipping required bubblewrap cases.
 
 ## Remaining release work
 
-After releasing core, update the isolated agent's published dependency and configure the adapter for its dedicated review sessions. The running server and installed consumer packages have not changed.
+After releasing the GitHub reviews package, update the consuming application, enable `holdWorkflows` and remove its local tracking adapter. The package owns the holds; the application still owns its custom review prompt and workflow installation. No running consumer is changed by these package tests.
 
 The local proof establishes execution ownership and notification ordering for the tested versions. It does not validate a real review, GitHub delivery, persisted-session resumption after a detached worker retires, or arbitrary future pi-subagents versions. Runtime process-tree cleanup remains the runtime's responsibility; token revocation fences surviving descendants from future host authority.

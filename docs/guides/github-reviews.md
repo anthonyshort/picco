@@ -85,6 +85,16 @@ Use `onRunStart` to notify the user when an eligible request has been reserved a
 
 Use `onRunComplete` to report a durable outcome to an application log or notification system. The plugin records the callback attempt before invoking it and does not automatically repeat an uncertain attempt. Callback failures are visible in run details and do not make a recorded review eligible again. The application still owns its notification destination and message.
 
+## Run a saved Pi workflow
+
+A custom review prompt can launch a saved workflow through `SubagentWorkflow`. Install pi-subagents and the saved workflow in the worker's Pi profile, and supply the arguments that workflow requires. Set `holdWorkflows: true` on `githubReviews()` to track accepted launches through Picco's execution holds. Applications do not need a separate tracking plugin.
+
+The initial task ID acknowledges launch, not completion. The parent should yield and wait for the completion notification, then inspect the result and verify required GitHub publication before calling `github_review_complete`. A completed workflow task does not by itself prove publication. Do not poll, rerun the workflow or repeat an uncertain remote write.
+
+The review execution stays active until all tracked workflows finish and the parent follow-up settles. Its original deadline and cancellation signal still apply, and it keeps its review concurrency slot throughout. Failed or stopped workflows fail the execution. Picco retires the worker before the next queued turn so detached tasks cannot reuse its authority.
+
+The setting defaults to `false` and does not change which workflow the prompt launches. When enabled, tracking is limited to this plugin's review sessions and creates no holds unless a saved workflow launches. A consumer using a local workflow-tracking adapter should remove it after upgrading and enabling this setting; the package then owns that behaviour.
+
 ## Inspect and pause work
 
 Ask the assistant to inspect `github_reviews_status` for the last successful poll, API budget, admission state, active work and blockers. `github_reviews_list` shows candidate state; `github_reviews_details` shows an item's attempts and recorded completion.

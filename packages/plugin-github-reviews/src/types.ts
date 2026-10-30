@@ -8,6 +8,10 @@ import { StoreRunSchema } from "./store.js";
 export const GithubReviewsSettingsSchema = z
   .object({
     enabled: z.boolean().default(false),
+    /**
+     * Hold accepted saved workflows until the review parent handles their completion.
+     */
+    holdWorkflows: z.boolean().default(false),
     repositories: z
       .array(
         z

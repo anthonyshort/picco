@@ -15,7 +15,7 @@ import {
 } from "@picco-agent/core";
 import { bridgeExtensionBundle } from "./bridge-bundle.js";
 import { startFakeModel, type ModelAction } from "./fake-model.js";
-import { observeWorkflows } from "./workflow-observer.js";
+import { githubReviews } from "@picco-agent/plugin-github-reviews";
 
 const extension = process.env.PICCO_SUBAGENTS_EXTENSION;
 const piBinary = process.env.PICCO_PI_BIN;
@@ -172,8 +172,9 @@ async function createWorkflowProof(opts: WorkflowProofOptions) {
   });
   await bridge.start();
   cleanups.push(() => bridge.stop());
+  const reviews = githubReviews({ enabled: false, holdWorkflows: opts.held });
   const observe = (ctx: PrepareExecutionContext) => {
-    const adapter = opts.held ? observeWorkflows(ctx) : undefined;
+    const adapter = reviews.prepareExecution?.(ctx);
     return {
       onEvent(event: WorkerEvent) {
         events.push(event);
