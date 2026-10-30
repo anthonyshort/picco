@@ -1,13 +1,24 @@
-import * as z from "zod";
-import type { ExecutionHold, PrepareExecutionContext, ExecutionObserver } from "@picco-agent/core";
+import type { ExecutionHold, ExecutionObserver, PrepareExecutionContext } from "@picco-agent/core";
+import { z } from "zod";
 
 /**
- * Pi-subagents 0.22 returns this metadata after accepting a saved workflow.
+ * Accepted workflow launches return their background task ID in tool result details.
  */
 const WorkflowStartSchema = z.object({ details: z.object({ taskId: z.string().min(1) }) });
 
 /**
- * Completion outbox entries identify terminal tasks, including batched entries.
+ * Pi returns pre-launch validation failures as text-only results without task metadata.
+ */
+const WorkflowRejectionSchema = z.object({
+  content: z
+    .array(z.object({ type: z.literal("text"), text: z.string() }))
+    .min(1)
+    .max(100),
+  details: z.undefined().optional(),
+});
+
+/**
+ * Terminal notifications identify the task and optionally explain a failure.
  */
 const CompletionSchema = z.object({
   id: z.string().min(1),
@@ -16,19 +27,33 @@ const CompletionSchema = z.object({
 });
 
 /**
- * The outbox places additional completions in the first completion's details.
+ * The first notification carries additional completions in its others field.
  */
 const BatchSchema = z.object({ others: z.array(z.unknown()).max(1000).optional() });
 
 /**
- * Track saved workflows using existing structured RPC events, without dependency changes.
+ * Lifecycle states retain released task IDs so later launches cannot reuse them.
+ */
+const WORKFLOW_STATUSES = ["running", "completed", "released"] as const;
+
+/**
+ * An accepted workflow owns one hold until completion or failure.
+ */
+interface WorkflowTask {
+  hold: ExecutionHold;
+  status: (typeof WORKFLOW_STATUSES)[number];
+}
+
+/**
+ * Keep accepted review workflows in their execution until the parent has handled completion. State
+ * belongs to one prompt, even when several prompts share a session.
  */
 export function observeWorkflows(ctx: PrepareExecutionContext): ExecutionObserver | void {
   if (ctx.execution.session.source !== "github-reviews") {
     return;
   }
   const launches = new Set<string>();
-  const tasks = new Map<string, { hold: ExecutionHold; terminal: boolean }>();
+  const tasks = new Map<string, WorkflowTask>();
   return {
     onEvent(event) {
       switch (event.type) {
@@ -45,6 +70,9 @@ export function observeWorkflows(ctx: PrepareExecutionContext): ExecutionObserve
           if (event.isError) {
             break;
           }
+          if (WorkflowRejectionSchema.safeParse(event.result).success) {
+            break;
+          }
           const started = WorkflowStartSchema.parse(event.result);
           const id = started.details.taskId;
           if (tasks.has(id)) {
@@ -52,7 +80,7 @@ export function observeWorkflows(ctx: PrepareExecutionContext): ExecutionObserve
           }
           tasks.set(id, {
             hold: ctx.hold({ name: `workflow:${id}`, retireWorker: true }),
-            terminal: false,
+            status: "running",
           });
           break;
         }
@@ -67,27 +95,34 @@ export function observeWorkflows(ctx: PrepareExecutionContext): ExecutionObserve
               continue;
             }
             const task = tasks.get(completion.data.id);
-            if (!task || task.terminal) {
+            if (!task || task.status !== "running") {
               continue;
             }
-            task.terminal = true;
-            if (completion.data.status !== "completed") {
+            if (completion.data.status === "completed") {
+              task.status = "completed";
+            } else {
+              task.status = "released";
               task.hold.fail(new Error(completion.data.error ?? "Workflow stopped"));
             }
           }
           break;
         }
         case "agent_settled": {
-          // Completion starts a parent continuation; release its work after that turn settles.
+          // The completion notification starts a parent turn; wait for that turn to settle.
           for (const task of tasks.values()) {
-            if (task.terminal) {
+            if (task.status === "completed") {
+              task.status = "released";
               task.hold.complete();
             }
           }
           break;
         }
-        case "agent_start":
+        case "agent_start": {
           break;
+        }
+        default: {
+          throw new Error("Unknown workflow observer event");
+        }
       }
     },
   };
