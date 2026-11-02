@@ -668,6 +668,140 @@ describe("createAgent", () => {
       const res = await callBridge(bridgeOf(runtime.spawns[0]!), "reply", { text: "x" });
       expect(res.status).toBe(401);
     });
+
+    test.each(["open", "run", "once", "plugin"] as const)(
+      "%s carries host-tool restrictions through to the bridge",
+      async (mode) => {
+        const gate = Promise.withResolvers<string>();
+        let ctx!: PluginContext;
+        let writes = 0;
+        const publish = tool({
+          name: "publish",
+          description: "Publish",
+          input: z.object({}),
+          execute: () => {
+            writes++;
+            return "published";
+          },
+        });
+        const record = tool({
+          name: "record_result",
+          description: "Record this result",
+          input: z.object({}),
+          execute: () => "recorded",
+        });
+        const { agent, runtime } = agentWith({
+          tools: [publish],
+          plugins: [
+            {
+              name: "browser",
+              start: (context) => {
+                ctx = context;
+              },
+            },
+          ],
+          runtime: new FakeRuntime({ reply: () => gate.promise }),
+        });
+        await agent.start({ handleSignals: false });
+        const session = { tools: [record], allowedHostTools: ["record_result"] };
+        const start = async () => {
+          switch (mode) {
+            case "open":
+              return (await agent.sessions.open("check", session)).run("assess");
+            case "run":
+              return agent.sessions.run("check", "assess", { session });
+            case "once":
+              return agent.run("assess", session);
+            case "plugin":
+              return ctx.run("assess", session);
+            default:
+              throw new Error(`Unknown run mode: ${mode satisfies never}`);
+          }
+        };
+        const pending = start();
+        try {
+          await vi.waitFor(() => expect(runtime.spawns[0]?.process.prompts).toEqual(["assess"]));
+          const spawn = runtime.spawns[0]!;
+          expect(spawn.spec.tools?.map(({ name }) => name)).toEqual(["record_result"]);
+          expect(
+            await (await callBridge(bridgeOf(spawn), "record_result", {})).json(),
+          ).toMatchObject({ isError: false, content: [{ text: "recorded" }] });
+          expect(await (await callBridge(bridgeOf(spawn), "publish", {})).json()).toMatchObject({
+            isError: true,
+          });
+          expect(writes).toBe(0);
+        } finally {
+          gate.resolve("done");
+          await pending;
+        }
+      },
+    );
+
+    test("empty host-tool access omits the default reload tool", async () => {
+      const { agent, runtime } = agentWith({});
+      await agent.start({ handleSignals: false });
+      await agent.sessions.run("restricted", "assess", { session: { allowedHostTools: [] } });
+      expect(runtime.spawns[0]!.spec.tools).toEqual([]);
+    });
+
+    test("invalid host-tool restrictions fail before spawning a worker", async () => {
+      const { agent, runtime } = agentWith({});
+      await agent.start({ handleSignals: false });
+      await expect(
+        agent.sessions.open("unknown", { allowedHostTools: ["missing"] }),
+      ).rejects.toThrow('Unknown allowed host tool "missing"');
+      await expect(
+        agent.sessions.open("duplicate", { allowedHostTools: ["reload", "reload"] }),
+      ).rejects.toThrow('Duplicate allowed host tool "reload"');
+      expect(runtime.spawns).toEqual([]);
+    });
+
+    test.each(["reset", "worker death"] as const)(
+      "host-tool restrictions survive %s when a session handle runs without options",
+      async (mode) => {
+        const { agent, runtime } = agentWith({});
+        await agent.start({ handleSignals: false });
+        const allowedHostTools: string[] = [];
+        const session = await agent.sessions.open("restricted", { allowedHostTools });
+        allowedHostTools.push("reload");
+        switch (mode) {
+          case "reset":
+            await session.reset();
+            break;
+          case "worker death":
+            await runtime.spawns[0]!.process.kill();
+            break;
+          default:
+            throw new Error(`Unknown respawn mode: ${mode satisfies never}`);
+        }
+
+        await session.run("assess");
+        expect(runtime.spawns[1]!.spec.tools).toEqual([]);
+      },
+    );
+
+    test("a restricted session fails closed if its scoped tool is not rebound after reset", async () => {
+      const { agent, runtime } = agentWith({});
+      await agent.start({ handleSignals: false });
+      const record = tool({
+        name: "record_result",
+        description: "Record a result",
+        input: z.object({}),
+        execute: () => "recorded",
+      });
+      const session = await agent.sessions.open("restricted", {
+        tools: [record],
+        allowedHostTools: ["record_result"],
+      });
+      await session.reset();
+      await expect(session.run("assess")).rejects.toThrow(
+        'Unknown allowed host tool "record_result"',
+      );
+      expect(runtime.spawns).toHaveLength(1);
+
+      await agent.sessions.open("restricted", { tools: [record] });
+      expect(runtime.spawns[1]!.spec.tools?.map(({ name }) => name)).toEqual(["record_result"]);
+    });
   });
 
   describe("hermetic agent config", () => {

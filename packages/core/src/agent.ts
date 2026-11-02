@@ -243,7 +243,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
         }
         for (const plugin of plugins) await plugin.prepareAllSessions?.(info);
       },
-      setupSession: ({ ref, tools: sessionTools, pi: piOverride, env }) => {
+      setupSession: ({ ref, tools: sessionTools, allowedHostTools, pi: piOverride, env }) => {
         // Merge per-session pi overrides onto the agent-wide config, then resolve
         // the path-valued fields (packages are pi source strings — passed verbatim).
         const merged = mergePi(config.pi, piOverride);
@@ -266,12 +266,8 @@ export function createAgent(config: AgentConfig): AgentHandle {
           pi = plugin.configureAllSessions(ref, pi) ?? pi;
         }
 
-        const allTools = [...tools.values(), ...(sessionTools ?? [])];
-        const toolSpecs = allTools.map((t) => ({
-          name: t.name,
-          description: t.description,
-          inputSchema: z.toJSONSchema(t.input, { io: "input" }) as Record<string, unknown>,
-        }));
+        const bridgeToken = bridge!.issueToken(ref, sessionTools, allowedHostTools);
+        const toolSpecs = bridge!.describeTools(bridgeToken);
 
         // Append core's bundled extensions after the fold.
         pi = {
@@ -286,7 +282,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
           pi,
           env: { ...env },
           tools: toolSpecs,
-          bridgeToken: bridge!.issueToken(ref, sessionTools),
+          bridgeToken,
         };
       },
       revokeSession: (ref) => bridge?.releaseSession(ref),
