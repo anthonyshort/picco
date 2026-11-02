@@ -1,5 +1,11 @@
 # @picco-agent/plugin-github-reviews
 
+## 0.4.2
+
+### Patch Changes
+
+- 5282f79: Require a new personal review request before reviewing later commits on an already reviewed pull request. Preserve prior attempt blockers across commits until a newer request or explicit retry resolution permits another attempt.
+
 ## 0.4.1
 
 ### Patch Changes
