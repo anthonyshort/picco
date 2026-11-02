@@ -28,6 +28,7 @@ Picco includes packages for common assistant surfaces:
 | [`plugin-telegram`](../../packages/plugin-telegram/)             | Receive messages and keep one session per chat or topic                      |
 | [`plugin-github`](../../packages/plugin-github/)                 | Respond to GitHub mentions or expose standalone PR comment/review tools      |
 | [`plugin-github-reviews`](../../packages/plugin-github-reviews/) | Poll personal review requests and run queued reviews                         |
+| [`plugin-browser-checks`](../../packages/plugin-browser-checks/) | Answer bounded browser questions using Atlas                                 |
 | [`plugin-agentmail`](../../packages/plugin-agentmail/)           | Receive email and expose mailbox tools                                       |
 | [`plugin-cron`](../../packages/plugin-cron/)                     | Run scheduled prompts and manage jobs                                        |
 | [`plugin-notifications`](../../packages/plugin-notifications/)   | Send notifications through configured adapters and inspect delivery receipts |
