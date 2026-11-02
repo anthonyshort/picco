@@ -3,6 +3,7 @@ import type { ExecutionFinalisation } from "./session/execution.js";
 import type { ReloadOperation } from "./session/reload.js";
 import type { McpServerConfig } from "@earendil-works/pi-coding-agent";
 import type { Tool } from "./tools/tool.js";
+import type { McpServerOptions } from "./tools/mcp-server.js";
 import type { Turn, TurnEvent, TurnResult } from "./session/turn.js";
 
 // Re-export session types so they're available from the main export
@@ -623,6 +624,11 @@ export interface SessionToolSpec {
 }
 
 export interface AgentConfig {
+  /**
+   * Serve explicitly selected global tools over authenticated loopback MCP. Disabled when omitted.
+   */
+  mcp?: McpServerOptions;
+
   /**
    * Host-owned logging destination. Picco never flushes or closes it.
    */

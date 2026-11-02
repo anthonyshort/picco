@@ -27,9 +27,14 @@ export type SessionCaller = { kind: "session"; ref: SessionRef };
 export type HostCaller = { kind: "host" };
 
 /**
- * Who invoked a tool: one of this agent's sessions, or host code calling directly.
+ * Who invoked a tool: a session, host code, or an authenticated external MCP client.
  */
-export type Caller = SessionCaller | HostCaller;
+export type Caller = SessionCaller | HostCaller | McpCaller;
+
+/**
+ * Authenticated external MCP client, outside any session or attributed user.
+ */
+export type McpCaller = { kind: "mcp" };
 
 /**
  * Everything a tool's `execute` receives besides its validated input: who is calling, a logger, and
@@ -46,7 +51,7 @@ export interface ToolContext {
    */
   logger: Logger;
   /**
-   * Who called: one of this agent's sessions, or host code.
+   * Who called: a session, host code, or an authenticated external MCP client.
    */
   caller: Caller;
   /**

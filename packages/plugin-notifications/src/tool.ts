@@ -60,10 +60,22 @@ export function createNotificationTool(
       switch (input.action) {
         case "send": {
           if (!input.destination && broadcast) {
-            const scope =
-              ctx.caller.kind === "session"
-                ? JSON.stringify(["session", ctx.caller.ref.source, ctx.caller.ref.key])
-                : JSON.stringify(["host"]);
+            let scope: string;
+            switch (ctx.caller.kind) {
+              case "session":
+                scope = JSON.stringify(["session", ctx.caller.ref.source, ctx.caller.ref.key]);
+                break;
+              case "host":
+                scope = JSON.stringify(["host"]);
+                break;
+              case "mcp":
+                scope = JSON.stringify(["mcp"]);
+                break;
+              default: {
+                const unexpected: never = ctx.caller;
+                throw new Error(`Unsupported notification caller: ${String(unexpected)}`);
+              }
+            }
             return JSON.stringify(
               await broadcast(
                 NotificationBroadcastSchema.parse({

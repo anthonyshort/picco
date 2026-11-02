@@ -306,6 +306,8 @@ function describeCaller(caller: Caller): string {
       return `session:${caller.ref.source}/${caller.ref.key}`;
     case "host":
       return "host";
+    case "mcp":
+      return "mcp";
     default:
       throw new Error(`Unknown caller kind: ${(caller as Caller).kind}`);
   }

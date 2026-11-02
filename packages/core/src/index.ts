@@ -9,6 +9,7 @@ export type { AgentPaths } from "./utils/agent-paths.js";
 export { errorMessage, markdownTable } from "./utils/format.js";
 export { tool } from "./tools/tool.js";
 export type { ContentBlock, Tool, ToolContext, ToolResult } from "./tools/tool.js";
+export type { McpServerOptions } from "./tools/mcp-server.js";
 
 export type {
   AgentConfig,

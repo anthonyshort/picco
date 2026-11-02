@@ -7,6 +7,7 @@ import * as z from "zod";
 import { createAgentPaths, generateSessionId } from "./utils/agent-paths.js";
 import type { AgentPaths } from "./utils/agent-paths.js";
 import { ToolBridge } from "./tools/bridge.js";
+import { createMcpServer } from "./tools/mcp-server.js";
 import { createLogger, scopeLogger } from "./utils/logger.js";
 import { SessionManager } from "./session/manager.js";
 import type { Tool } from "./tools/tool.js";
@@ -112,6 +113,15 @@ export function createAgent(config: AgentConfig): AgentHandle {
     }),
     "Picco",
   );
+
+  const mcp = config.mcp
+    ? createMcpServer({
+        config: config.mcp,
+        tools,
+        name,
+        logger: scopeLogger(logger, { component: "mcp" }),
+      })
+    : undefined;
 
   let manager: SessionManager | null = null;
   let bridge: ToolBridge | null = null;
@@ -307,6 +317,8 @@ export function createAgent(config: AgentConfig): AgentHandle {
       logger.log("plugin started", { plugin: plugin.name });
     }
 
+    await mcp?.start();
+
     if (opts.handleSignals !== false) {
       signalHandler = (signal: string) => {
         logger.log(`shutting down (${signal})`);
@@ -333,9 +345,10 @@ export function createAgent(config: AgentConfig): AgentHandle {
       signalHandler = null;
     }
 
+    await mcp?.stop();
+
     // Mark the manager stopped and tear sessions down while plugin services are still alive.
     await manager?.stopAll();
-    manager = null;
 
     for (const plugin of [...startedPlugins].reverse()) {
       try {
@@ -345,6 +358,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
       }
     }
     startedPlugins.length = 0;
+    manager = null;
 
     await bridge?.stop();
     bridge = null;

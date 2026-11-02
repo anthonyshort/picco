@@ -35,6 +35,34 @@ function agentWith(config: Partial<AgentConfig> & { runtime?: FakeRuntime }) {
 }
 
 describe("createAgent", () => {
+  test("keeps stopped sessions available for plugin cleanup without admitting new work", async () => {
+    let context: PluginContext | undefined;
+    let cleaned = false;
+    const { agent, runtime } = agentWith({
+      plugins: [
+        {
+          name: "cleanup",
+          async start(ctx) {
+            context = ctx;
+            await ctx.sessions.open("active");
+          },
+          async stop() {
+            if (!context) throw new Error("Missing plugin context");
+            await expect(context.sessions.open("new")).rejects.toThrow(
+              "Session manager is stopped",
+            );
+            await context.sessions.reset("active");
+            cleaned = true;
+          },
+        },
+      ],
+    });
+    await agent.start({ handleSignals: false });
+    await agent.stop();
+    expect(cleaned).toBe(true);
+    expect(runtime.spawns[0].process.killed).toBe(true);
+  });
+
   describe("validation", () => {
     test("duplicate tool names are a startup error", () => {
       const a = tool({ name: "x", description: "d", input: z.object({}), execute: () => "" });
