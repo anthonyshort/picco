@@ -92,6 +92,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
   const commands = collectCommands(plugins);
 
   const tools = collectTools(config, plugins);
+  const mcpTools = collectMcpTools(plugins);
   addTool(
     tools,
     defineTool({
@@ -117,7 +118,7 @@ export function createAgent(config: AgentConfig): AgentHandle {
   const mcp = config.mcp
     ? createMcpServer({
         config: config.mcp,
-        tools,
+        tools: mcpTools,
         name,
         logger: scopeLogger(logger, { component: "mcp" }),
       })
@@ -432,6 +433,19 @@ function collectTools(config: AgentConfig, plugins: Plugin[]): Map<string, Tool>
   for (const tool of config.tools ?? []) addTool(tools, tool, "config.tools");
   for (const plugin of plugins) {
     for (const tool of plugin.tools ?? []) addTool(tools, tool, `plugin "${plugin.name}"`);
+  }
+  return tools;
+}
+
+/**
+ * Collect plugins' external MCP tools independently of tools available to agent sessions.
+ */
+function collectMcpTools(plugins: Plugin[]): Map<string, Tool> {
+  const tools = new Map<string, Tool>();
+  for (const plugin of plugins) {
+    for (const tool of plugin.mcpTools ?? []) {
+      addTool(tools, tool, `plugin "${plugin.name}" MCP tools`);
+    }
   }
   return tools;
 }

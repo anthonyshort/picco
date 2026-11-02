@@ -70,35 +70,46 @@ Picco's logger. Interactive extension dialogs are cancelled in headless sessions
 
 `PiOptions.mcpServers` uses Pi's exported `McpServerConfig` type.
 
-## Expose Picco tools to other agents
+## Expose plugin tools to other agents
 
-Configure `mcp` on the agent to let local MCP clients call selected global tools:
+Declare external tools in a plugin's `mcpTools` and enable the agent's MCP listener:
 
 ```ts
+import { createAgent, tool, type Plugin } from "@picco-agent/core";
+import { local } from "@picco-agent/runtime-local";
+import { z } from "zod";
+
+const status = tool({
+  name: "status",
+  description: "Read service status",
+  input: z.object({}),
+  execute: () => JSON.stringify({ ready: true }),
+});
+const service: Plugin = { name: "service", mcpTools: [status] };
 const agent = createAgent({
   name: "assistant",
   runtime: local(),
-  plugins: [reviewJobs()],
-  mcp: {
-    port: 8794,
-    token: process.env.PICCO_MCP_TOKEN!,
-    tools: ["review_start", "review_status", "review_report"],
-  },
+  plugins: [service],
+  mcp: { port: 8794, token: process.env.PICCO_MCP_TOKEN! },
 });
 await agent.start();
 ```
 
-Here `reviewJobs()` is an application plugin contributing those tools. Configure your client with
-`http://127.0.0.1:8794/mcp` and an `Authorization: Bearer TOKEN` header using the same secret.
-Keep the token in private configuration. The endpoint supports stateless Streamable HTTP POST
-requests and rejects browser origins. It starts after plugins and drains requests before shutdown
-tears down sessions or plugins.
+`Plugin.tools` supplies tools to agent sessions. `Plugin.mcpTools` supplies tools to external MCP
+clients. Neither collection is automatically added to the other. To share a tool, include the same
+tool object in both arrays. The two collections can also use the same name with different input
+schemas and implementations. Duplicate names within either collection fail agent construction.
+Session-scoped registrations are not exported.
 
-Only the named global tools are exposed. Unknown names fail agent construction. Session-scoped tool registrations
-are not exported. Global tools still enforce their caller checks. Each call receives `caller: { kind: "mcp" }` with no session, user or execution identity.
-Exported tools must support that caller and remain responsible for permissions, safe output and any
-background jobs they start. A disconnected client does not imply that a side effect was cancelled;
-job retry and cancellation belong to the tool's own contract.
+Configure your client with `http://127.0.0.1:8794/mcp` and an `Authorization: Bearer TOKEN` header
+using the same secret. Keep the token in private configuration. The endpoint supports stateless
+Streamable HTTP POST requests and rejects browser origins. It starts after plugins and drains
+requests before shutdown tears down sessions or plugins.
+
+Each MCP call receives `caller: { kind: "mcp" }` with no session, user or execution identity. Tools
+remain responsible for permissions, safe output and any background jobs they start. A disconnected
+client does not imply that a side effect was cancelled; job retry and cancellation belong to the
+tool's own contract.
 
 `toolTimeoutMs` defaults to five minutes. Tools receive an abort signal and timed-out calls return an
 error. Shutdown waits up to 30 seconds (or the configured tool timeout, if shorter). If a tool ignores

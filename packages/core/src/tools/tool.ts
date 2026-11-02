@@ -69,12 +69,12 @@ export interface ToolContext {
 }
 
 /**
- * A tool the agent can call: a Zod-validated input schema plus an `execute` that runs it. Served to
- * sessions over the loopback bridge, and callable by host code.
+ * A validated operation contributed to agent sessions or external MCP clients, or called by host
+ * code. Plugin.tools and Plugin.mcpTools choose where each definition is available.
  */
 export interface Tool<Input extends z.ZodType = z.ZodType> {
   /**
-   * Snake_case, unique across the agent.
+   * Snake_case, unique within its agent-session or external MCP tool collection.
    */
   name: string;
   /**
@@ -83,7 +83,7 @@ export interface Tool<Input extends z.ZodType = z.ZodType> {
   description: string;
   /**
    * Zod schema for the tool's arguments — the single source of truth for the input shape. `execute`
-   * receives `z.infer<Input>`, and the bridge publishes this schema's JSON Schema to the session.
+   * receives `z.infer<Input>`; the bridge and MCP server publish the schema for their callers.
    */
   input: Input;
   /**

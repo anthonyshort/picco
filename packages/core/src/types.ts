@@ -405,9 +405,15 @@ export interface Plugin {
   name: string;
 
   /**
-   * Tools contributed to the agent. Name clashes will throw an error.
+   * Tools contributed to agent sessions. Independent of the external MCP tool collection.
    */
   tools?: Tool[];
+
+  /**
+   * Tools exposed to external clients when AgentConfig.mcp is enabled. Not added to agent sessions.
+   * Names must be unique across plugins' MCP tools; agent tools may use the same names.
+   */
+  mcpTools?: Tool[];
 
   /**
    * Slash commands contributed to gateways. Name clashes are construction errors.
@@ -625,7 +631,7 @@ export interface SessionToolSpec {
 
 export interface AgentConfig {
   /**
-   * Serve explicitly selected global tools over authenticated loopback MCP. Disabled when omitted.
+   * Serve plugins' MCP tools over authenticated loopback MCP. Disabled when omitted.
    */
   mcp?: McpServerOptions;
 

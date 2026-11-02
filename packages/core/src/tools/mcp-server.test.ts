@@ -12,6 +12,11 @@ import { silentLogger } from "../utils/logger.js";
 import type { AgentConfig, AgentHandle, Plugin } from "../types.js";
 import { tool, type ToolContext } from "./tool.js";
 
+/**
+ * Allow tests to contribute MCP tools through a fixture plugin.
+ */
+type McpTestConfig = Partial<AgentConfig> & Pick<Plugin, "mcpTools">;
+
 let directory: string;
 let agents: AgentHandle[];
 let clients: Client[];
@@ -29,7 +34,7 @@ afterEach(async () => {
 });
 
 describe("MCP server", () => {
-  test("discovers only selected global tools and validates transformed input once", async () => {
+  test("discovers plugin MCP tools separately from agent tools and validates transformed input once", async () => {
     const contexts: ToolContext[] = [];
     const runtime = new FakeRuntime();
     const echo = tool({
@@ -52,10 +57,10 @@ describe("MCP server", () => {
       input: z.object({}),
       execute: () => "private",
     });
-    const { agent, url } = await start(
-      { runtime, plugins: [{ name: "sample", tools: [echo, hidden] }] },
-      ["echo"],
-    );
+    const { agent, url } = await start({
+      runtime,
+      plugins: [{ name: "sample", tools: [hidden], mcpTools: [echo] }],
+    });
     const client = await connect(url);
     const listed = await client.listTools();
     expect(listed.tools.map(({ name }) => name)).toEqual(["echo"]);
@@ -98,36 +103,110 @@ describe("MCP server", () => {
     });
     expect(contexts).toHaveLength(2);
     expect(runtime.spawns).toHaveLength(1);
+    expect(runtime.spawns[0].spec.tools?.map(({ name }) => name)).toEqual([
+      "hidden",
+      "reload",
+      "private_session",
+    ]);
+  });
+
+  test("allows the same name to have separate schemas and handlers for agents and MCP clients", async () => {
+    const runtime: FakeRuntime = new FakeRuntime({
+      async reply() {
+        const { bridge } = runtime.spawns[0].spec;
+        const response = await fetch(bridge.url, {
+          method: "POST",
+          headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+          body: JSON.stringify({ tool: "search", args: { query: "agent input" } }),
+        });
+        const result = z
+          .object({
+            content: z.array(z.object({ type: z.literal("text"), text: z.string() })).max(10),
+            isError: z.boolean(),
+          })
+          .parse(await response.json());
+        expect(result.isError).toBe(false);
+        return result.content[0].text;
+      },
+    });
+    const sessionTool = tool({
+      name: "search",
+      description: "Search for the agent",
+      input: z.object({ query: z.string() }),
+      execute: ({ query }) => `Agent: ${query}`,
+    });
+    const externalTool = tool({
+      name: "search",
+      description: "Search for external clients",
+      input: z.object({ id: z.number() }),
+      execute: ({ id }) => `MCP: ${id}`,
+    });
+    const shared = tool({
+      name: "shared",
+      description: "Shared explicitly",
+      input: z.object({}),
+      execute: () => "shared",
+    });
+    const { agent, url } = await start({
+      runtime,
+      plugins: [
+        {
+          name: "search",
+          tools: [sessionTool, shared],
+          mcpTools: [externalTool, shared],
+        },
+      ],
+    });
+    expect((await agent.sessions.run("worker", "Call search")).text).toBe("Agent: agent input");
+    const specifications = runtime.spawns[0].spec.tools ?? [];
+    expect(specifications.map(({ name }) => name)).toEqual(["search", "shared", "reload"]);
+    expect(specifications.find(({ name }) => name === "search")?.inputSchema).toMatchObject({
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    });
+    const client = await connect(url);
+    const listed = await client.listTools();
+    expect(listed.tools.map(({ name }) => name)).toEqual(["search", "shared"]);
+    expect(listed.tools.find(({ name }) => name === "search")?.inputSchema).toMatchObject({
+      properties: { id: { type: "number" } },
+      required: ["id"],
+    });
+    expect(await client.callTool({ name: "search", arguments: { id: 7 } })).toMatchObject({
+      content: [{ type: "text", text: "MCP: 7" }],
+    });
+    expect(
+      await client.callTool({ name: "search", arguments: { query: "agent input" } }),
+    ).toMatchObject({ isError: true });
+    expect(await client.callTool({ name: "shared", arguments: {} })).toMatchObject({
+      content: [{ type: "text", text: "shared" }],
+    });
   });
 
   test("returns full rich results and tool failures through real reconnecting clients", async () => {
     const report = "Full report. ".repeat(2000);
-    const { url } = await start(
-      {
-        tools: [
-          tool({
-            name: "report",
-            description: "Report",
-            input: z.object({}),
-            execute: () => ({
-              content: [
-                { type: "text", text: report },
-                { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
-              ],
-            }),
+    const { url } = await start({
+      mcpTools: [
+        tool({
+          name: "report",
+          description: "Report",
+          input: z.object({}),
+          execute: () => ({
+            content: [
+              { type: "text", text: report },
+              { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+            ],
           }),
-          tool({
-            name: "fail",
-            description: "Fail",
-            input: z.object({}),
-            execute() {
-              throw new Error("Rejected secret-token");
-            },
-          }),
-        ],
-      },
-      ["report", "fail"],
-    );
+        }),
+        tool({
+          name: "fail",
+          description: "Fail",
+          input: z.object({}),
+          execute() {
+            throw new Error("Rejected secret-token");
+          },
+        }),
+      ],
+    });
     const first = await connect(url);
     await first.close();
     const second = await connect(url);
@@ -145,22 +224,19 @@ describe("MCP server", () => {
 
   test("rejects unauthenticated, browser, foreign-host, malformed and oversized requests before dispatch", async () => {
     let calls = 0;
-    const { url } = await start(
-      {
-        tools: [
-          tool({
-            name: "probe",
-            description: "Probe",
-            input: z.object({}),
-            execute() {
-              calls++;
-              return "ok";
-            },
-          }),
-        ],
-      },
-      ["probe"],
-    );
+    const { url } = await start({
+      mcpTools: [
+        tool({
+          name: "probe",
+          description: "Probe",
+          input: z.object({}),
+          execute() {
+            calls++;
+            return "ok";
+          },
+        }),
+      ],
+    });
     expect((await fetch(url, { method: "POST", body: "{}" })).status).toBe(401);
     const headers = {
       Authorization: "Bearer secret-token",
@@ -216,24 +292,21 @@ describe("MCP server", () => {
     const allEntered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     let calls = 0;
-    const { url } = await start(
-      {
-        tools: [
-          tool({
-            name: "hold",
-            description: "Hold",
-            input: z.object({}),
-            async execute() {
-              calls++;
-              if (calls === 32) allEntered.resolve();
-              await release.promise;
-              return "done";
-            },
-          }),
-        ],
-      },
-      ["hold"],
-    );
+    const { url } = await start({
+      mcpTools: [
+        tool({
+          name: "hold",
+          description: "Hold",
+          input: z.object({}),
+          async execute() {
+            calls++;
+            if (calls === 32) allEntered.resolve();
+            await release.promise;
+            return "done";
+          },
+        }),
+      ],
+    });
     const headers = {
       Authorization: "Bearer secret-token",
       "Content-Type": "application/json",
@@ -270,7 +343,7 @@ describe("MCP server", () => {
       stop() {
         events.push("stopped");
       },
-      tools: [
+      mcpTools: [
         tool({
           name: "hold",
           description: "Hold",
@@ -286,7 +359,7 @@ describe("MCP server", () => {
         }),
       ],
     };
-    const { agent, url } = await start({ plugins: [plugin] }, ["hold"]);
+    const { agent, url } = await start({ plugins: [plugin] });
     const client = await connect(url);
     const result = client.callTool({ name: "hold", arguments: {} });
     await entered.promise;
@@ -305,33 +378,30 @@ describe("MCP server", () => {
   test("signals a premature client disconnect and waits for cooperative cleanup", async () => {
     const entered = Promise.withResolvers<AbortSignal>();
     const cancelled = Promise.withResolvers<void>();
-    const { agent, url } = await start(
-      {
-        tools: [
-          tool({
-            name: "hold",
-            description: "Hold",
-            input: z.object({}),
-            async execute(input, ctx) {
-              if (!ctx.signal) throw new Error("Expected cancellation signal");
-              entered.resolve(ctx.signal);
-              await new Promise<void>((resolve) =>
-                ctx.signal!.addEventListener(
-                  "abort",
-                  () => {
-                    cancelled.resolve();
-                    resolve();
-                  },
-                  { once: true },
-                ),
-              );
-              return JSON.stringify(input);
-            },
-          }),
-        ],
-      },
-      ["hold"],
-    );
+    const { agent, url } = await start({
+      mcpTools: [
+        tool({
+          name: "hold",
+          description: "Hold",
+          input: z.object({}),
+          async execute(input, ctx) {
+            if (!ctx.signal) throw new Error("Expected cancellation signal");
+            entered.resolve(ctx.signal);
+            await new Promise<void>((resolve) =>
+              ctx.signal!.addEventListener(
+                "abort",
+                () => {
+                  cancelled.resolve();
+                  resolve();
+                },
+                { once: true },
+              ),
+            );
+            return JSON.stringify(input);
+          },
+        }),
+      ],
+    });
     const request = httpRequest(url, {
       method: "POST",
       headers: {
@@ -359,24 +429,21 @@ describe("MCP server", () => {
   test("keeps timed-out executions within the admission limit until they actually settle", async () => {
     const release = Promise.withResolvers<void>();
     let calls = 0;
-    const { agent, url } = await start(
-      {
-        mcp: { port: 0, token: "secret-token", tools: ["hold"], toolTimeoutMs: 80 },
-        tools: [
-          tool({
-            name: "hold",
-            description: "Hold",
-            input: z.object({}),
-            async execute(input) {
-              calls++;
-              await release.promise;
-              return JSON.stringify(input);
-            },
-          }),
-        ],
-      },
-      ["hold"],
-    );
+    const { agent, url } = await start({
+      mcp: { port: 0, token: "secret-token", toolTimeoutMs: 80 },
+      mcpTools: [
+        tool({
+          name: "hold",
+          description: "Hold",
+          input: z.object({}),
+          async execute(input) {
+            calls++;
+            await release.promise;
+            return JSON.stringify(input);
+          },
+        }),
+      ],
+    });
     const headers = {
       Authorization: "Bearer secret-token",
       "Content-Type": "application/json",
@@ -416,7 +483,7 @@ describe("MCP server", () => {
     if (!address || typeof address === "string") throw new Error("Expected TCP address");
     const events: string[] = [];
     const agent = make({
-      mcp: { port: address.port, token: "secret-token", tools: [] },
+      mcp: { port: address.port, token: "secret-token" },
       plugins: [
         {
           name: "sample",
@@ -444,14 +511,14 @@ describe("MCP server", () => {
     const release = Promise.withResolvers<void>();
     let url = "";
     const agent = make({
-      mcp: { port: 0, token: "secret-token", tools: ["hold"], toolTimeoutMs: 50 },
+      mcp: { port: 0, token: "secret-token", toolTimeoutMs: 50 },
       logger: {
         ...silentLogger(),
         log(message, data) {
           if (message === "MCP listening") url = z.string().parse(data?.url);
         },
       },
-      tools: [
+      mcpTools: [
         tool({
           name: "hold",
           description: "Hold",
@@ -482,27 +549,40 @@ describe("MCP server", () => {
     await agent.stop();
   });
 
-  test("validates explicit tool selection and token before startup", () => {
-    expect(() => make({ mcp: { port: 0, token: " ", tools: [] } })).toThrow();
-    expect(() => make({ mcp: { port: 0, token: "secret-token", tools: ["unknown"] } })).toThrow(
-      "Unknown MCP tool",
-    );
+  test("validates MCP configuration and rejects duplicate external names across plugins", () => {
+    expect(() => make({ mcp: { port: 0, token: " " } })).toThrow();
+    const external = tool({
+      name: "probe",
+      description: "Probe",
+      input: z.object({}),
+      execute: () => "ok",
+    });
     expect(() =>
-      make({ mcp: { port: 0, token: "secret-token", tools: ["reload", "reload"] } }),
-    ).toThrow("Duplicate MCP tool");
+      make({
+        plugins: [
+          { name: "one", mcpTools: [external] },
+          { name: "two", mcpTools: [external] },
+        ],
+      }),
+    ).toThrow('Duplicate tool name "probe" (contributed by plugin "two" MCP tools)');
   });
 });
 
 /**
  * Create an agent with an isolated data directory and no real model runtime.
  */
-function make(config: Partial<AgentConfig>) {
+function make(config: McpTestConfig) {
+  const { mcpTools, ...agentConfig } = config;
   const agent = createAgent({
     name: "mcp-test",
     dataDir: directory,
     runtime: new FakeRuntime(),
     logger: silentLogger(),
-    ...config,
+    ...agentConfig,
+    plugins: [
+      ...(agentConfig.plugins ?? []),
+      ...(mcpTools ? [{ name: "mcp-fixture", mcpTools }] : []),
+    ],
   });
   agents.push(agent);
   return agent;
@@ -511,11 +591,11 @@ function make(config: Partial<AgentConfig>) {
 /**
  * Read the ephemeral listener URL from the host's supported logger.
  */
-async function start(config: Partial<AgentConfig>, tools: string[]) {
+async function start(config: McpTestConfig) {
   let url = "";
   const agent = make({
     ...config,
-    mcp: { ...config.mcp, port: 0, token: "secret-token", tools },
+    mcp: { ...config.mcp, port: 0, token: "secret-token" },
     logger: {
       ...silentLogger(),
       log(message, data) {

@@ -27,7 +27,7 @@ const MAX_REQUESTS = 32;
 const SHUTDOWN_TIMEOUT_MS = 30_000;
 
 /**
- * Host configuration for exporting selected global tools. Port zero requests an ephemeral port.
+ * Host configuration for serving plugins' external MCP tools. Port zero requests an ephemeral port.
  */
 const McpServerOptionsSchema = z
   .object({
@@ -36,7 +36,6 @@ const McpServerOptionsSchema = z
       .string()
       .min(1)
       .refine((token) => token.trim().length > 0, "Use a nonempty bearer token"),
-    tools: z.array(z.string().min(1).max(100)).max(1000),
     toolTimeoutMs: z.number().int().min(1).max(3_600_000).default(300_000),
   })
   .strict();
@@ -47,7 +46,7 @@ const McpServerOptionsSchema = z
 export type McpServerOptions = z.input<typeof McpServerOptionsSchema>;
 
 /**
- * Serve a fixed selection of global tools without granting session authority.
+ * Serve plugin-declared MCP tools without granting session authority.
  */
 export function createMcpServer(opts: {
   config: McpServerOptions;
@@ -56,14 +55,8 @@ export function createMcpServer(opts: {
   logger: Logger;
 }) {
   const config = McpServerOptionsSchema.parse(opts.config);
-  const selected = new Map<string, Tool>();
-  for (const name of config.tools) {
-    if (selected.has(name)) throw new Error(`Duplicate MCP tool: ${name}`);
-    const tool = opts.tools.get(name);
-    if (!tool) throw new Error(`Unknown MCP tool: ${name}`);
-    selected.set(name, tool);
-  }
-  const manifest = [...selected.values()].map((tool) => ({
+  const tools = opts.tools;
+  const manifest = [...tools.values()].map((tool) => ({
     name: tool.name,
     description: tool.description,
     inputSchema: z.toJSONSchema(tool.input, { io: "input" }),
@@ -150,7 +143,7 @@ export function createMcpServer(opts: {
     const server = new Server({ name: opts.name, version: "1" }, { capabilities: { tools: {} } });
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: manifest }));
     server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
-      const tool = selected.get(params.name);
+      const tool = tools.get(params.name);
       if (!tool) return failure("Unknown MCP tool");
       if (executions.size >= MAX_REQUESTS) return failure("Too many MCP tool calls");
       const controller = new AbortController();
@@ -226,7 +219,7 @@ export function createMcpServer(opts: {
         throw new Error("MCP listener has no TCP address");
       opts.logger.log("MCP listening", {
         url: `http://127.0.0.1:${address.port}/mcp`,
-        tools: selected.size,
+        tools: tools.size,
       });
     },
     async stop() {
