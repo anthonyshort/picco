@@ -3,6 +3,7 @@ import type { ExecutionFinalisation } from "./session/execution.js";
 import type { ReloadOperation } from "./session/reload.js";
 import type { McpServerConfig } from "@earendil-works/pi-coding-agent";
 import type { Tool } from "./tools/tool.js";
+import type { McpServerOptions } from "./tools/mcp-server.js";
 import type { Turn, TurnEvent, TurnResult } from "./session/turn.js";
 
 // Re-export session types so they're available from the main export
@@ -404,9 +405,15 @@ export interface Plugin {
   name: string;
 
   /**
-   * Tools contributed to the agent. Name clashes will throw an error.
+   * Tools contributed to agent sessions. Independent of the external MCP tool collection.
    */
   tools?: Tool[];
+
+  /**
+   * Tools exposed to external clients when AgentConfig.mcp is enabled. Not added to agent sessions.
+   * Names must be unique across plugins' MCP tools; agent tools may use the same names.
+   */
+  mcpTools?: Tool[];
 
   /**
    * Slash commands contributed to gateways. Name clashes are construction errors.
@@ -623,6 +630,11 @@ export interface SessionToolSpec {
 }
 
 export interface AgentConfig {
+  /**
+   * Serve plugins' MCP tools over authenticated loopback MCP. Disabled when omitted.
+   */
+  mcp?: McpServerOptions;
+
   /**
    * Host-owned logging destination. Picco never flushes or closes it.
    */

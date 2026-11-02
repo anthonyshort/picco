@@ -1,3 +1,4 @@
+import { fork } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,6 +36,52 @@ function agentWith(config: Partial<AgentConfig> & { runtime?: FakeRuntime }) {
 }
 
 describe("createAgent", () => {
+  describe("signal shutdown", () => {
+    test("exits successfully and stops plugins when idle", async () => {
+      const result = await signalShutdown("idle");
+      expect(result.code).toBe(0);
+      expect(result.signal).toBeNull();
+      expect(result.messages).toContain("plugin-stopped");
+      expect(result.stderr).not.toContain("shutdown failed");
+    });
+
+    test("exits with failure and withholds plugin teardown when MCP work cannot drain", async () => {
+      const result = await signalShutdown("blocked");
+      expect(result.code).toBe(1);
+      expect(result.signal).toBeNull();
+      expect(result.stderr).toContain("shutdown failed");
+      expect(result.messages).not.toContain("plugin-stopped");
+    });
+  });
+
+  test("keeps stopped sessions available for plugin cleanup without admitting new work", async () => {
+    let context: PluginContext | undefined;
+    let cleaned = false;
+    const { agent, runtime } = agentWith({
+      plugins: [
+        {
+          name: "cleanup",
+          async start(ctx) {
+            context = ctx;
+            await ctx.sessions.open("active");
+          },
+          async stop() {
+            if (!context) throw new Error("Missing plugin context");
+            await expect(context.sessions.open("new")).rejects.toThrow(
+              "Session manager is stopped",
+            );
+            await context.sessions.reset("active");
+            cleaned = true;
+          },
+        },
+      ],
+    });
+    await agent.start({ handleSignals: false });
+    await agent.stop();
+    expect(cleaned).toBe(true);
+    expect(runtime.spawns[0].process.killed).toBe(true);
+  });
+
   describe("validation", () => {
     test("duplicate tool names are a startup error", () => {
       const a = tool({ name: "x", description: "d", input: z.object({}), execute: () => "" });
@@ -1020,3 +1067,52 @@ describe("createAgent", () => {
     });
   });
 });
+
+/**
+ * Signal a source-loaded agent only after its listener or blocked tool is ready.
+ */
+async function signalShutdown(mode: "idle" | "blocked") {
+  const child = fork(
+    new URL("../tests/fixtures/signal-shutdown.ts", import.meta.url),
+    [workspace, mode],
+    { execArgv: ["--import", "tsx"], silent: true },
+  );
+  const messages: unknown[] = [];
+  let stderr = "";
+  child.stdout?.resume();
+  child.stderr?.on("data", (chunk) => {
+    stderr += String(chunk);
+  });
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    },
+  );
+  const ready = new Promise<void>((resolve) => {
+    child.on("message", (message) => {
+      messages.push(message);
+      if (message === (mode === "blocked" ? "tool-entered" : "ready")) resolve();
+    });
+  });
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((resolve, reject) => {
+    deadline = setTimeout(() => reject(new Error(`Signal shutdown timed out: ${stderr}`)), 10_000);
+  });
+  try {
+    await Promise.race([
+      ready,
+      exited.then(() => {
+        throw new Error(`Agent exited before readiness: ${stderr}`);
+      }),
+      timeout,
+    ]);
+    child.kill("SIGTERM");
+    const result = await Promise.race([exited, timeout]);
+    return { ...result, messages, stderr };
+  } finally {
+    clearTimeout(deadline);
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await exited.catch(() => {});
+  }
+}

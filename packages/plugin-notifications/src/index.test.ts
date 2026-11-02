@@ -44,12 +44,18 @@ describe("notifications plugin", () => {
         ...ctx,
         caller: { kind: "session", ref: { source: "cron", key: "other" } },
       });
+      await tool.execute(input, { ...ctx, caller: { kind: "host" } });
+      await tool.execute(input, { ...ctx, caller: { kind: "mcp" } });
+      await tool.execute(input, { ...ctx, caller: { kind: "mcp" } });
       expect(first.deliveries).toMatchObject([{ destination: "updates", status: "confirmed" }]);
-      expect(calls).toEqual(["Researching", "Researching"]);
+      expect(calls).toEqual(["Researching", "Researching", "Researching", "Researching"]);
       expect(scopes).toEqual([
         JSON.stringify(["session", "cron", "example"]),
         JSON.stringify(["session", "cron", "example"]),
         JSON.stringify(["session", "cron", "other"]),
+        JSON.stringify(["host"]),
+        JSON.stringify(["mcp"]),
+        JSON.stringify(["mcp"]),
       ]);
       expect(
         tool.input.safeParse({

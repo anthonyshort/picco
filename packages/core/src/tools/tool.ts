@@ -27,9 +27,14 @@ export type SessionCaller = { kind: "session"; ref: SessionRef };
 export type HostCaller = { kind: "host" };
 
 /**
- * Who invoked a tool: one of this agent's sessions, or host code calling directly.
+ * Who invoked a tool: a session, host code, or an authenticated external MCP client.
  */
-export type Caller = SessionCaller | HostCaller;
+export type Caller = SessionCaller | HostCaller | McpCaller;
+
+/**
+ * Authenticated external MCP client, outside any session or attributed user.
+ */
+export type McpCaller = { kind: "mcp" };
 
 /**
  * Everything a tool's `execute` receives besides its validated input: who is calling, a logger, and
@@ -46,7 +51,7 @@ export interface ToolContext {
    */
   logger: Logger;
   /**
-   * Who called: one of this agent's sessions, or host code.
+   * Who called: a session, host code, or an authenticated external MCP client.
    */
   caller: Caller;
   /**
@@ -64,12 +69,12 @@ export interface ToolContext {
 }
 
 /**
- * A tool the agent can call: a Zod-validated input schema plus an `execute` that runs it. Served to
- * sessions over the loopback bridge, and callable by host code.
+ * A validated operation contributed to agent sessions or external MCP clients, or called by host
+ * code. Plugin.tools and Plugin.mcpTools choose where each definition is available.
  */
 export interface Tool<Input extends z.ZodType = z.ZodType> {
   /**
-   * Snake_case, unique across the agent.
+   * Snake_case, unique within its agent-session or external MCP tool collection.
    */
   name: string;
   /**
@@ -78,7 +83,7 @@ export interface Tool<Input extends z.ZodType = z.ZodType> {
   description: string;
   /**
    * Zod schema for the tool's arguments — the single source of truth for the input shape. `execute`
-   * receives `z.infer<Input>`, and the bridge publishes this schema's JSON Schema to the session.
+   * receives `z.infer<Input>`; the bridge and MCP server publish the schema for their callers.
    */
   input: Input;
   /**
