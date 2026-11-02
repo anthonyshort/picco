@@ -325,6 +325,7 @@ export class SessionManager {
     const active = slot.active;
     const reset = Promise.withResolvers<void>();
     slot.resetting = reset.promise;
+    reset.promise.catch(() => {});
     slot.freshNextSpawn = true;
     slot.generation = (slot.generation ?? 0) + 1;
     slot.closing = true;
@@ -333,13 +334,14 @@ export class SessionManager {
       await this.killLive(slot, !active);
       await active?.controller.turn.catch(() => {});
       this.logger.log("reset", { source, key });
+      reset.resolve();
     } catch (err) {
       slot.quarantined = true;
+      reset.reject(err);
       throw err;
     } finally {
       slot.closing = false;
       slot.resetting = undefined;
-      reset.resolve();
     }
   }
 
@@ -806,9 +808,8 @@ export class SessionManager {
     const resume = !slot.freshNextSpawn;
     slot.freshNextSpawn = false;
     slot.released = false;
-    let rpc: RpcSession | undefined;
     try {
-      rpc = await this.spawn({
+      const rpc = await this.spawn({
         ref: slot.ref,
         cwd,
         pi: opts?.pi,
@@ -816,13 +817,22 @@ export class SessionManager {
         tools: opts?.tools,
         resume,
         check,
+        onSpawn: (spawnedRpc) => {
+          slot.live = {
+            rpc: spawnedRpc,
+            cwd,
+            startedAt: new Date(),
+            lastActiveAt: new Date(),
+            turns: 0,
+          };
+        },
       });
       check();
       slot.live = { rpc, cwd, startedAt: new Date(), lastActiveAt: new Date(), turns: 0 };
       return slot.live;
     } catch (err) {
       this.opts.revokeSession?.(slot.ref);
-      await rpc?.kill();
+      await this.killLive(slot, false);
       throw err;
     } finally {
       slot.acquisition = undefined;
@@ -842,6 +852,7 @@ export class SessionManager {
     tools?: Tool[];
     resume?: boolean;
     check: () => void;
+    onSpawn: (rpc: RpcSession) => void;
   }): Promise<RpcSession> {
     await mkdir(info.cwd, { recursive: true });
     info.check();
@@ -875,26 +886,17 @@ export class SessionManager {
       bridge: { url: this.opts.bridge?.url ?? "", token: setup?.bridgeToken },
     };
     const proc = await this.opts.runtime.spawn(spec);
-    try {
-      info.check();
-    } catch (err) {
-      await proc.kill();
-      throw err;
-    }
     const rpc = new RpcSession(fullKey(ref.source, ref.key), proc, {
       logger: this.logger,
       requestTimeoutMs: this.opts.requestTimeoutMs,
     });
+    info.onSpawn(rpc);
+    info.check();
 
     // No ready message from RPC mode — wait briefly, then check it's alive.
     if (this.readyDelayMs > 0)
       await new Promise((resolve) => setTimeout(resolve, this.readyDelayMs));
-    try {
-      info.check();
-    } catch (err) {
-      await rpc.kill();
-      throw err;
-    }
+    info.check();
     if (!rpc.isAlive()) {
       const stderr = rpc.stderrTail();
       const hint = /execvp/.test(stderr)
@@ -922,7 +924,6 @@ export class SessionManager {
     }
     const live = slot.live;
     if (!live) return;
-    slot.live = null;
     const termination = Promise.resolve().then(async () => {
       try {
         if (release && !slot.released) {
@@ -932,10 +933,12 @@ export class SessionManager {
       } finally {
         await live.rpc.kill();
       }
+      return undefined;
     });
     slot.termination = termination;
     try {
       await termination;
+      slot.live = null;
     } catch (err) {
       slot.quarantined = true;
       throw err;
@@ -954,8 +957,18 @@ export class SessionManager {
       if (!slot.live || slot.pending > 0) continue;
       if (slot.live.lastActiveAt.getTime() > cutoff) continue;
       this.logger.log("evicting idle session", { ...slot.ref });
-      void this.killLive(slot);
-      this.slots.delete(slotKey);
+      void this.killLive(slot)
+        .then(() => {
+          if (!slot.live && slot.pending === 0 && this.slots.get(slotKey) === slot)
+            this.slots.delete(slotKey);
+          return undefined;
+        })
+        .catch((err) => {
+          this.logger.error("idle session teardown failed; worker retained for reconciliation", {
+            ...slot.ref,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
     }
   }
 }
