@@ -206,6 +206,15 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
 
+  packages/plugin-browser-checks:
+    dependencies:
+      '@picco-agent/core':
+        specifier: workspace:*
+        version: link:../core
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
   packages/plugin-cron:
     dependencies:
       '@picco-agent/core':
