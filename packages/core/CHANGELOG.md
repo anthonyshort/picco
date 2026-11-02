@@ -1,5 +1,11 @@
 # @picco-agent/core
 
+## 0.5.0
+
+### Minor Changes
+
+- 8237bf1: Expose plugin-declared MCP tools through an optional authenticated loopback server, independently of tools available to agent sessions.
+
 ## 0.4.0
 
 ### Minor Changes

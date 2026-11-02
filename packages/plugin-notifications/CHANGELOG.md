@@ -1,5 +1,13 @@
 # @picco-agent/plugin-notifications
 
+## 0.3.3
+
+### Patch Changes
+
+- 8237bf1: Expose plugin-declared MCP tools through an optional authenticated loopback server, independently of tools available to agent sessions.
+- Updated dependencies [8237bf1]
+  - @picco-agent/core@0.5.0
+
 ## 0.3.2
 
 ### Patch Changes
