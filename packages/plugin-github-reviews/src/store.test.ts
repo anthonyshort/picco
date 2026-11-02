@@ -58,15 +58,12 @@ describe("createReviewStore", () => {
         )
         .run("reviewer", candidate.repository, 42, candidate.head, "2026-10-26T00:00:00Z");
       database.close();
-      expect(
-        fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, candidate.head),
-      ).toBe(true);
+      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
       expect(
         fixtureState.first.hasCompleted(
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:older",
           "2026-10-25T00:00:00Z",
         ),
@@ -76,13 +73,50 @@ describe("createReviewStore", () => {
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:newer",
           "2026-10-26T00:00:01Z",
         ),
       ).toBe(false);
       expect(fixtureState.first.list()).toEqual([]);
       expect(fixtureState.first.status().reservations).toEqual([]);
+    } finally {
+      fixtureState.cleanup();
+    }
+  });
+
+  test("legacy completion evidence covers later heads until a strictly newer request", () => {
+    const fixtureState = fixture();
+    try {
+      const database = new DatabaseSync(fixtureState.filename);
+      database
+        .prepare(
+          "INSERT INTO reviewed_commits(reviewer,repository,number,head,reviewedAt) VALUES (?,?,?,?,?)",
+        )
+        .run("reviewer", candidate.repository, 42, candidate.head, "2026-10-26T00:00:00Z");
+      database.close();
+      fixtureState.populate([{ ...candidate, head: "b".repeat(40) }]);
+      expect(fixtureState.second.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
+      expect(
+        fixtureState.second.hasCompleted(
+          "reviewer",
+          candidate.repository,
+          42,
+          "request:older",
+          "2026-10-25T00:00:00Z",
+        ),
+      ).toBe(true);
+      expect(
+        fixtureState.second.hasCompleted(
+          "reviewer",
+          candidate.repository,
+          42,
+          "request:newer",
+          "2026-10-26T00:00:01Z",
+        ),
+      ).toBe(false);
+      expect(fixtureState.second.hasCompleted("other", candidate.repository, 42)).toBe(false);
+      expect(fixtureState.second.hasCompleted("reviewer", "example/other", 42)).toBe(false);
+      expect(fixtureState.second.hasCompleted("reviewer", candidate.repository, 43)).toBe(false);
     } finally {
       fixtureState.cleanup();
     }
@@ -102,7 +136,6 @@ describe("createReviewStore", () => {
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:second",
           "2026-10-26T00:00:01Z",
         ),
@@ -112,7 +145,6 @@ describe("createReviewStore", () => {
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:second",
           "2026-10-26T00:00:01Z",
         ),
@@ -133,9 +165,7 @@ describe("createReviewStore", () => {
         fixtureState.first.resolveInterrupted(admitted.id, "retry", "Try again"),
       ).toThrow("already recorded");
       expect(fixtureState.first.status().reservations).toHaveLength(1);
-      expect(
-        fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, candidate.head),
-      ).toBe(true);
+      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
       fixtureState.first.resolveInterrupted(admitted.id, "completed", "Verified completed review");
       expect(fixtureState.first.status().reservations).toEqual([]);
     } finally {
@@ -183,13 +213,7 @@ describe("createReviewStore", () => {
       const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
       expect(fixtureState.first.markReviewed(admitted.id, "Reviewed all changed files")).toBe(true);
       expect(
-        fixtureState.second.hasCompleted(
-          "reviewer",
-          candidate.repository,
-          42,
-          candidate.head,
-          "request:first",
-        ),
+        fixtureState.second.hasCompleted("reviewer", candidate.repository, 42, "request:first"),
       ).toBe(true);
       fixtureState.first.finish(admitted.id, { status: "completed" });
       expect(fixtureState.first.details(admitted.id)).toMatchObject({
@@ -203,14 +227,13 @@ describe("createReviewStore", () => {
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:second",
           "2026-10-26T00:00:01Z",
         ),
       ).toBe(false);
-      expect(
-        fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, "b".repeat(40)),
-      ).toBe(false);
+      expect(fixtureState.first.hasCompleted("other-reviewer", candidate.repository, 42)).toBe(
+        false,
+      );
     } finally {
       fixtureState.cleanup();
     }
@@ -227,9 +250,7 @@ describe("createReviewStore", () => {
       expect(fixtureState.first.status().reservations).toMatchObject([
         { runId: admitted.id, uncertain: 1 },
       ]);
-      expect(
-        fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, candidate.head),
-      ).toBe(true);
+      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
       fixtureState.first.resolveInterrupted(
         admitted.id,
         "completed",
@@ -248,9 +269,7 @@ describe("createReviewStore", () => {
       const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
       fixtureState.advance(5 * 60_000 + 1);
       expect(fixtureState.first.markReviewed(admitted.id, "Complete")).toBe(false);
-      expect(
-        fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, candidate.head),
-      ).toBe(false);
+      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(false);
     } finally {
       fixtureState.cleanup();
     }
@@ -267,14 +286,15 @@ describe("createReviewStore", () => {
       fixtureState.first.recoverInterrupted();
       fixtureState.first.resolveInterrupted(admitted.id, "retry", "Verified no work completed");
       expect(fixtureState.first.status().reservations).toEqual([]);
-      expect(
-        fixtureState.first.hasAttempted("reviewer", candidate.repository, 42, candidate.head),
-      ).toBe(false);
+      expect(fixtureState.first.hasAttempted("reviewer", candidate.repository, 42)).toBe(false);
       expect(fixtureState.first.details(admitted.id)?.runs[0]).toMatchObject({
         resolution: "retry",
         resolutionReason: "Verified no work completed",
       });
-      expect(fixtureState.second.admit(item!.id, "reviewer", 1)).not.toBeNull();
+      const [newHead] = fixtureState.populate([{ ...candidate, head: "b".repeat(40) }]);
+      expect(fixtureState.second.admit(newHead!.id, "reviewer", 1)).toMatchObject({
+        head: "b".repeat(40),
+      });
     } finally {
       fixtureState.cleanup();
     }
@@ -292,9 +312,7 @@ describe("createReviewStore", () => {
         "Verified saved review report",
         admitted.startedAt,
       );
-      expect(
-        fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, candidate.head),
-      ).toBe(true);
+      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
       expect(fixtureState.first.status().reservations).toEqual([]);
     } finally {
       fixtureState.cleanup();
@@ -322,7 +340,6 @@ describe("createReviewStore", () => {
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:second",
           newerRequestAt,
         ),
@@ -332,26 +349,18 @@ describe("createReviewStore", () => {
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:second",
           newerRequestAt,
         ),
       ).toBe(false);
       expect(
-        fixtureState.first.hasCompleted(
-          "reviewer",
-          candidate.repository,
-          42,
-          candidate.head,
-          "request:first",
-        ),
+        fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, "request:first"),
       ).toBe(true);
       expect(
         fixtureState.first.hasCompleted(
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:equal",
           reviewedAt,
         ),
@@ -398,7 +407,6 @@ describe("createReviewStore", () => {
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:newer",
           "2026-10-26T00:00:01Z",
         ),
@@ -408,7 +416,6 @@ describe("createReviewStore", () => {
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:newer",
           "2026-10-26T00:00:01Z",
         ),
@@ -443,9 +450,7 @@ describe("createReviewStore", () => {
       ).toThrow();
       expect(fixtureState.first.details(admitted.id)).toEqual(before);
       expect(fixtureState.first.status().reservations).toEqual(reservations);
-      expect(
-        fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, candidate.head),
-      ).toBe(false);
+      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(false);
     } finally {
       fixtureState.cleanup();
     }
@@ -471,7 +476,6 @@ describe("createReviewStore", () => {
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:newer",
           "2026-10-26T00:00:10.000Z",
         ),
@@ -576,20 +580,13 @@ describe("createReviewStore", () => {
         reason: "review-not-confirmed",
       });
       expect(
-        fixtureState.first.hasAttempted(
-          "reviewer",
-          candidate.repository,
-          42,
-          candidate.head,
-          "request:first",
-        ),
+        fixtureState.first.hasAttempted("reviewer", candidate.repository, 42, "request:first"),
       ).toBe(true);
       expect(
         fixtureState.first.hasAttempted(
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:second",
           "2026-10-26T00:00:00Z",
         ),
@@ -599,14 +596,11 @@ describe("createReviewStore", () => {
           "reviewer",
           candidate.repository,
           42,
-          candidate.head,
           "request:second",
           "2026-10-26T00:00:01Z",
         ),
       ).toBe(false);
-      expect(
-        fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, candidate.head),
-      ).toBe(false);
+      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(false);
     } finally {
       fixtureState.cleanup();
     }

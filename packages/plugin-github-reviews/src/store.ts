@@ -496,15 +496,14 @@ export function createReviewStore(filename: string, now = Date.now) {
       reviewer: string,
       repository: string,
       number: number,
-      head: string,
       requestEventId?: string,
       requestedAt?: string,
     ) {
       return database
         .prepare(
-          "SELECT requestEventId,reviewedAt FROM reviewed_commits WHERE reviewer=? AND repository=? AND number=? AND head=?",
+          "SELECT requestEventId,reviewedAt FROM reviewed_commits WHERE reviewer=? AND repository=? AND number=?",
         )
-        .all(reviewer, repository, number, head)
+        .all(reviewer, repository, number)
         .some((row) => {
           const record = z
             .object({ requestEventId: z.string(), reviewedAt: z.iso.datetime() })
@@ -520,14 +519,13 @@ export function createReviewStore(filename: string, now = Date.now) {
       reviewer: string,
       repository: string,
       number: number,
-      head: string,
       requestEventId?: string,
       requestedAt?: string,
     ) {
       return database
         .prepare(`SELECT data,finishedAt FROM review_runs WHERE state!='running' AND reviewedAt IS NULL AND (resolution IS NULL OR resolution!='retry') AND itemId IN
-        (SELECT id FROM review_queue WHERE reviewer=? AND repository=? AND number=? AND head=?)`)
-        .all(reviewer, repository, number, head)
+        (SELECT id FROM review_queue WHERE reviewer=? AND repository=? AND number=?)`)
+        .all(reviewer, repository, number)
         .some((row) => {
           const record = z
             .object({ data: z.string(), finishedAt: z.string().nullable() })
