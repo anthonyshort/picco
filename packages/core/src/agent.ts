@@ -323,9 +323,13 @@ export function createAgent(config: AgentConfig): AgentHandle {
     if (opts.handleSignals !== false) {
       signalHandler = (signal: string) => {
         logger.log(`shutting down (${signal})`);
-        stop()
-          .catch((err) => logger.error("shutdown failed", err))
-          .finally(() => process.exit(0));
+        stop().then(
+          () => process.exit(0),
+          (err) => {
+            logger.error("shutdown failed", err);
+            process.exit(1);
+          },
+        );
       };
       process.once("SIGINT", signalHandler);
       process.once("SIGTERM", signalHandler);
