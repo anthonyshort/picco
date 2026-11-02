@@ -1,5 +1,12 @@
 # @picco-agent/plugin-github-reviews
 
+## 0.4.3
+
+### Patch Changes
+
+- Updated dependencies [8237bf1]
+  - @picco-agent/core@0.5.0
+
 ## 0.4.2
 
 ### Patch Changes
