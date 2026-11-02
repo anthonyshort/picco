@@ -59,6 +59,9 @@ jobs:
       - name: Unit test
         run: pnpm test
 
+      - name: Inbound MCP server smoke test
+        run: pnpm test:smoke:mcp-server
+
       - name: Create host Pi config fixture
         run: mkdir -p "$HOME/.pi/agent"
 

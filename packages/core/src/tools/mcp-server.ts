@@ -112,28 +112,8 @@ export function createMcpServer(opts: {
       rejectRequest(response, 415, "Use application/json");
       return;
     }
-    const chunks: Buffer[] = [];
-    let bytes = 0;
-    for await (const chunk of request.iterator({ destroyOnReturn: false })) {
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      bytes += buffer.length;
-      if (bytes > MAX_BODY_BYTES) {
-        response.setHeader("connection", "close");
-        response.once("finish", () => request.destroy());
-        rejectRequest(response, 413, "MCP request too large");
-        return;
-      }
-      chunks.push(buffer);
-    }
-    let body: unknown;
-    try {
-      body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    } catch {
-      rejectRequest(response, 400, "Invalid JSON");
-      return;
-    }
-    if (Array.isArray(body)) {
-      rejectRequest(response, 400, "MCP batch requests are not supported");
+    const parsed = await readRequestBody(request, response);
+    if (!parsed) {
       return;
     }
     const connection = new AbortController();
@@ -142,65 +122,72 @@ export function createMcpServer(opts: {
     });
     const server = new Server({ name: opts.name, version: "1" }, { capabilities: { tools: {} } });
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: manifest }));
-    server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
-      const tool = tools.get(params.name);
-      if (!tool) return failure("Unknown MCP tool");
-      if (executions.size >= MAX_REQUESTS) return failure("Too many MCP tool calls");
-      const controller = new AbortController();
-      controllers.add(controller);
-      const signal = AbortSignal.any([controller.signal, extra.signal, connection.signal]);
-      const deadline = setTimeout(
-        () => controller.abort(new Error("MCP tool timed out")),
-        config.toolTimeoutMs,
-      );
-      deadline.unref();
-      let onAbort: (() => void) | undefined;
-      try {
-        const parsed = tool.input.safeParse(params.arguments ?? {});
-        if (!parsed.success) return failure(`Invalid arguments for ${tool.name}`);
-        signal.throwIfAborted();
-        const aborted = new Promise<never>((resolve, reject) => {
-          onAbort = () => reject(new Error("MCP tool call cancelled or timed out"));
-          signal.addEventListener("abort", onAbort, { once: true });
-        });
-        const execution = Promise.resolve().then(() =>
-          tool.execute(parsed.data, {
-            caller: { kind: "mcp" },
-            logger: opts.logger,
-            signal,
-          }),
-        );
-        executions.add(execution);
-        void execution.then(
-          () => executions.delete(execution),
-          () => executions.delete(execution),
-        );
-        const result = await Promise.race([execution, aborted]);
-        return CallToolResultSchema.parse(
-          typeof result === "string" ? { content: [{ type: "text", text: result }] } : result,
-        );
-      } catch (err) {
-        const message =
-          err instanceof Error
-            ? err.message.replaceAll(config.token, "[redacted]")
-            : "Tool execution failed";
-        opts.logger.error("MCP tool failed", { tool: tool.name, error: message });
-        return failure(message);
-      } finally {
-        clearTimeout(deadline);
-        if (onAbort) signal.removeEventListener("abort", onAbort);
-        controllers.delete(controller);
-      }
-    });
+    server.setRequestHandler(CallToolRequestSchema, ({ params }, extra) =>
+      executeMcpTool(params, [extra.signal, connection.signal]),
+    );
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     });
     try {
       await server.connect(transport);
-      await transport.handleRequest(request, response, body);
+      await transport.handleRequest(request, response, parsed.body);
     } finally {
       await server.close();
+    }
+  }
+
+  async function executeMcpTool(
+    params: z.infer<typeof CallToolRequestSchema>["params"],
+    signals: AbortSignal[],
+  ) {
+    const tool = tools.get(params.name);
+    if (!tool) return failure("Unknown MCP tool");
+    if (executions.size >= MAX_REQUESTS) return failure("Too many MCP tool calls");
+    const controller = new AbortController();
+    controllers.add(controller);
+    const signal = AbortSignal.any([controller.signal, ...signals]);
+    const deadline = setTimeout(
+      () => controller.abort(new Error("MCP tool timed out")),
+      config.toolTimeoutMs,
+    );
+    deadline.unref();
+    let onAbort: (() => void) | undefined;
+    try {
+      const parsed = tool.input.safeParse(params.arguments ?? {});
+      if (!parsed.success) return failure(`Invalid arguments for ${tool.name}`);
+      signal.throwIfAborted();
+      const aborted = new Promise<never>((resolve, reject) => {
+        onAbort = () => reject(new Error("MCP tool call cancelled or timed out"));
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      const execution = Promise.resolve().then(() =>
+        tool.execute(parsed.data, {
+          caller: { kind: "mcp" },
+          logger: opts.logger,
+          signal,
+        }),
+      );
+      executions.add(execution);
+      void execution.then(
+        () => executions.delete(execution),
+        () => executions.delete(execution),
+      );
+      const result = await Promise.race([execution, aborted]);
+      return CallToolResultSchema.parse(
+        typeof result === "string" ? { content: [{ type: "text", text: result }] } : result,
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message.replaceAll(config.token, "[redacted]")
+          : "Tool execution failed";
+      opts.logger.error("MCP tool failed", { tool: tool.name, error: message });
+      return failure(message);
+    } finally {
+      clearTimeout(deadline);
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+      controllers.delete(controller);
     }
   }
 
@@ -254,6 +241,37 @@ export function createMcpServer(opts: {
       }
     },
   };
+}
+
+/**
+ * Read bounded JSON, rejecting invalid bodies before SDK dispatch.
+ */
+async function readRequestBody(request: IncomingMessage, response: ServerResponse) {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > MAX_BODY_BYTES) {
+      response.setHeader("connection", "close");
+      response.once("finish", () => request.destroy());
+      rejectRequest(response, 413, "MCP request too large");
+      return;
+    }
+    chunks.push(buffer);
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    rejectRequest(response, 400, "Invalid JSON");
+    return;
+  }
+  if (Array.isArray(body)) {
+    rejectRequest(response, 400, "MCP batch requests are not supported");
+    return;
+  }
+  return { body };
 }
 
 /**
