@@ -65,7 +65,7 @@ Keep that directory across restarts. SQLite may also create WAL and shared-memor
 
 Each review has a unique run and artifact directory, which becomes the session's working directory. Reports and publisher progress remain files; the database records their association with the run. Concurrent sessions cannot reserve the same pull request, including different heads or request cycles.
 
-On restart, persisted attempts are reconciled before new work is admitted. Interrupted reviews with uncertain remote effects remain blocked for inspection. A saved running record does not by itself mean a worker is still alive. A second dispatcher cannot take over an expired lease while the old host process is still alive. Moving a database between hosts requires stopping its writer and clearing or reconciling the old dispatcher ownership; lease expiry alone does not prove that its workers stopped.
+Run one Picco host per review data directory. After a normal stop or a crash, Picco abandons in-flight execution on restart and starts fresh attempts after rechecking GitHub. Old attempts, request IDs, captured reports and completion history remain available. A saved completion declaration stays completed even if the host stopped before worker teardown. This personal bot does not resume old executions or require manual restart reconciliation; a crash can drop work or repeat a remote write.
 
 This package does not automatically import an application's old claim database or completion JSON. Run any one-time historical seeding script in the consuming application before enabling admissions, and stop the previous review dispatcher so both systems cannot admit the same pull request. Starting with an empty database can review requests that an earlier assistant already handled.
 
@@ -79,7 +79,7 @@ A review session receives a session-only `github_review_complete` tool. Its defa
 
 If you supply a custom `prompt`, retain this completion instruction. A worker's final text alone does not mark the commit reviewed. The tool is bound to its selected session, so a different conversation cannot complete the review.
 
-The worker is closed before its run finishes. A failed or incomplete workflow remains blocked for reconciliation. A local completion record and a remote GitHub write cannot be one transaction; the database records the worker's explicit declaration of success, not proof of remote delivery.
+Picco attempts to close the worker before reporting its outcome. Failed or incomplete workflows remain blocked until an explicit retry or a newer review request. Teardown errors remain visible in the result without blocking unrelated jobs. A local completion record and a remote GitHub write cannot be one transaction; the database records the worker’s declaration of success.
 
 Use `onRunStart` to notify the user when an eligible request has been reserved and its worker is about to start. It receives the same selection as the prompt builder. The callback is awaited for up to 30 seconds while the reservation remains held. Failure or timeout is logged and the review continues; the callback is not retried. A timed-out callback can still finish later. This reports an admitted review, not every newly discovered request, and worker startup can still fail afterwards.
 
@@ -99,10 +99,8 @@ The setting defaults to `false` and does not change which workflow the prompt la
 
 Ask the assistant to inspect `github_reviews_status` for the last successful poll, API budget, admission state, active work and blockers. `github_reviews_list` shows candidate state; `github_reviews_details` shows an item's attempts and recorded completion.
 
-Use `github_reviews_pause` to stop new admissions while active reviews finish. The pause survives a restart. Discovery remains available for status inspection. Use `github_reviews_resume` to clear the pause; it cannot override configuration with `enabled: false` or release uncertain publication reservations.
+Use `github_reviews_pause` to stop new admissions while active reviews finish. The pause survives a restart. Discovery remains available for status inspection. Use `github_reviews_resume` to clear the pause.
 
 `github_reviews_poll` requests an immediate poll through the normal checks. It does not bypass rate limits, concurrency or a pause. For safe maintenance, pause admissions and wait for active work to finish before stopping the assistant or moving its database.
-
-For an interrupted run, inspect its artifacts and GitHub before using `github_reviews_resolve`. Choose `completed` only when you have confirmed the review finished. Choose `retry` only after confirming the old worker has stopped and another attempt will not duplicate remote effects. Supply a reason recording that evidence. When marking a run completed without a saved completion declaration, also supply `reviewedAt` with the verified original UTC completion timestamp. It must be no earlier than the run’s start second and no later than the current time. This allows GitHub timestamps with second precision. Do not use the time of resolution: an intervening request for the same commit must remain eligible. Existing completion declarations keep their recorded timestamp. The next poll revalidates a permitted retry; resolving it does not directly start a session.
 
 The exported `GithubReviewsOptions` type is the configuration reference. See [Plugins](./plugins.md) for plugin lifecycle and [Sessions](../concepts/sessions.md) for worker ownership.

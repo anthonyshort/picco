@@ -200,11 +200,9 @@ describe("runReview", () => {
       const result = await runReview(state.options).completion;
       expect(result.status).toBe("blocked");
       expect(state.store.hasCompleted("reviewer", candidate.repository, 42)).toBe(false);
-      expect(state.store.status().reservations).toMatchObject([
-        { runId: state.run.id, uncertain: 1 },
-      ]);
+      expect(state.store.status().reservations).toEqual([]);
       expect(state.store.details(state.run.id)).toMatchObject({
-        item: { status: "blocked", reason: "publication-uncertain" },
+        item: { status: "blocked", reason: "Review completion was not declared" },
       });
       expect(state.ctx.sessions.list()).toEqual([]);
     } finally {
@@ -234,22 +232,7 @@ describe("runReview", () => {
     }
   });
 
-  test("rejects a declaration when the lease expired before the next heartbeat", async () => {
-    const state = fixture(async (ctx, run) => {
-      state.advance(5 * 60_000 + 1);
-      await expect(complete(ctx, run)).rejects.toThrow();
-      return "Could not declare completion";
-    });
-    try {
-      const result = await runReview(state.options).completion;
-      expect(result.status).toBe("blocked");
-      expect(state.store.hasCompleted("reviewer", candidate.repository, 42)).toBe(false);
-    } finally {
-      state.cleanup();
-    }
-  });
-
-  test("a worker failure after its declaration preserves reviewed history and uncertainty", async () => {
+  test("a worker failure after its declaration preserves completion and reports the error", async () => {
     const state = fixture(async (ctx, run) => {
       await complete(ctx, run);
       throw new Error("Worker disconnected after completion");
@@ -257,16 +240,46 @@ describe("runReview", () => {
     try {
       const result = await runReview(state.options).completion;
       expect(result).toMatchObject({
-        status: "interrupted",
+        status: "completed",
         error: "Worker disconnected after completion",
       });
       expect(state.store.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
       expect(state.store.details(state.run.id)).toMatchObject({
         runs: [{ reviewSummary: "Reviewed every changed file" }],
       });
-      expect(state.store.status().reservations).toMatchObject([
-        { runId: state.run.id, uncertain: 1 },
-      ]);
+      expect(state.store.status().reservations).toEqual([]);
+    } finally {
+      state.cleanup();
+    }
+  });
+
+  test("a failed teardown preserves declared completion and reports its error", async () => {
+    const state = fixture(async (ctx, run) => {
+      await complete(ctx, run);
+      return "Done";
+    });
+    try {
+      const result = await runReview({
+        ...state.options,
+        ctx: {
+          ...state.ctx,
+          sessions: {
+            ...state.ctx.sessions,
+            async reset() {
+              throw new Error("Worker kill failed");
+            },
+          },
+        },
+      }).completion;
+      expect(result).toMatchObject({
+        status: "completed",
+        error: "Review worker teardown failed: Worker kill failed",
+      });
+      expect(state.store.details(state.run.id)).toMatchObject({
+        item: { status: "completed" },
+        runs: [{ status: "completed" }],
+      });
+      expect(state.store.status().reservations).toEqual([]);
     } finally {
       state.cleanup();
     }
@@ -304,6 +317,7 @@ describe("runReview", () => {
       const waiting = state.store.next()[0];
       expect(waiting?.number).toBe(43);
       expect(state.store.admit(waiting!.id, "reviewer", 1)).toBeNull();
+      worker.shutdown();
       allowTeardown.release();
       expect((await worker.completion).status).toBe("completed");
       expect(state.store.admit(waiting!.id, "reviewer", 1)).not.toBeNull();

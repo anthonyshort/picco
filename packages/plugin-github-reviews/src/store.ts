@@ -1,47 +1,39 @@
 import { randomUUID } from "node:crypto";
-import { hostname } from "node:os";
 import { z } from "zod";
 import { CandidateSchema, type Candidate } from "./github.js";
+import { JobStore } from "./jobs/store.js";
+import { JobRepository } from "./persistence/job-repository.js";
 import { openReviewDatabase } from "./persistence/database.js";
 import { PollingRepository } from "./persistence/polling-repository.js";
 import {
   StoreRunSchema,
   OutcomeSchema,
   PollUpdateSchema,
-  type StoreRun,
   type ReviewOutcome,
   type PollUpdate,
 } from "./persistence/types.js";
 
 /**
- * Maximum time between successful owner renewals.
- */
-const LEASE_MS = 5 * 60_000;
-
-/**
- * Coordinate polling lifecycle rules through typed persistence.
+ * Coordinate polling lifecycle rules and explicit jobs through shared persistence.
  */
 export function createReviewStore(filename: string, now = Date.now) {
   const database = openReviewDatabase(filename);
   const repository = new PollingRepository(database);
+  const jobs = new JobStore(new JobRepository(database), now);
 
-  function completeResolution(admitted: StoreRun, reason: string, suppliedReviewedAt?: string) {
-    const recorded = z.iso.datetime().nullable().parse(repository.reviewedAt(admitted.id));
-    const reviewedAt = recorded ?? suppliedReviewedAt;
-    if (!reviewedAt)
-      throw new Error("Verified original reviewedAt is required to resolve an undeclared review");
-    if (
-      recorded === null &&
-      (Date.parse(reviewedAt) < Math.floor(Date.parse(admitted.startedAt) / 1000) * 1000 ||
-        Date.parse(reviewedAt) > now())
-    )
-      throw new Error("Original reviewedAt must be between the review run's start second and now");
-    repository.completeResolution(admitted.id, reviewedAt, reason);
-    repository.recordReviewed(admitted, reviewedAt, reason);
-    repository.updateQueue(admitted.itemId, "completed", null);
+  function retryReceipt(requestId: string, targetId: string) {
+    const value = repository.readState(`retry:${requestId}`);
+    if (!value) return null;
+    const recorded = z.object({ runId: z.string() }).parse(value);
+    const admitted = repository.run(recorded.runId);
+    if (!admitted || (admitted.id !== targetId && admitted.itemId !== targetId))
+      throw new Error("Request ID belongs to a different review attempt");
+    return admitted;
   }
 
   return {
+    jobs,
+    retryReceipt,
     reconcile(reviewer: string, candidates: Candidate[]) {
       const checked = z.array(CandidateSchema).max(1000).parse(candidates);
       repository.transaction(() => {
@@ -81,7 +73,8 @@ export function createReviewStore(filename: string, now = Date.now) {
         const checked = repository.item(id);
         if (!checked || checked.status !== "queued" || checked.reviewer !== reviewer) return null;
         if (
-          repository.runningCount() >= z.number().int().min(1).max(100).parse(maxConcurrent) ||
+          repository.runningCount() + jobs.runningCount() >=
+            z.number().int().min(1).max(100).parse(maxConcurrent) ||
           repository.readState("paused") === true
         )
           return null;
@@ -89,6 +82,8 @@ export function createReviewStore(filename: string, now = Date.now) {
         const runId = randomUUID();
         const admitted = StoreRunSchema.parse({
           ...checked,
+          source: "poll",
+          delivery: "publish",
           id: runId,
           itemId: id,
           requestEventId: checked.requestEventId ?? undefined,
@@ -97,18 +92,16 @@ export function createReviewStore(filename: string, now = Date.now) {
           sessionKey: sessionKey ?? runId,
         });
         repository.insertRun(admitted);
-        repository.insertClaim(admitted, now() + LEASE_MS);
+        repository.insertClaim(admitted, 0);
         repository.updateQueue(id, "running", null);
         return admitted;
       });
     },
-    renew(runId: string) {
-      return repository.renewClaim(runId, now() + LEASE_MS, now());
-    },
     markReviewed(runId: string, summary: string) {
+      if (jobs.find(runId)) return jobs.attempts.markReviewed(runId, summary);
       const checked = z.string().trim().min(1).max(12_000).parse(summary);
       return repository.transaction(() => {
-        if (!repository.declareReviewed(runId, new Date(now()).toISOString(), checked, now()))
+        if (!repository.declareReviewed(runId, new Date(now()).toISOString(), checked))
           return false;
         const admitted = repository.run(runId)!;
         const reviewedAt = z.iso.datetime().parse(repository.reviewedAt(runId));
@@ -117,6 +110,7 @@ export function createReviewStore(filename: string, now = Date.now) {
       });
     },
     finish(runId: string, outcome: ReviewOutcome) {
+      if (jobs.find(runId)) return jobs.attempts.finish(runId, outcome);
       const checked = OutcomeSchema.parse(outcome);
       repository.transaction(() => {
         const admitted = repository.run(runId);
@@ -125,69 +119,50 @@ export function createReviewStore(filename: string, now = Date.now) {
           throw new Error("Review run no longer owns its reservation");
         if (checked.status === "completed" && repository.reviewedAt(runId) === null)
           throw new Error("Cannot complete a review without a reviewed declaration");
-        const uncertain =
-          checked.status === "interrupted" || checked.reason === "publication-uncertain";
-        const reason = uncertain ? "publication-uncertain" : (checked.reason ?? null);
+        const completed = repository.reviewedAt(runId) !== null;
+        const status = completed ? "completed" : checked.status;
+        const reason =
+          checked.abandoned && !completed ? "runtime-restarted" : (checked.reason ?? null);
         repository.finishRun(
           runId,
-          checked.status,
+          status,
           new Date(now()).toISOString(),
           reason,
           checked.output?.slice(0, 12_000) ?? null,
         );
         repository.updateQueue(
           admitted.itemId,
-          uncertain || checked.status === "blocked" ? "blocked" : "completed",
+          completed ? "completed" : checked.abandoned ? "queued" : "blocked",
           reason,
         );
-        if (uncertain) repository.markClaimUncertain(runId);
-        else repository.removeClaim(runId);
+        repository.removeClaim(runId);
       });
     },
     recoverInterrupted() {
+      jobs.recoverInterrupted();
       return repository.transaction(() => {
         const rows = repository.runningRuns();
         for (const checked of rows) {
           repository.interruptRun(checked.id, new Date(now()).toISOString());
-          repository.updateQueue(checked.itemId, "blocked", "publication-uncertain");
-          repository.markClaimUncertain(checked.id);
+          const completed = repository.reviewedAt(checked.id) !== null;
+          repository.updateQueue(checked.itemId, completed ? "completed" : "queued", null);
+          repository.removeClaim(checked.id);
         }
+        repository.clearClaims();
+        repository.deleteState("dispatcher");
         return rows.length;
       });
     },
-    resolveInterrupted(
-      runId: string,
-      action: "completed" | "retry",
-      reason: string,
-      reviewedAt?: string,
-    ) {
-      const checked = z
-        .object({
-          action: z.enum(["completed", "retry"]),
-          reason: z.string().trim().min(1).max(6000),
-          reviewedAt: z.iso.datetime().optional(),
-        })
-        .parse({ action, reason, reviewedAt });
-      return repository.transaction(() => {
-        const admitted = repository.run(runId);
-        if (!admitted || !repository.ownsClaim(runId, true))
-          throw new Error("Review run has no uncertain reservation to resolve");
-        switch (checked.action) {
-          case "completed":
-            completeResolution(admitted, checked.reason, checked.reviewedAt);
-            break;
-          case "retry":
-            if (repository.reviewedAt(runId) !== null)
-              throw new Error(
-                "Review completion is already recorded; resolve as completed instead of retrying",
-              );
-            repository.recordRetryResolution(runId, checked.reason);
-            repository.updateQueue(admitted.itemId, "queued", null);
-            break;
-          default:
-            throw new Error("Unknown review resolution");
-        }
-        repository.removeClaim(runId);
+    retry(runId: string, requestId: string) {
+      repository.transaction(() => {
+        if (retryReceipt(requestId, runId)) return;
+        const run = repository.run(runId);
+        if (!run || repository.ownsClaim(runId))
+          throw new Error("Stop active work before retrying");
+        if (repository.reviewedAt(runId)) throw new Error("A completed review cannot be retried");
+        repository.recordRetryResolution(runId, "explicit-retry");
+        repository.updateQueue(run.itemId, "queued", null);
+        repository.writeState(`retry:${requestId}`, { runId });
       });
     },
     hasCompleted(
@@ -226,6 +201,7 @@ export function createReviewStore(filename: string, now = Date.now) {
         });
     },
     recordNotificationAttempt(runId: string) {
+      if (jobs.find(runId)) return jobs.attempts.recordNotificationAttempt(runId);
       return repository.recordNotificationAttempt(runId);
     },
     completeNotification(
@@ -233,60 +209,12 @@ export function createReviewStore(filename: string, now = Date.now) {
       status: "confirmed" | "failed" | "uncertain",
       error?: string,
     ) {
+      if (jobs.find(runId)) return jobs.attempts.completeNotification(runId, status, error);
       repository.completeNotification(
         runId,
         z.enum(["confirmed", "failed", "uncertain"]).parse(status),
         error?.slice(0, 6000) ?? null,
       );
-    },
-    claimDispatcher(owner: string) {
-      return repository.transaction(() => {
-        const previous = repository.readState("dispatcher");
-        if (previous) {
-          const lease = z.object({ owner: z.string(), expiresAt: z.number() }).parse(previous);
-          if (lease.owner !== owner) {
-            const identity = z
-              .object({ host: z.string(), pid: z.number().int().positive() })
-              .safeParse(previous);
-            if (!identity.success || identity.data.host !== hostname()) return false;
-            try {
-              process.kill(identity.data.pid, 0);
-              return false;
-            } catch (err) {
-              if (!z.object({ code: z.literal("ESRCH") }).safeParse(err).success) return false;
-            }
-          }
-        }
-        repository.writeState("dispatcher", {
-          owner,
-          expiresAt: now() + LEASE_MS,
-          host: hostname(),
-          pid: process.pid,
-        });
-        return true;
-      });
-    },
-    renewDispatcher(owner: string) {
-      return repository.transaction(() => {
-        const previous = repository.readState("dispatcher");
-        if (!previous) return false;
-        const lease = z.object({ owner: z.string(), expiresAt: z.number() }).parse(previous);
-        if (lease.owner !== owner || lease.expiresAt <= now()) return false;
-        repository.writeState("dispatcher", {
-          owner,
-          expiresAt: now() + LEASE_MS,
-          host: hostname(),
-          pid: process.pid,
-        });
-        return true;
-      });
-    },
-    releaseDispatcher(owner: string) {
-      repository.transaction(() => {
-        const previous = repository.readState("dispatcher");
-        if (previous && z.object({ owner: z.string() }).parse(previous).owner === owner)
-          repository.deleteState("dispatcher");
-      });
     },
     bindReviewer(login: string) {
       const reviewer = z.string().trim().min(1).max(200).parse(login).toLowerCase();

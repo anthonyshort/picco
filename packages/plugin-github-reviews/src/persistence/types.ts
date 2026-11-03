@@ -35,6 +35,13 @@ export const StoreRunSchema = CandidateSchema.extend({
   requestedAt: z.iso.datetime().optional(),
   startedAt: z.iso.datetime(),
   sessionKey: z.string(),
+  source: z.enum(["poll", "tool", "mcp"]).optional(),
+  delivery: z.enum(["publish", "local-only"]).optional(),
+  base: z
+    .string()
+    .regex(/^[a-f0-9]{40}$/i)
+    .optional(),
+  jobId: z.uuid().optional(),
 });
 
 /**
@@ -43,6 +50,7 @@ export const StoreRunSchema = CandidateSchema.extend({
 export const OutcomeSchema = z.object({
   status: z.enum(["completed", "blocked", "interrupted"]),
   reason: z.string().optional(),
+  abandoned: z.boolean().optional(),
   output: z.string().optional(),
 });
 

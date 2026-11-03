@@ -1,7 +1,13 @@
 import { deliverCallback } from "./callback.js";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { tool, type PluginContext, type Turn } from "@picco-agent/core";
+import {
+  tool,
+  ExecutionError,
+  ExecutionFailure,
+  type PluginContext,
+  type Turn,
+} from "@picco-agent/core";
 import { z } from "zod";
 import { type createReviewStore, type StoreRun } from "./store.js";
 import {
@@ -9,11 +15,6 @@ import {
   type GithubReviewsOptions,
   type ReviewSelection,
 } from "./types.js";
-
-/**
- * Heartbeats continue until the worker has actually been closed.
- */
-const HEARTBEAT_MS = 60_000;
 
 /**
  * A worker must explicitly declare completion after its review workflow succeeds.
@@ -41,12 +42,21 @@ interface RunnerOptions {
 export function runReview(opts: RunnerOptions) {
   let turn: Turn | undefined;
   let abortReason: string | undefined;
+  let abandoned = false;
+  let settled = false;
   const abort = (reason: string) => {
     abortReason = reason;
     turn?.abort(reason);
   };
   const completion = execute();
-  return { abort, completion };
+  return {
+    abort,
+    shutdown() {
+      if (!settled) abandoned = true;
+      abort("GitHub reviews plugin stopped");
+    },
+    completion,
+  };
 
   async function execute(): Promise<GithubReviewResult> {
     const artifactDirectory = path.join(opts.reviewsDirectory, "runs", opts.run.id);
@@ -59,15 +69,6 @@ export function runReview(opts: RunnerOptions) {
     const declaration = createCompletionDeclaration(opts, () => abortReason);
     let output: string | undefined;
     let error: string | undefined;
-    let cleanupFailed = false;
-    const heartbeat = setInterval(() => {
-      try {
-        if (!opts.store.renew(opts.run.id)) abort("Review reservation expired or was lost");
-      } catch {
-        abort("Review reservation could not be renewed");
-      }
-    }, HEARTBEAT_MS);
-    heartbeat.unref();
     try {
       await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
       if (abortReason) throw new Error(abortReason);
@@ -88,19 +89,19 @@ export function runReview(opts: RunnerOptions) {
       if (abortReason) turn.abort(abortReason);
       output = (await turn).text;
     } catch (err) {
+      const cause = err instanceof ExecutionFailure ? err.primary : err;
+      if (cause instanceof ExecutionError && cause.code === "shutdown") abandoned = true;
       error = err instanceof Error ? err.message : "Review execution failed";
     } finally {
+      settled = true;
       try {
         await opts.ctx.sessions.reset(opts.run.sessionKey);
-      } catch {
-        cleanupFailed = true;
-        error = "Review worker teardown could not be confirmed";
+      } catch (err) {
+        error = `Review worker teardown failed: ${err instanceof Error ? err.message : "unknown error"}`;
       }
-      clearInterval(heartbeat);
     }
     const summary = declaration.summary();
-    const status =
-      error || abortReason || cleanupFailed ? "interrupted" : summary ? "completed" : "blocked";
+    const status = summary ? "completed" : error || abortReason ? "interrupted" : "blocked";
     const result: GithubReviewResult = {
       selection,
       status,
@@ -111,8 +112,9 @@ export function runReview(opts: RunnerOptions) {
     };
     opts.store.finish(opts.run.id, {
       status,
-      reason: status === "completed" ? undefined : "publication-uncertain",
+      reason: result.error ?? (summary ? undefined : "Review completion was not declared"),
       output: result.output,
+      abandoned,
     });
     await reportCompletion(opts, result);
     return result;
@@ -193,7 +195,9 @@ function buildPrompt(selection: ReviewSelection): string {
     `Use the ${selection.skill} skill to review ${run.url}.`,
     `Review exactly commit ${run.head}; the selected reviewer is ${run.reviewer}.`,
     "The server has already selected and reserved this PR. Do not discover or claim another PR.",
-    "Follow the skill's research, delegation and publication instructions. Verify the live head before publishing; if it changed, stop and report the blocker.",
+    run.delivery === "local-only"
+      ? "Run a local-only review. Do not publish comments, reviews or approvals to GitHub."
+      : "Follow the skill's research, delegation and publication instructions. Verify the live head before publishing; if it changed, stop and report the blocker.",
     `Keep artifacts in ${selection.artifactDirectory}; use ${selection.publisherStateFile} for publisher state when the skill supports it.`,
     "After the entire workflow succeeds, call github_review_complete once with a concise summary. If blocked or uncertain, do not call it. The host reports the outcome; do not send a separate notification.",
   ].join("\n\n");

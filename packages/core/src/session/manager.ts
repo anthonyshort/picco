@@ -213,7 +213,7 @@ interface ManagedExecution {
   controller: TurnController;
   abort: AbortController;
   cancelled: Promise<never>;
-  cancel(reason: string): void;
+  cancel(reason: string, code?: "cancelled" | "shutdown"): void;
   phase: "queued" | "running" | "finalising";
   retireWorker?: boolean;
 }
@@ -462,7 +462,7 @@ export class SessionManager {
    */
   async stopAll(): Promise<void> {
     this.stopped = true;
-    for (const execution of this.pendingExecutions) execution.cancel("agent shutdown");
+    for (const execution of this.pendingExecutions) execution.cancel("agent shutdown", "shutdown");
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     // Wake queued one-shots so they fail fast on the stopped check. This drains
     // the queue outside the acquire/release handoff, so activeRuns is left
@@ -494,9 +494,9 @@ export class SessionManager {
       abort,
       cancelled,
       phase: "queued",
-      cancel(reason) {
+      cancel(reason, code = "cancelled") {
         if (abort.signal.aborted) return;
-        const error = new ExecutionError("cancelled", `Turn aborted: ${reason}`);
+        const error = new ExecutionError(code, `Turn aborted: ${reason}`);
         abort.abort(error);
         if (slot.active === execution) slot.live?.rpc.abortTurn();
         cancel(error);
@@ -560,9 +560,11 @@ export class SessionManager {
         primary instanceof ExecutionError &&
         (primary.code === "cancelled" || primary.code === "timeout")
           ? primary.code
-          : primary
-            ? "error"
-            : "success",
+          : primary instanceof ExecutionError && primary.code === "shutdown"
+            ? "cancelled"
+            : primary
+              ? "error"
+              : "success",
       error: primary,
     };
     execution.abort.abort(new Error("Execution is finalising"));

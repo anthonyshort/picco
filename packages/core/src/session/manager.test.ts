@@ -730,6 +730,27 @@ describe("SessionManager", () => {
     );
   });
 
+  test("shutdown has a typed cause while finalisers see a cancelled outcome", async () => {
+    const runtime = new FakeRuntime({ neverFinish: true });
+    const outcomes: string[] = [];
+    const mgr = manager(runtime, {
+      finalisers: [
+        {
+          name: "record",
+          run({ outcome }) {
+            outcomes.push(outcome.status);
+          },
+        },
+      ],
+    });
+    const turn = mgr.namespace("review").run("one", "Work");
+    await vi.waitFor(() => expect(runtime.spawns[0]?.process.prompts).toHaveLength(1));
+    const rejection = expect(turn).rejects.toMatchObject({ code: "shutdown" });
+    await mgr.stopAll();
+    await rejection;
+    expect(outcomes).toEqual(["cancelled"]);
+  });
+
   test("stopAll kills every live session and refuses new work", async () => {
     const runtime = new FakeRuntime();
     const mgr = manager(runtime);

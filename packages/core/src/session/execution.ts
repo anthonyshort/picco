@@ -30,7 +30,7 @@ export interface ExecutionFinalisation {
  */
 export class ExecutionError extends Error {
   constructor(
-    readonly code: "cancelled" | "timeout" | "provider" | "worker",
+    readonly code: "cancelled" | "shutdown" | "timeout" | "provider" | "worker",
     message: string,
   ) {
     super(message);
