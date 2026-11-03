@@ -547,6 +547,72 @@ describe("SessionManager", () => {
     }
   });
 
+  test("failed idle eviction retains the worker for a confirmed reset", async () => {
+    vi.useFakeTimers();
+    let restore: (() => Promise<void>) | undefined;
+    try {
+      const runtime = new FakeRuntime();
+      const mgr = manager(runtime, { idleTimeout: "1m" });
+      const sessions = mgr.namespace("github-reviews");
+      const turn = sessions.run("job", "review");
+      await vi.advanceTimersByTimeAsync(5);
+      await turn;
+      const process = runtime.spawns[0]!.process;
+      const kill = process.kill.bind(process);
+      restore = async () => {
+        process.kill = kill;
+        await sessions.reset("job");
+      };
+      process.kill = async () => {
+        throw new Error("Idle worker termination failed");
+      };
+      await vi.advanceTimersByTimeAsync(parseDuration("2m"));
+      expect(process.alive).toBe(true);
+      expect(mgr.list()).toHaveLength(1);
+      await expect(sessions.reset("job")).rejects.toThrow("Idle worker termination failed");
+      process.kill = kill;
+      await sessions.reset("job");
+      expect(process.alive).toBe(false);
+      expect(mgr.list()).toHaveLength(0);
+    } finally {
+      await restore?.();
+      vi.useRealTimers();
+    }
+  });
+
+  test("work queued during idle eviction keeps its session registered", async () => {
+    vi.useFakeTimers();
+    const termination = Promise.withResolvers<void>();
+    try {
+      const runtime = new FakeRuntime();
+      const mgr = manager(runtime, { idleTimeout: "1m" });
+      const sessions = mgr.namespace("chat");
+      const first = sessions.run("one", "first");
+      await vi.advanceTimersByTimeAsync(5);
+      await first;
+      const process = runtime.spawns[0]!.process;
+      const kill = process.kill.bind(process);
+      process.kill = async () => {
+        await termination.promise;
+        await kill();
+      };
+      await vi.advanceTimersByTimeAsync(parseDuration("2m"));
+      const next = sessions.run("one", "next");
+      termination.resolve();
+      await vi.advanceTimersByTimeAsync(5);
+      expect((await next).text).toBe("echo: next");
+      expect(runtime.spawns).toHaveLength(2);
+      expect(mgr.list()).toHaveLength(1);
+      const third = sessions.run("one", "third");
+      await vi.advanceTimersByTimeAsync(5);
+      await third;
+      expect(runtime.spawns).toHaveLength(2);
+    } finally {
+      termination.resolve();
+      vi.useRealTimers();
+    }
+  });
+
   test("idleTimeout: false disables eviction", async () => {
     vi.useFakeTimers();
     try {
@@ -988,6 +1054,34 @@ describe("SessionManager", () => {
     await reset;
     expect(released).toBe(1);
     expect(runtime.spawns[0]!.process.alive).toBe(false);
+  });
+
+  test("failed resets reject every caller and retry terminating the same worker", async () => {
+    const runtime = new FakeRuntime({ reply: () => "ready" });
+    const sessions = manager(runtime).namespace("github-reviews");
+    await sessions.run("job", "review");
+    const process = runtime.spawns[0]!.process;
+    const kill = process.kill.bind(process);
+    const stopping = Promise.withResolvers<void>();
+    const failed = Promise.withResolvers<void>();
+    process.kill = async () => {
+      stopping.resolve();
+      await failed.promise;
+      throw new Error("termination failed");
+    };
+    const first = sessions.reset("job");
+    const firstFailure = expect(first).rejects.toThrow("termination failed");
+    await stopping.promise;
+    const secondFailure = expect(sessions.reset("job")).rejects.toThrow("termination failed");
+    failed.resolve();
+    await Promise.all([firstFailure, secondFailure]);
+    expect(process.alive).toBe(true);
+    await expect(sessions.reset("job")).rejects.toThrow("termination failed");
+    expect(process.alive).toBe(true);
+    process.kill = kill;
+    await sessions.reset("job");
+    expect(process.alive).toBe(false);
+    expect(runtime.spawns).toHaveLength(1);
   });
 
   test("reset waits for worker exit without waiting for or closing the queued successor", async () => {
