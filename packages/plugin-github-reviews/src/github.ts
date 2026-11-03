@@ -124,7 +124,55 @@ export function createGithubSource(opts: GithubSourceOptions = {}) {
     throw new Error("GitHub request inspection exceeded the pagination limit");
   }
 
-  return { discover, inspect };
+  /**
+   * Resolve one explicit request without requiring a personal review request.
+   */
+  async function resolve(inputUrl: string, signal?: AbortSignal) {
+    const url = new URL(inputUrl);
+    const match = /^\/([^/]+\/[^/]+)\/pull\/([1-9]\d*)$/.exec(url.pathname);
+    if (
+      url.origin !== "https://github.com" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      !match
+    )
+      throw new Error("Use a canonical https://github.com/owner/repository/pull/number URL");
+    const repository = RepositorySchema.parse(match[1]);
+    const number = z.coerce.number().int().positive().parse(match[2]);
+    const [rawPull, rawViewer] = await Promise.all([
+      deps.execute(["api", `repos/${repository}/pulls/${number}`], undefined, signal),
+      deps.execute(["api", "user"], undefined, signal),
+    ]);
+    const pull = z
+      .object({
+        number: z.number().int(),
+        title: z.string(),
+        html_url: z.string(),
+        created_at: z.iso.datetime(),
+        state: z.literal("open"),
+        draft: z.boolean(),
+        head: z.object({ sha: z.string().regex(/^[a-f0-9]{40}$/i) }),
+        base: z.object({ sha: z.string().regex(/^[a-f0-9]{40}$/i) }),
+      })
+      .parse(JSON.parse(rawPull));
+    if (pull.draft || pull.number !== number)
+      throw new Error("Pull request is not ready for review");
+    const candidate = CandidateSchema.parse({
+      repository,
+      number,
+      title: pull.title,
+      url: pull.html_url,
+      head: pull.head.sha,
+      createdAt: pull.created_at,
+    });
+    ensureCandidateUrl(candidate);
+    const viewer = z.object({ login: LoginSchema }).parse(JSON.parse(rawViewer));
+    return { candidate, base: pull.base.sha, reviewer: viewer.login.toLowerCase() };
+  }
+
+  return { discover, inspect, resolve };
 }
 
 /**
@@ -305,6 +353,8 @@ function ensureCandidateUrl(candidate: Candidate): void {
   const url = new URL(candidate.url);
   if (
     url.origin !== "https://github.com" ||
+    url.username ||
+    url.password ||
     url.pathname.toLowerCase() !== `/${candidate.repository}/pull/${candidate.number}` ||
     url.search ||
     url.hash

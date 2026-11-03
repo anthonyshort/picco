@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { tool, type Plugin, type PluginContext } from "@picco-agent/core";
-import { z } from "zod";
+import { type Plugin, type PluginContext } from "@picco-agent/core";
+import { createReviewControls } from "./controls.js";
 import { createGithubSource, GithubReviewSourceError } from "./github.js";
-import { createReviewStore, type QueueItem } from "./store.js";
+import { createReviewStore, StoreRunSchema, type StoreRun, type QueueItem } from "./store.js";
 import { runReview } from "./runner.js";
 import { observeWorkflows } from "./workflows.js";
 import { GithubReviewsSettingsSchema, type GithubReviewsOptions } from "./types.js";
@@ -16,8 +17,16 @@ const MAX_BACKOFF_MS = 60 * 60_000;
  * Poll personal GitHub review requests and dispatch unhandled personal review requests.
  */
 export function githubReviews(opts: GithubReviewsOptions): Plugin {
-  const { github, prompt, onRunStart, onRunComplete, validateResult, requiresResult, ...input } =
-    opts;
+  const {
+    github,
+    prompt,
+    onRunStart,
+    onRunComplete,
+    validateResult,
+    requiresResult,
+    secrets = [],
+    ...input
+  } = opts;
   const settings = GithubReviewsSettingsSchema.parse(input);
   const source = createGithubSource(github);
   const active = new Map<string, ReturnType<typeof runReview>>();
@@ -42,6 +51,14 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
     return { store, ctx };
   }
 
+  function manualAdmissionsEnabled() {
+    return !stopped && !persistenceFailed && !store!.status().paused;
+  }
+
+  function occupied() {
+    return active.size;
+  }
+
   function admissionsEnabled() {
     return (
       !stopped &&
@@ -63,7 +80,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
     );
     nextAllowedAt = Date.now() + delay;
     backoffUntil = nextAllowedAt;
-    const message = err instanceof Error ? err.message : "GitHub polling failed";
+    const message = redact(err instanceof Error ? err.message : "GitHub polling failed");
     try {
       store!.poll({
         attemptedAt: new Date().toISOString(),
@@ -149,9 +166,27 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
       return dispatching;
     }
     dispatching = (async () => {
+      if (!manualAdmissionsEnabled()) return;
+      for (const job of store!.jobs.next(1000)) {
+        if (!manualAdmissionsEnabled() || occupied() >= settings.maxConcurrentReviews) break;
+        let run;
+        try {
+          const resolved = await source.resolve(job.url, controller.signal);
+          if (!manualAdmissionsEnabled()) return;
+          store!.jobs.refresh(job.id, resolved.candidate, resolved.base);
+          run = store!.jobs.admit(job.id, `review-${randomUUID()}`);
+        } catch (err) {
+          store!.jobs.block(
+            job.id,
+            redact(err instanceof Error ? err.message : "Review admission failed"),
+          );
+          continue;
+        }
+        if (run) startWorker(run, job.skill);
+      }
       if (!admissionsEnabled()) return;
       for (const item of store!.next(1000)) {
-        if (!admissionsEnabled() || active.size >= settings.maxConcurrentReviews) break;
+        if (!admissionsEnabled() || occupied() >= settings.maxConcurrentReviews) break;
         try {
           await admit(item);
         } catch (err) {
@@ -210,11 +245,16 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
     const route = settings.repositories.find(
       (candidateRoute) => candidateRoute.name === item.repository,
     )!;
+    startWorker(run, route.skill);
+  }
+
+  function startWorker(admitted: StoreRun, skill: string) {
+    const run = StoreRunSchema.parse(admitted);
     const worker = runReview({
       ctx: ctx!,
       store: store!,
       run,
-      skill: route.skill,
+      skill,
       reviewsDirectory,
       timeoutMs: settings.reviewTimeoutMs,
       prompt,
@@ -236,80 +276,42 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
       });
   }
 
-  const tools = [
-    tool({
-      name: "github_reviews_status",
-      description:
-        "Inspect GitHub review polling, persistent pause/error state and live review workers without starting work.",
-      input: z.object({}).strict(),
-      async execute() {
-        const current = state();
-        return JSON.stringify({
-          enabled: settings.enabled,
-          persistenceFailed,
-          activeRuns: [...active.keys()],
-          settings,
-          ...current.store.status(),
-        });
-      },
-    }),
-    tool({
-      name: "github_reviews_list",
-      description:
-        "List recent requested-review candidates and their persisted status without starting reviews.",
-      input: z.object({ limit: z.number().int().min(1).max(100).default(20) }).strict(),
-      async execute({ limit }) {
-        return JSON.stringify(state().store.list(limit));
-      },
-    }),
-    tool({
-      name: "github_reviews_details",
-      description: "Inspect a GitHub review item or run, its attempts and completion evidence.",
-      input: z.object({ id: z.uuid() }).strict(),
-      async execute({ id }) {
-        return JSON.stringify(state().store.details(id));
-      },
-    }),
-    tool({
-      name: "github_reviews_poll",
-      description:
-        "Poll requested reviews now, subject to configured enablement, API backoff and admission pause. Never bypasses request-cycle checks.",
-      input: z.object({}).strict(),
-      async execute() {
-        state();
-        if (timer) clearTimeout(timer);
-        nextAllowedAt = Math.max(Date.now(), backoffUntil);
-        await poll();
-        return JSON.stringify(state().store.status());
-      },
-    }),
-    tool({
-      name: "github_reviews_pause",
-      description:
-        "Pause new review admissions persistently. Active reviews finish and discovery continues.",
-      input: z.object({}).strict(),
-      async execute() {
-        state().store.pause(true);
-        return "GitHub review admissions paused; active reviews may finish.";
-      },
-    }),
-    tool({
-      name: "github_reviews_resume",
-      description:
-        "Resume paused GitHub review admissions when the user requests it. Automatic polling remains subject to configuration.",
-      input: z.object({}).strict(),
-      async execute() {
-        state().store.pause(false);
-        nextAllowedAt = Math.max(Date.now(), backoffUntil);
-        await poll();
-        return JSON.stringify(state().store.status());
-      },
-    }),
-  ];
+  const exposedTools = createReviewControls({
+    state,
+    reviewsDirectory: () => reviewsDirectory,
+    settings,
+    source,
+    active,
+    persistenceFailed: () => persistenceFailed,
+    signal: () => controller.signal,
+    poll: async () => {
+      if (timer) clearTimeout(timer);
+      nextAllowedAt = Math.max(Date.now(), backoffUntil);
+      await poll();
+    },
+    dispatch,
+    redact,
+  });
+
+  function redact(value: string) {
+    let safe = value;
+    for (const secret of secrets.filter(Boolean)) safe = safe.split(secret).join("[redacted]");
+    return safe
+      .replace(
+        /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,})\b/g,
+        "[redacted]",
+      )
+      .replace(/(Bearer\s+)[^\s"'\\]+/gi, "$1[redacted]")
+      .replace(
+        /((?:\\*")?(?:api[_-]?key|(?:access[_-]?|refresh[_-]?)?token|authorization|password|client[_-]?secret)(?:\\*")?\s*[:=]\s*\\*")[^"\r\n]*?(?=\\*")/gi,
+        "$1[redacted]",
+      );
+  }
 
   return {
     name: "github-reviews",
-    tools,
+    tools: exposedTools,
+    mcpTools: exposedTools,
     prepareExecution: settings.holdWorkflows ? observeWorkflows : undefined,
     async start(context) {
       if (!stopped) throw new Error("GitHub reviews plugin is already started");
@@ -329,6 +331,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
         nextAllowedAt = previous?.nextPollAt ? Date.parse(previous.nextPollAt) : 0;
         backoffUntil = previous?.error || previous?.rateLimit?.remaining === 0 ? nextAllowedAt : 0;
         schedule();
+        await dispatch();
       } catch (err) {
         stopped = true;
         store.close();
