@@ -96,6 +96,10 @@ export type GithubReviewsOptions = z.input<typeof GithubReviewsSettingsSchema> &
   onRunComplete?: (result: GithubReviewResult) => void | Promise<void>;
   github?: GithubSourceOptions;
   /**
+   * Values removed from external diagnostics; never included in settings.
+   */
+  secrets?: string[];
+  /**
    * Validate and retain full reports without discarding incomplete evidence.
    */
   validateResult?: (

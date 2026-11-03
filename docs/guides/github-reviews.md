@@ -1,6 +1,6 @@
-# Run requested GitHub reviews
+# Run GitHub reviews
 
-The GitHub reviews plugin polls review requests for the host's authenticated GitHub account and starts a session when an eligible pull request is ready. It records reviewed commits in SQLite so normal polling does not need to scan GitHub comments or reviews. An empty poll does not start a model session. It requires no repository webhook or GitHub App.
+The GitHub reviews plugin owns automatic and explicitly requested reviews, including their queue, workers, cancellation and SQLite state. It polls review requests for the host's authenticated GitHub account and can also accept a pull request through agent tools or MCP. It records reviewed commits in SQLite so normal polling does not need to scan GitHub comments or reviews. An empty poll does not start a model session. It requires no repository webhook or GitHub App.
 
 To address reviews on your own PRs, use the separate [feedback workflow](./github-feedback.md).
 
@@ -43,9 +43,33 @@ await agent.start();
 
 Run the assistant with the model credentials your Pi configuration needs. Setting `enabled: true` permits automatic review sessions, including any publication authorised by the configured skill. Omit it while preparing configuration or inspecting persisted state.
 
-For an unconfigured installation, register `githubReviews({})`. It starts disabled with no repository routes, exposes management tools and initialises its database without calling GitHub or starting review workers. Add repository routes before enabling it. Applications loading settings from a file can use the exported `GithubReviewsSettingsSchema` to validate the same defaults and limits as the plugin.
+For an unconfigured installation, register `githubReviews({})`. It starts with polling disabled and no repository routes, exposes review tools and initialises its database without calling GitHub or starting review workers. Explicit `github_reviews_start` requests still work; they use the `review` skill when no repository route matches. Add repository routes before enabling it. Applications loading settings from a file can use the exported `GithubReviewsSettingsSchema` to validate the same defaults and limits as the plugin.
 
 The host CLI sign-in supplies discovery credentials. Review sessions use the agent's configured runtime and inherit its existing authentication setup. A sandbox must already provide the GitHub tools, repository access and credentials that the review skill needs; this plugin does not add mounts or copy the host credential store into a worker. See [Runtime isolation](./runtimes/index.md).
+
+## Request a review through MCP
+
+Picco core serves the tools declared by the GitHub reviews plugin. Register `githubReviews()` once and enable the core MCP listener in the same agent configuration:
+
+```ts
+const agent = createAgent({
+  name: "review-assistant",
+  dataDir: "./data",
+  runtime: local(),
+  pi: { skills: ["./skills"] },
+  mcp: { port: 3100, token: process.env.PICCO_MCP_TOKEN! },
+  plugins: [githubReviews({})],
+});
+await agent.start();
+```
+
+Supply the bearer token through private environment configuration. Connect an MCP client to the loopback HTTP endpoint printed by Picco with `Authorization: Bearer <token>`. No separate MCP plugin or review queue is needed.
+
+Call `github_reviews_start` with a canonical GitHub pull request `url` and a stable `requestId`. It queues a local-only review and returns its job ID. Repeating the same request through MCP or an agent tool returns the same job, even after a restart. Reusing the ID for another pull request is rejected. A deliberate new review uses a new request ID. Explicit reviews do not require a personal review request, an enabled poller or configured repository routes.
+
+Use `github_reviews_details` with the job ID to inspect attempts, and `github_reviews_report` to read the full captured result and diagnostic output. `github_reviews_jobs` lists explicit jobs alongside automatic candidates; `github_reviews_doctor` reports active runs, persistence failures and durable state. Supply an `id` to include that run and bounded artifact logs, using `offset` and `limit` to page through the lines. These reads do not start work. Worker-only `github_review_result` and `github_review_complete` are never exposed through MCP.
+
+Automatic and explicit work share `maxConcurrentReviews`, the persistent admission pause and the same worker lifecycle. Explicit reviews run with `delivery: "local-only"`: they must not publish GitHub comments, reviews or approvals. Their completion does not satisfy an automatic review request or release an automatic publication claim. Applications with custom prompts must preserve that delivery policy.
 
 ## Capture a full review result
 
@@ -71,7 +95,7 @@ The plugin stores queue items, claims, attempts, reviewed commits, pause state a
 
 Keep that directory across restarts. SQLite may also create WAL and shared-memory sidecar files. Take a consistent SQLite backup rather than copying only the database file while the assistant is writing.
 
-Each review has a unique run and artifact directory, which becomes the session's working directory. Reports and publisher progress remain files; the database records their association with the run. Concurrent sessions cannot reserve the same pull request, including different heads or request cycles.
+Each review has a unique run and artifact directory, which becomes the session's working directory. Full captured reports are retained in SQLite; artifacts and publisher progress can remain files associated with the run. Automatic publication claims exclude another automatic review of the same pull request, including different heads or request cycles. Local-only jobs have separate attempt identities and never acquire or clear those claims.
 
 Run one Picco host per review data directory. After a normal stop or a crash, Picco abandons in-flight execution on restart and starts fresh attempts after rechecking GitHub. Old attempts, request IDs, captured reports and completion history remain available. A saved completion declaration stays completed even if the host stopped before worker teardown. This personal bot does not resume old executions or require manual restart reconciliation; a crash can drop work or repeat a remote write.
 
@@ -83,7 +107,7 @@ The script that finds old review comments belongs to the consuming application. 
 
 ## Record a completed review
 
-A review session receives a session-only `github_review_complete` tool. Its default prompt tells the worker to call this tool with a summary after the entire configured skill succeeds, including any publication required by that skill. The tool records the selected commit and request cycle as reviewed; it does not post to GitHub or independently verify remote publication.
+A review session receives a session-only `github_review_complete` tool. Its default prompt tells the worker to call this tool with a summary after the entire configured skill succeeds, including any publication required by that skill. For automatic reviews, the tool records the selected commit and request cycle as reviewed. For explicit local-only reviews it records only that job’s completion; it does not post to GitHub or independently verify remote publication.
 
 If you supply a custom `prompt`, retain this completion instruction. A worker's final text alone does not mark the commit reviewed. The tool is bound to its selected session, so a different conversation cannot complete the review.
 
@@ -107,8 +131,12 @@ The setting defaults to `false` and does not change which workflow the prompt la
 
 Ask the assistant to inspect `github_reviews_status` for the last successful poll, API budget, admission state, active work and blockers. `github_reviews_list` shows candidate state; `github_reviews_details` shows an item's attempts and recorded completion.
 
-Use `github_reviews_pause` to stop new admissions while active reviews finish. The pause survives a restart. Discovery remains available for status inspection. Use `github_reviews_resume` to clear the pause.
+Use `github_reviews_pause` to stop new admissions while active reviews finish. The pause survives a restart. Discovery remains available for status inspection. Use `github_reviews_resume` to clear the pause. Explicit queued jobs can resume while automatic polling stays disabled.
 
 `github_reviews_poll` requests an immediate poll through the normal checks. It does not bypass rate limits, concurrency or a pause. For safe maintenance, pause admissions and wait for active work to finish before stopping the assistant or moving its database.
+
+Use `github_reviews_cancel` with a job or run ID to cancel queued work or stop an active worker. Session reset failures are returned to the caller. Restarting abandons old execution; it does not require an operator attestation.
+
+`github_reviews_retry` requires a new stable `requestId`. Stop active work before requesting a retry. Explicit retries append an attempt to the same job; Picco refreshes the PR head and base from GitHub before every admission, including jobs queued across a restart. Previous attempts and captured results remain available. Automatic retries recheck the current review request on the next poll. Completed reviews require a new explicit request.
 
 The exported `GithubReviewsOptions` type is the configuration reference. See [Plugins](./plugins.md) for plugin lifecycle and [Sessions](../concepts/sessions.md) for worker ownership.

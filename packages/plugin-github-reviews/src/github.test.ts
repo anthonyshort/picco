@@ -36,6 +36,54 @@ const candidate: Candidate = {
 };
 
 describe("GitHub review source", () => {
+  test("resolves an explicit PR with pinned commits without a personal request", async () => {
+    const calls: string[][] = [];
+    const source = createGithubSource({
+      execute: async (args) => {
+        calls.push(args);
+        return JSON.stringify(
+          args[1] === "user"
+            ? { login: "Reviewer" }
+            : {
+                number: 12,
+                title: candidate.title,
+                html_url: candidate.url,
+                created_at: CREATED,
+                state: "open",
+                draft: false,
+                head: { sha: HEAD },
+                base: { sha: "b".repeat(40) },
+              },
+        );
+      },
+    });
+    expect(await source.resolve(candidate.url)).toEqual({
+      candidate,
+      base: "b".repeat(40),
+      reviewer: "reviewer",
+    });
+    expect(calls).toEqual([
+      ["api", "repos/owner/one/pulls/12"],
+      ["api", "user"],
+    ]);
+  });
+
+  test.each([
+    "https://evil.example/owner/one/pull/12",
+    "https://github.com/owner/one/pull/12?x=1",
+    "https://github.com/owner/one/pull/12/files",
+  ])("rejects unsafe explicit URLs before GitHub calls: %s", async (url) => {
+    let called = false;
+    const source = createGithubSource({
+      execute: async () => {
+        called = true;
+        return "{}";
+      },
+    });
+    await expect(source.resolve(url)).rejects.toThrow();
+    expect(called).toBe(false);
+  });
+
   test("discovers configured repositories in one paginated GraphQL search without starting a model", async () => {
     const calls: string[][] = [];
     const inputs: string[] = [];
