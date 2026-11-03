@@ -47,6 +47,14 @@ For an unconfigured installation, register `githubReviews({})`. It starts disabl
 
 The host CLI sign-in supplies discovery credentials. Review sessions use the agent's configured runtime and inherit its existing authentication setup. A sandbox must already provide the GitHub tools, repository access and credentials that the review skill needs; this plugin does not add mounts or copy the host credential store into a worker. See [Runtime isolation](./runtimes/index.md).
 
+## Capture a full review result
+
+A review worker can call its session-only `github_review_result` tool with `{ result: JSON.stringify(report) }`. The plugin retains up to 4 MiB of JSON separately from the bounded diagnostic output. Saving a report does not declare completion. After the complete workflow succeeds, the worker calls `github_review_complete` with a summary.
+
+Applications can supply `validateResult(value, selection)` to validate their own report format and return `{ complete, value }`. Return `complete: false` to retain a partial report while blocking completion. With this hook, a full result is required by default; `requiresResult(selection)` can set that requirement per workflow. The plugin owns persistence and worker lifecycle; application hooks own report validation and workflow policy.
+
+A custom `prompt(selection)` receives immutable commit and delivery information, the chosen skill and artifact paths. Include the result-capture and completion instructions required by that workflow. Notifications receive both local and automatic runs: check `selection.run.delivery` in `onRunStart` or `onRunComplete` before sending publication notifications.
+
 ## Select eligible work
 
 The plugin polls once a minute by default and discovers open, non-draft pull requests created within the last 28 days that request the authenticated user's review. It checks the current personal request before admission, so a team-only request does not start a review. Configure `maxPrAgeDays` when the repository needs a different creation window.
