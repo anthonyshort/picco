@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { tool, type Plugin, type PluginContext } from "@picco-agent/core";
 import { z } from "zod";
@@ -7,11 +6,6 @@ import { createReviewStore, type QueueItem } from "./store.js";
 import { runReview } from "./runner.js";
 import { observeWorkflows } from "./workflows.js";
 import { GithubReviewsSettingsSchema, type GithubReviewsOptions } from "./types.js";
-
-/**
- * Renew dispatcher ownership before its five-minute lease can expire.
- */
-const HEARTBEAT_MS = 60_000;
 
 /**
  * Bound repeated transient failures without retrying remote review writes.
@@ -25,7 +19,6 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
   const { github, prompt, onRunStart, onRunComplete, ...input } = opts;
   const settings = GithubReviewsSettingsSchema.parse(input);
   const source = createGithubSource(github);
-  const owner = randomUUID();
   const active = new Map<string, ReturnType<typeof runReview>>();
   let ctx: PluginContext | undefined;
   let store: ReturnType<typeof createReviewStore> | undefined;
@@ -33,12 +26,11 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
   let reviewer: string | undefined;
   let stopped = true;
   let healthy = false;
-  let ownershipLost = false;
+  let persistenceFailed = false;
   let failures = 0;
   let nextAllowedAt = 0;
   let backoffUntil = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
   let polling: Promise<void> | undefined;
   let dispatching: Promise<void> | undefined;
   let refillRequested = false;
@@ -53,7 +45,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
     return (
       !stopped &&
       settings.enabled &&
-      !ownershipLost &&
+      !persistenceFailed &&
       healthy &&
       Date.now() >= backoffUntil &&
       !store!.status().paused
@@ -78,7 +70,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
         error: message,
       });
     } catch {
-      ownershipLost = true;
+      persistenceFailed = true;
       controller.abort();
       for (const worker of active.values()) worker.abort("Review state could not be persisted");
       ctx!.logger.error("Review state could not be persisted; admissions stopped");
@@ -87,7 +79,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
   }
 
   function schedule() {
-    if (stopped || !settings.enabled || ownershipLost) return;
+    if (stopped || !settings.enabled || persistenceFailed) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(
       () => {
@@ -100,7 +92,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
 
   function poll(): Promise<void> {
     if (polling) return polling;
-    if (stopped || !settings.enabled || ownershipLost) return Promise.resolve();
+    if (stopped || !settings.enabled || persistenceFailed) return Promise.resolve();
     if (Date.now() < nextAllowedAt) {
       schedule();
       return Promise.resolve();
@@ -209,7 +201,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
       return;
     }
     if (store!.hasAttempted(reviewer, item.repository, item.number, requestEventId, requestedAt)) {
-      store!.block(item.id, "prior-attempt-needs-reconciliation");
+      store!.block(item.id, "prior-attempt-failed");
       return;
     }
     const run = store!.admit(item.id, reviewer, settings.maxConcurrentReviews);
@@ -231,7 +223,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
     active.set(run.id, worker);
     void worker.completion
       .catch(() => {
-        ctx!.logger.error("Review finalisation failed; reservation retained for recovery", {
+        ctx!.logger.error("Review finalisation failed; attempt retained for restart", {
           runId: run.id,
         });
       })
@@ -251,7 +243,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
         const current = state();
         return JSON.stringify({
           enabled: settings.enabled,
-          ownershipLost,
+          persistenceFailed,
           activeRuns: [...active.keys()],
           settings,
           ...current.store.status(),
@@ -301,30 +293,13 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
     tool({
       name: "github_reviews_resume",
       description:
-        "Resume paused GitHub review admissions when the user requests it. Configuration disabled and uncertain runs still block admissions.",
+        "Resume paused GitHub review admissions when the user requests it. Automatic polling remains subject to configuration.",
       input: z.object({}).strict(),
       async execute() {
         state().store.pause(false);
         nextAllowedAt = Math.max(Date.now(), backoffUntil);
         await poll();
         return JSON.stringify(state().store.status());
-      },
-    }),
-    tool({
-      name: "github_reviews_resolve",
-      description:
-        "Resolve an uncertain review only after the user has confirmed its outcome. Mark completed if already reviewed, or retry only after confirming the earlier worker stopped and retrying will not duplicate remote effects. Record the evidence in reason. For completed runs without a saved declaration, supply reviewedAt as the verified original UTC completion timestamp, not the time of resolution.",
-      input: z
-        .object({
-          runId: z.uuid(),
-          action: z.enum(["completed", "retry"]),
-          reason: z.string().trim().min(1).max(4000),
-          reviewedAt: z.iso.datetime().optional(),
-        })
-        .strict(),
-      async execute({ runId, action, reason, reviewedAt }) {
-        state().store.resolveInterrupted(runId, action, reason, reviewedAt);
-        return "Review resolution recorded. The next poll will revalidate any retry.";
       },
     }),
   ];
@@ -338,12 +313,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
       ctx = context;
       reviewsDirectory = path.resolve(settings.reviewsDirectory ?? ctx.filePath());
       store = createReviewStore(path.join(reviewsDirectory, "reviews.sqlite"));
-      if (!store.claimDispatcher(owner)) {
-        store.close();
-        store = undefined;
-        throw new Error("Another GitHub review dispatcher owns this database");
-      }
-      ownershipLost = false;
+      persistenceFailed = false;
       healthy = false;
       failures = 0;
       refillRequested = false;
@@ -355,23 +325,9 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
         const previous = store.status().poll;
         nextAllowedAt = previous?.nextPollAt ? Date.parse(previous.nextPollAt) : 0;
         backoffUntil = previous?.error || previous?.rateLimit?.remaining === 0 ? nextAllowedAt : 0;
-        heartbeat = setInterval(() => {
-          try {
-            if (store!.renewDispatcher(owner)) return;
-          } catch {
-            /* Stop admissions on lost dispatcher ownership. */
-          }
-          ownershipLost = true;
-          healthy = false;
-          controller.abort();
-          for (const worker of active.values()) worker.abort("Review dispatcher ownership lost");
-          ctx!.logger.error("Review dispatcher ownership lost; admissions stopped");
-        }, HEARTBEAT_MS);
-        heartbeat.unref();
         schedule();
       } catch (err) {
         stopped = true;
-        store.releaseDispatcher(owner);
         store.close();
         store = undefined;
         throw err;
@@ -381,20 +337,15 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
       if (stopped) return;
       stopped = true;
       if (timer) clearTimeout(timer);
-      if (heartbeat) clearInterval(heartbeat);
       controller.abort();
-      for (const worker of active.values()) worker.abort("GitHub reviews plugin stopped");
+      for (const worker of active.values()) worker.shutdown();
       await Promise.allSettled([
         ...(polling ? [polling] : []),
         ...(dispatching ? [dispatching] : []),
         ...[...active.values()].map((worker) => worker.completion),
       ]);
-      try {
-        store!.releaseDispatcher(owner);
-      } finally {
-        store!.close();
-        store = undefined;
-      }
+      store!.close();
+      store = undefined;
     },
   };
 }

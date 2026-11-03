@@ -13,7 +13,7 @@ import {
 } from "./types.js";
 
 /**
- * Read and write polling records through typed SQLite operations.
+ * Read and write polling records on the connection shared with explicit jobs.
  */
 export class PollingRepository {
   constructor(private readonly database: DatabaseSync) {}
@@ -73,14 +73,6 @@ export class PollingRepository {
       .reviewedAt;
   }
 
-  completeResolution(id: string, reviewedAt: string, reason: string): void {
-    this.database
-      .prepare(
-        "UPDATE review_runs SET state='completed',reviewedAt=?,resolution='completed',resolutionReason=?,reason=NULL WHERE id=?",
-      )
-      .run(reviewedAt, reason, id);
-  }
-
   candidateId(reviewer: string, candidate: Candidate): string | null {
     const row = this.database
       .prepare(
@@ -97,9 +89,8 @@ export class PollingRepository {
       VALUES (?,?,?,?,?,?,?,?,'queued',?)
       ON CONFLICT(reviewer,repository,number,head) DO UPDATE SET
         title=excluded.title,url=excluded.url,seenAt=excluded.seenAt,
-        status=CASE WHEN review_queue.status='running' OR review_queue.reason='publication-uncertain'
-          THEN review_queue.status ELSE 'queued' END,
-        reason=CASE WHEN review_queue.reason='publication-uncertain' THEN review_queue.reason ELSE NULL END`)
+        status=CASE WHEN review_queue.status='running' THEN review_queue.status ELSE 'queued' END,
+        reason=NULL`)
       .run(
         id,
         reviewer,
@@ -115,9 +106,7 @@ export class PollingRepository {
 
   replaceableCandidates(reviewer: string): string[] {
     return this.database
-      .prepare(
-        "SELECT id FROM review_queue WHERE reviewer=? AND status!='running' AND (reason IS NULL OR reason!='publication-uncertain')",
-      )
+      .prepare("SELECT id FROM review_queue WHERE reviewer=? AND status!='running'")
       .all(reviewer)
       .map((row) => z.string().parse(row.id));
   }
@@ -167,13 +156,8 @@ export class PollingRepository {
       .get(repository, number);
   }
 
-  ownsClaim(runId: string, uncertain = false): boolean {
-    const row = uncertain
-      ? this.database
-          .prepare("SELECT runId FROM review_claims WHERE runId=? AND uncertain=1")
-          .get(runId)
-      : this.database.prepare("SELECT runId FROM review_claims WHERE runId=?").get(runId);
-    return !!row;
+  ownsClaim(runId: string): boolean {
+    return !!this.database.prepare("SELECT runId FROM review_claims WHERE runId=?").get(runId);
   }
 
   insertRun(run: StoreRun): void {
@@ -188,23 +172,13 @@ export class PollingRepository {
       .run(run.repository, run.number, run.id, expiresAt);
   }
 
-  renewClaim(runId: string, expiresAt: number, now: number): boolean {
-    return (
-      this.database
-        .prepare(
-          "UPDATE review_claims SET expiresAt=? WHERE runId=? AND expiresAt>? AND uncertain=0",
-        )
-        .run(expiresAt, runId, now).changes === 1
-    );
-  }
-
-  declareReviewed(runId: string, reviewedAt: string, summary: string, now: number): boolean {
+  declareReviewed(runId: string, reviewedAt: string, summary: string): boolean {
     return (
       this.database
         .prepare(`UPDATE review_runs SET reviewedAt=COALESCE(reviewedAt,?),reviewSummary=?
       WHERE id=? AND state='running' AND EXISTS
-        (SELECT 1 FROM review_claims WHERE runId=? AND expiresAt>? AND uncertain=0)`)
-        .run(reviewedAt, summary, runId, runId, now).changes === 1
+        (SELECT 1 FROM review_claims WHERE runId=? )`)
+        .run(reviewedAt, summary, runId, runId).changes === 1
     );
   }
 
@@ -220,8 +194,8 @@ export class PollingRepository {
       .run(status, finishedAt, reason, output, runId);
   }
 
-  markClaimUncertain(runId: string): void {
-    this.database.prepare("UPDATE review_claims SET uncertain=1 WHERE runId=?").run(runId);
+  clearClaims(): void {
+    this.database.prepare("DELETE FROM review_claims").run();
   }
 
   removeClaim(runId: string): void {
@@ -238,7 +212,7 @@ export class PollingRepository {
   interruptRun(runId: string, finishedAt: string): void {
     this.database
       .prepare(
-        "UPDATE review_runs SET state='interrupted',reason='publication-uncertain',finishedAt=? WHERE id=?",
+        "UPDATE review_runs SET state=CASE WHEN reviewedAt IS NULL THEN 'interrupted' ELSE 'completed' END,reason=CASE WHEN reviewedAt IS NULL THEN 'runtime-restarted' ELSE NULL END,finishedAt=? WHERE id=?",
       )
       .run(finishedAt, runId);
   }
@@ -262,7 +236,7 @@ export class PollingRepository {
 
   failedAttempts(reviewer: string, repository: string, number: number) {
     return this.database
-      .prepare(`SELECT data,finishedAt FROM review_runs WHERE state!='running' AND reviewedAt IS NULL AND (resolution IS NULL OR resolution!='retry') AND itemId IN
+      .prepare(`SELECT data,finishedAt FROM review_runs WHERE state!='running' AND reviewedAt IS NULL AND (reason IS NULL OR reason!='runtime-restarted') AND (resolution IS NULL OR resolution!='retry') AND itemId IN
       (SELECT id FROM review_queue WHERE reviewer=? AND repository=? AND number=?)`)
       .all(reviewer, repository, number)
       .map((row) => {

@@ -1,5 +1,4 @@
 import { mkdtempSync, rmSync, statSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -154,25 +153,6 @@ describe("createReviewStore", () => {
     }
   });
 
-  test("recorded reviewed truth cannot be erased by an operator retry resolution", () => {
-    const fixtureState = fixture();
-    try {
-      const [item] = fixtureState.populate();
-      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
-      fixtureState.first.markReviewed(admitted.id, "Complete");
-      fixtureState.first.finish(admitted.id, { status: "interrupted" });
-      expect(() =>
-        fixtureState.first.resolveInterrupted(admitted.id, "retry", "Try again"),
-      ).toThrow("already recorded");
-      expect(fixtureState.first.status().reservations).toHaveLength(1);
-      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
-      fixtureState.first.resolveInterrupted(admitted.id, "completed", "Verified completed review");
-      expect(fixtureState.first.status().reservations).toEqual([]);
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
-
   test("reviewer binding survives restart and a changed account persists a pause", () => {
     const fixtureState = fixture();
     try {
@@ -239,252 +219,6 @@ describe("createReviewStore", () => {
     }
   });
 
-  test("reviewed declarations survive a crash while its unfinished worker reservation remains uncertain", () => {
-    const fixtureState = fixture();
-    try {
-      const [item] = fixtureState.populate();
-      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
-      fixtureState.first.markReviewed(admitted.id, "Complete");
-      fixtureState.first.recoverInterrupted();
-      expect(fixtureState.first.details(admitted.id)?.runs[0]?.status).toBe("interrupted");
-      expect(fixtureState.first.status().reservations).toMatchObject([
-        { runId: admitted.id, uncertain: 1 },
-      ]);
-      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
-      fixtureState.first.resolveInterrupted(
-        admitted.id,
-        "completed",
-        "Confirmed the previous worker ended",
-      );
-      expect(fixtureState.first.status().reservations).toEqual([]);
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
-
-  test("reviewed declarations require a live matching lease", () => {
-    const fixtureState = fixture();
-    try {
-      const [item] = fixtureState.populate();
-      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
-      fixtureState.advance(5 * 60_000 + 1);
-      expect(fixtureState.first.markReviewed(admitted.id, "Complete")).toBe(false);
-      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(false);
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
-
-  test("operator retry resolution releases only an uncertain reservation and preserves its reason", () => {
-    const fixtureState = fixture();
-    try {
-      const [item] = fixtureState.populate();
-      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
-      expect(() =>
-        fixtureState.first.resolveInterrupted(admitted.id, "retry", "Verified no work completed"),
-      ).toThrow("no uncertain reservation");
-      fixtureState.first.recoverInterrupted();
-      fixtureState.first.resolveInterrupted(admitted.id, "retry", "Verified no work completed");
-      expect(fixtureState.first.status().reservations).toEqual([]);
-      expect(fixtureState.first.hasAttempted("reviewer", candidate.repository, 42)).toBe(false);
-      expect(fixtureState.first.details(admitted.id)?.runs[0]).toMatchObject({
-        resolution: "retry",
-        resolutionReason: "Verified no work completed",
-      });
-      const [newHead] = fixtureState.populate([{ ...candidate, head: "b".repeat(40) }]);
-      expect(fixtureState.second.admit(newHead!.id, "reviewer", 1)).toMatchObject({
-        head: "b".repeat(40),
-      });
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
-
-  test("operator completed resolution establishes reviewed history without GitHub evidence", () => {
-    const fixtureState = fixture();
-    try {
-      const [item] = fixtureState.populate();
-      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
-      fixtureState.first.recoverInterrupted();
-      fixtureState.first.resolveInterrupted(
-        admitted.id,
-        "completed",
-        "Verified saved review report",
-        admitted.startedAt,
-      );
-      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(true);
-      expect(fixtureState.first.status().reservations).toEqual([]);
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
-
-  test("completion recovery preserves a newer request made before operator resolution", () => {
-    const fixtureState = fixture();
-    try {
-      const [item] = fixtureState.populate();
-      fixtureState.first.setCycle(item!.id, "request:first", "2026-10-25T00:00:00Z");
-      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
-      const reviewedAt = "2026-10-26T00:00:10.000Z";
-      const newerRequestAt = "2026-10-26T00:00:20.000Z";
-      fixtureState.advance(30_000);
-      fixtureState.first.recoverInterrupted();
-      fixtureState.first.resolveInterrupted(
-        admitted.id,
-        "completed",
-        "Verified original completion timestamp in saved report",
-        reviewedAt,
-      );
-      expect(
-        fixtureState.first.hasCompleted(
-          "reviewer",
-          candidate.repository,
-          42,
-          "request:second",
-          newerRequestAt,
-        ),
-      ).toBe(false);
-      expect(
-        fixtureState.first.hasAttempted(
-          "reviewer",
-          candidate.repository,
-          42,
-          "request:second",
-          newerRequestAt,
-        ),
-      ).toBe(false);
-      expect(
-        fixtureState.first.hasCompleted("reviewer", candidate.repository, 42, "request:first"),
-      ).toBe(true);
-      expect(
-        fixtureState.first.hasCompleted(
-          "reviewer",
-          candidate.repository,
-          42,
-          "request:equal",
-          reviewedAt,
-        ),
-      ).toBe(true);
-      expect(fixtureState.first.details(admitted.id)?.runs[0]?.reviewedAt).toBe(reviewedAt);
-      expect(fixtureState.first.status().reservations).toEqual([]);
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
-
-  test("completion recovery accepts GitHub evidence from the run's start second", () => {
-    const fixtureState = fixture();
-    try {
-      const [item] = fixtureState.populate();
-      fixtureState.advance(500);
-      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
-      fixtureState.advance(30_000);
-      fixtureState.first.recoverInterrupted();
-      const before = fixtureState.first.details(admitted.id);
-      const reservations = fixtureState.first.status().reservations;
-      expect(() =>
-        fixtureState.first.resolveInterrupted(
-          admitted.id,
-          "completed",
-          "Evidence predates this run",
-          "2026-10-25T23:59:59Z",
-        ),
-      ).toThrow();
-      expect(fixtureState.first.details(admitted.id)).toEqual(before);
-      expect(fixtureState.first.status().reservations).toEqual(reservations);
-      fixtureState.first.resolveInterrupted(
-        admitted.id,
-        "completed",
-        "Verified GitHub second-precision completion timestamp",
-        "2026-10-26T00:00:00Z",
-      );
-      expect(admitted.startedAt).toBe("2026-10-26T00:00:00.500Z");
-      expect(fixtureState.first.details(admitted.id)?.runs[0]?.reviewedAt).toBe(
-        "2026-10-26T00:00:00Z",
-      );
-      expect(
-        fixtureState.first.hasCompleted(
-          "reviewer",
-          candidate.repository,
-          42,
-          "request:newer",
-          "2026-10-26T00:00:01Z",
-        ),
-      ).toBe(false);
-      expect(
-        fixtureState.first.hasAttempted(
-          "reviewer",
-          candidate.repository,
-          42,
-          "request:newer",
-          "2026-10-26T00:00:01Z",
-        ),
-      ).toBe(false);
-      expect(fixtureState.first.status().reservations).toEqual([]);
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
-
-  test.each([
-    { label: "missing", reviewedAt: undefined },
-    { label: "malformed", reviewedAt: "not-a-timestamp" },
-    { label: "future", reviewedAt: "2026-10-26T00:00:31.000Z" },
-    { label: "before the run", reviewedAt: "2026-10-25T23:59:59.000Z" },
-  ])("completed resolution rejects $label evidence without changing state", ({ reviewedAt }) => {
-    const fixtureState = fixture();
-    try {
-      const [item] = fixtureState.populate();
-      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
-      fixtureState.advance(30_000);
-      fixtureState.first.recoverInterrupted();
-      const before = fixtureState.first.details(admitted.id);
-      const reservations = fixtureState.first.status().reservations;
-      expect(() =>
-        fixtureState.first.resolveInterrupted(
-          admitted.id,
-          "completed",
-          "Operator supplied evidence",
-          reviewedAt,
-        ),
-      ).toThrow();
-      expect(fixtureState.first.details(admitted.id)).toEqual(before);
-      expect(fixtureState.first.status().reservations).toEqual(reservations);
-      expect(fixtureState.first.hasCompleted("reviewer", candidate.repository, 42)).toBe(false);
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
-
-  test("completed resolution preserves an existing declaration instead of later evidence", () => {
-    const fixtureState = fixture();
-    try {
-      const [item] = fixtureState.populate();
-      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
-      fixtureState.first.markReviewed(admitted.id, "Original completed review");
-      fixtureState.advance(30_000);
-      fixtureState.first.recoverInterrupted();
-      fixtureState.first.resolveInterrupted(
-        admitted.id,
-        "completed",
-        "Confirmed original declaration",
-        "2026-10-26T00:00:30.000Z",
-      );
-      expect(fixtureState.first.details(admitted.id)?.runs[0]?.reviewedAt).toBe(admitted.startedAt);
-      expect(
-        fixtureState.first.hasCompleted(
-          "reviewer",
-          candidate.repository,
-          42,
-          "request:newer",
-          "2026-10-26T00:00:10.000Z",
-        ),
-      ).toBe(false);
-      expect(fixtureState.first.status().reservations).toEqual([]);
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
   test("a complete scan is idempotent, ordered and supersedes absent non-running snapshots", () => {
     const fixtureState = fixture();
     try {
@@ -549,21 +283,6 @@ describe("createReviewStore", () => {
     }
   });
 
-  test("expired lease renewal returns false and never recycles a possibly publishing reservation", () => {
-    const fixtureState = fixture();
-    try {
-      const [item] = fixtureState.populate();
-      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
-      fixtureState.advance(60_000);
-      expect(fixtureState.first.renew(admitted.id)).toBe(true);
-      fixtureState.advance(5 * 60_000 + 1);
-      expect(fixtureState.first.renew(admitted.id)).toBe(false);
-      expect(fixtureState.second.admit(item!.id, "reviewer", 1)).toBeNull();
-    } finally {
-      fixtureState.cleanup();
-    }
-  });
-
   test("unconfirmed worker completion is rejected and blocked attempts need a newer request", () => {
     const fixtureState = fixture();
     try {
@@ -606,78 +325,28 @@ describe("createReviewStore", () => {
     }
   });
 
-  test("startup recovery retains uncertain reservations and does not revive them on reconciliation", () => {
-    const fixtureState = fixture();
+  test("startup abandons running attempts and preserves declared completions", () => {
+    const state = fixture();
     try {
-      const [item] = fixtureState.populate();
-      const admitted = fixtureState.first.admit(item!.id, "reviewer", 1)!;
-      expect(fixtureState.second.recoverInterrupted()).toBe(1);
-      expect(fixtureState.second.recoverInterrupted()).toBe(0);
-      fixtureState.advance(86_400_000);
-      fixtureState.populate();
-      expect(fixtureState.first.next()).toEqual([]);
-      expect(fixtureState.first.status().reservations[0]?.uncertain).toBe(1);
-      expect(fixtureState.first.details(admitted.id)?.runs[0]?.status).toBe("interrupted");
+      const item = state.populate()[0]!;
+      const run = state.first.admit(item.id, "reviewer", 1)!;
+      state.first.recoverInterrupted();
+      expect(state.first.details(run.id)?.runs[0]).toMatchObject({
+        status: "interrupted",
+        reason: "runtime-restarted",
+      });
+      expect(state.first.status().reservations).toEqual([]);
+      expect(state.first.hasAttempted("reviewer", item.repository, item.number)).toBe(false);
+      const fresh = state.first.admit(item.id, "reviewer", 1)!;
+      expect(fresh.id).not.toBe(run.id);
+      expect(state.first.markReviewed(fresh.id, "done")).toBe(true);
+      state.first.recoverInterrupted();
+      expect(state.first.details(fresh.id)?.runs[0]?.status).toBe("completed");
+      expect(state.first.next()).toEqual([]);
     } finally {
-      fixtureState.cleanup();
+      state.cleanup();
     }
   });
-
-  test.each([0, 5 * 60_000 + 1])(
-    "reclaims a dead local dispatcher after %i ms without allowing the previous owner back in",
-    (elapsed) => {
-      const fixtureState = fixture();
-      try {
-        expect(fixtureState.first.claimDispatcher("first")).toBe(true);
-        expect(fixtureState.second.claimDispatcher("second")).toBe(false);
-        fixtureState.advance(elapsed);
-        expect(fixtureState.second.claimDispatcher("second")).toBe(false);
-        const stopped = spawnSync(process.execPath, ["-e", ""]);
-        expect(stopped.status).toBe(0);
-        const database = new DatabaseSync(fixtureState.filename);
-        database.prepare("UPDATE poller_state SET data=? WHERE key='dispatcher'").run(
-          JSON.stringify({
-            owner: "first",
-            expiresAt: Date.parse("2026-10-26T00:05:00Z"),
-            host: os.hostname(),
-            pid: stopped.pid,
-          }),
-        );
-        database.close();
-        expect(fixtureState.second.claimDispatcher("second")).toBe(true);
-        expect(fixtureState.first.renewDispatcher("first")).toBe(false);
-        fixtureState.first.releaseDispatcher("first");
-        expect(fixtureState.first.claimDispatcher("first")).toBe(false);
-        fixtureState.second.releaseDispatcher("second");
-        expect(fixtureState.first.claimDispatcher("first")).toBe(true);
-      } finally {
-        fixtureState.cleanup();
-      }
-    },
-  );
-
-  test.each([0, Date.parse("2026-10-26T00:05:00Z")])(
-    "dispatcher leases with unknown host or process identity stay blocked (expiry %i)",
-    (expiresAt) => {
-      const fixtureState = fixture();
-      try {
-        fixtureState.first.claimDispatcher("first");
-        const database = new DatabaseSync(fixtureState.filename);
-        for (const identity of [
-          { host: "another-host", pid: process.pid },
-          { host: os.hostname() },
-        ]) {
-          database
-            .prepare("UPDATE poller_state SET data=? WHERE key='dispatcher'")
-            .run(JSON.stringify({ owner: "first", expiresAt, ...identity }));
-          expect(fixtureState.second.claimDispatcher("second")).toBe(false);
-        }
-        database.close();
-      } finally {
-        fixtureState.cleanup();
-      }
-    },
-  );
 
   test("notification attempts are durable and an uncertain delivery is never implicitly repeated", () => {
     const fixtureState = fixture();
