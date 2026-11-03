@@ -82,6 +82,60 @@ function gate() {
 }
 
 describe("runReview", () => {
+  test("retains incomplete capture and blocks completion even when capture is optional", async () => {
+    const state = fixture(async (ctx, run) => {
+      const capture = ctx.sessionTools
+        .find((binding) => binding.key === run.sessionKey)
+        ?.tools.find((value) => value.name === "github_review_result");
+      if (!capture) throw new Error("Missing result tool");
+      await capture.execute(
+        capture.input.parse({
+          result: JSON.stringify({ status: "incomplete", findings: ["partial evidence"] }),
+        }),
+        {
+          logger: ctx.logger,
+          caller: { kind: "session", ref: { source: "github-reviews", key: run.sessionKey } },
+        },
+      );
+      await expect(complete(ctx, run)).rejects.toThrow("Capture a complete");
+      return "Partial review";
+    });
+    try {
+      const result = await runReview({
+        ...state.options,
+        requiresResult: () => false,
+        validateResult: (value) => ({ complete: false, value }),
+      }).completion;
+      expect(result.status).toBe("blocked");
+      expect(state.store.jobs.attempts.result(state.run.id)).toEqual({
+        complete: false,
+        value: { status: "incomplete", findings: ["partial evidence"] },
+      });
+      expect(state.store.hasCompleted("reviewer", candidate.repository, candidate.number)).toBe(
+        false,
+      );
+    } finally {
+      state.cleanup();
+    }
+  });
+
+  test("allows direct skills without capture when the host makes it optional", async () => {
+    const state = fixture(async (ctx, run) => {
+      await complete(ctx, run);
+      return "Done";
+    });
+    try {
+      const result = await runReview({
+        ...state.options,
+        requiresResult: () => false,
+        validateResult: (value) => ({ complete: true, value }),
+      }).completion;
+      expect(result.status).toBe("completed");
+    } finally {
+      state.cleanup();
+    }
+  });
+
   test("awaits start reporting with the reservation held before starting the worker", async () => {
     const state = fixture();
     const started = gate();

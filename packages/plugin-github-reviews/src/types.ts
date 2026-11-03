@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CandidateSchema, type GithubSourceOptions } from "./github.js";
 import { StoreRunSchema } from "./store.js";
+import { ReviewResultCaptureSchema } from "./jobs/types.js";
 
 /**
  * Validated polling and admission settings; callbacks stay in the host process.
@@ -79,6 +80,9 @@ export type ReviewSelection = z.infer<typeof ReviewSelectionSchema>;
  */
 export type GithubReviewResult = z.infer<typeof GithubReviewResultSchema>;
 
+export { ReviewResultCaptureSchema };
+export type ReviewResultCapture = z.infer<typeof ReviewResultCaptureSchema>;
+
 /**
  * Public plugin options; authentication uses the host's GitHub CLI by default.
  */
@@ -91,4 +95,15 @@ export type GithubReviewsOptions = z.input<typeof GithubReviewsSettingsSchema> &
   onRunStart?: (selection: ReviewSelection) => void | Promise<void>;
   onRunComplete?: (result: GithubReviewResult) => void | Promise<void>;
   github?: GithubSourceOptions;
+  /**
+   * Validate and retain full reports without discarding incomplete evidence.
+   */
+  validateResult?: (
+    value: unknown,
+    selection: ReviewSelection,
+  ) => ReviewResultCapture | Promise<ReviewResultCapture>;
+  /**
+   * Decide whether this workflow must capture a full report before completion.
+   */
+  requiresResult?: (selection: ReviewSelection) => boolean;
 };

@@ -16,7 +16,8 @@ const MAX_BACKOFF_MS = 60 * 60_000;
  * Poll personal GitHub review requests and dispatch unhandled personal review requests.
  */
 export function githubReviews(opts: GithubReviewsOptions): Plugin {
-  const { github, prompt, onRunStart, onRunComplete, ...input } = opts;
+  const { github, prompt, onRunStart, onRunComplete, validateResult, requiresResult, ...input } =
+    opts;
   const settings = GithubReviewsSettingsSchema.parse(input);
   const source = createGithubSource(github);
   const active = new Map<string, ReturnType<typeof runReview>>();
@@ -217,6 +218,8 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
       reviewsDirectory,
       timeoutMs: settings.reviewTimeoutMs,
       prompt,
+      validateResult,
+      requiresResult,
       onRunStart,
       onRunComplete,
     });
@@ -350,12 +353,13 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
   };
 }
 
-export { GithubReviewsSettingsSchema } from "./types.js";
+export { GithubReviewsSettingsSchema, ReviewResultCaptureSchema } from "./types.js";
 export type {
   GithubReviewsOptions,
   GithubReviewsSettings,
   GithubReviewResult,
   ReviewSelection,
+  ReviewResultCapture,
 } from "./types.js";
 export type { GithubExecute } from "./github.js";
 

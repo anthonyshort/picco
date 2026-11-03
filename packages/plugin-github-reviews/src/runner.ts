@@ -14,6 +14,7 @@ import {
   type GithubReviewResult,
   type GithubReviewsOptions,
   type ReviewSelection,
+  ReviewResultCaptureSchema,
 } from "./types.js";
 
 /**
@@ -32,6 +33,8 @@ interface RunnerOptions {
   reviewsDirectory: string;
   timeoutMs: number;
   prompt?: GithubReviewsOptions["prompt"];
+  validateResult?: GithubReviewsOptions["validateResult"];
+  requiresResult?: GithubReviewsOptions["requiresResult"];
   onRunStart?: GithubReviewsOptions["onRunStart"];
   onRunComplete?: GithubReviewsOptions["onRunComplete"];
 }
@@ -66,7 +69,8 @@ export function runReview(opts: RunnerOptions) {
       artifactDirectory,
       publisherStateFile: path.join(artifactDirectory, "progress.json"),
     };
-    const declaration = createCompletionDeclaration(opts, () => abortReason);
+    const declaration = createCompletionDeclaration(opts, selection, () => abortReason);
+    const capture = createResultCapture(opts, selection, () => abortReason);
     let output: string | undefined;
     let error: string | undefined;
     try {
@@ -82,7 +86,7 @@ export function runReview(opts: RunnerOptions) {
           session: {
             cwd: artifactDirectory,
             env: { REVIEW_RUN_ID: opts.run.id },
-            tools: [declaration.tool],
+            tools: [declaration.tool, capture],
           },
         },
       );
@@ -124,7 +128,11 @@ export function runReview(opts: RunnerOptions) {
 /**
  * Bind a durable completion declaration to the selected worker session.
  */
-function createCompletionDeclaration(opts: RunnerOptions, abortReason: () => string | undefined) {
+function createCompletionDeclaration(
+  opts: RunnerOptions,
+  selection: ReviewSelection,
+  abortReason: () => string | undefined,
+) {
   let summary: string | undefined;
   const complete = tool({
     name: "github_review_complete",
@@ -141,6 +149,11 @@ function createCompletionDeclaration(opts: RunnerOptions, abortReason: () => str
       }
       if (abortReason()) throw new Error("Review has been aborted; completion cannot be recorded");
       const checked = CompletionSchema.parse(input);
+      const captured = opts.store.jobs.attempts.result(opts.run.id);
+      const required = opts.requiresResult?.(selection) ?? Boolean(opts.validateResult);
+      if (captured?.complete === false || (required && !captured)) {
+        throw new Error("Capture a complete review result before declaring completion");
+      }
       if (!opts.store.markReviewed(opts.run.id, checked.summary)) {
         throw new Error("Review reservation expired or was lost; completion was not recorded");
       }
@@ -149,6 +162,48 @@ function createCompletionDeclaration(opts: RunnerOptions, abortReason: () => str
     },
   });
   return { tool: complete, summary: () => summary };
+}
+
+/**
+ * Retain a full report only from the immutable selected worker session.
+ */
+function createResultCapture(
+  opts: RunnerOptions,
+  selection: ReviewSelection,
+  abortReason: () => string | undefined,
+) {
+  return tool({
+    name: "github_review_result",
+    description:
+      "Save this review's full JSON report, including an incomplete report. This does not declare completion or publish anything.",
+    input: z
+      .object({
+        result: z
+          .string()
+          .min(1)
+          .max(4 * 1024 * 1024),
+      })
+      .strict(),
+    async execute({ result }, ctx) {
+      if (
+        ctx.caller.kind !== "session" ||
+        ctx.caller.ref.source !== "github-reviews" ||
+        ctx.caller.ref.key !== opts.run.sessionKey
+      )
+        throw new Error("Only this review's session may save its result");
+      if (abortReason()) throw new Error("Review has been aborted");
+      const value: unknown = JSON.parse(result);
+      const captured = ReviewResultCaptureSchema.parse(
+        opts.validateResult
+          ? await opts.validateResult(value, selection)
+          : { complete: true, value },
+      );
+      opts.store.jobs.attempts.capture(opts.run.id, captured);
+      return captured.complete
+        ? "Complete review report saved; declare completion after the workflow succeeds."
+        : "Partial review report saved; completion remains blocked.";
+    },
+  });
 }
 
 /**
