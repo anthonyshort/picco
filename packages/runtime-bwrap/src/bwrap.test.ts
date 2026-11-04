@@ -156,6 +156,15 @@ describe("buildSessionArgs", () => {
     ]);
   });
 
+  it("keeps explicit package mounts after the writable shared profile", () => {
+    const agentDir = "/srv/profile";
+    const packages = `${agentDir}/npm/node_modules`;
+    const args = buildSessionArgs({ agentDir, mounts: [{ source: packages, mode: "ro" }] }, spec());
+    expect(bindFor(args, agentDir)).toEqual(["--bind", agentDir, agentDir]);
+    expect(bindFor(args, packages)).toEqual(["--ro-bind", packages, packages]);
+    expect(args.indexOf(packages)).toBeGreaterThan(args.indexOf(agentDir));
+  });
+
   it("rejects mounts hiding Pi configuration or the bridge connection", () => {
     const s = spec();
     for (const target of ["~/.pi", "~/.pi/agent", "~/.picco"]) {

@@ -132,7 +132,7 @@ export function bwrap(options: BwrapOptions = {}): Runtime {
 
     async exec(opts: RuntimeExecOptions): Promise<string> {
       const mounts = normalizeMounts(options.mounts);
-      if (options.agentDir) mounts.push({ source: options.agentDir, mode: "rw" });
+      if (options.agentDir) mounts.unshift({ source: options.agentDir, mode: "rw" });
       const args = buildBwrapArgs(opts.cwd, mounts);
       args.push("sh", "-c", opts.command);
 
@@ -409,7 +409,7 @@ export function buildSessionArgs(options: BwrapOptions, spec: SpawnRequest): str
     }
   }
 
-  if (options.agentDir) mounts.push({ source: options.agentDir, mode: "rw" });
+  if (options.agentDir) mounts.unshift({ source: options.agentDir, mode: "rw" });
 
   const args = buildBwrapArgs(spec.cwd, [...mounts, ...resourceMounts]);
 

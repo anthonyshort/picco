@@ -2,7 +2,7 @@ import { startFakeMcp } from "./fake-mcp.js";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -69,6 +69,36 @@ describe.skipIf(!sandboxAvailable)("bwrap().exec (real bwrap)", () => {
       ).rejects.toThrow("went-wrong");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps packages read-only while the rest of the shared profile stays writable", async () => {
+    const root = makeWorkspaceRoot();
+    const cwd = path.join(root, "worker");
+    const agentDir = path.join(root, "profile");
+    const packages = path.join(agentDir, "npm/node_modules");
+    const plugin = path.join(packages, "example.js");
+    mkdirSync(cwd);
+    mkdirSync(packages, { recursive: true });
+    writeFileSync(plugin, "original");
+    try {
+      const out = await bwrap({
+        agentDir,
+        mounts: [{ source: packages, mode: "ro" }],
+      }).exec({
+        cwd,
+        command: [
+          'cat "$PI_CODING_AGENT_DIR/npm/node_modules/example.js"',
+          'printf saved > "$PI_CODING_AGENT_DIR/probe.json"',
+          'if printf changed > "$PI_CODING_AGENT_DIR/npm/node_modules/example.js"; then exit 1; fi',
+        ].join(" && "),
+        timeoutMs: 15_000,
+      });
+      expect(out).toContain("original");
+      expect(readFileSync(plugin, "utf8")).toBe("original");
+      expect(readFileSync(path.join(agentDir, "probe.json"), "utf8")).toBe("saved");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
