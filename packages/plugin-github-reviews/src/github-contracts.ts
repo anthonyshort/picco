@@ -41,6 +41,30 @@ export const CandidateSchema = z.object({
 });
 
 /**
+ * Repository and pull request identity supplied to live resolution.
+ */
+export const PullRequestIdentitySchema = CandidateSchema.pick({ repository: true, number: true });
+
+/**
+ * REST pull request fields needed to pin an execution.
+ */
+export const PullRequestResponseSchema = z.object({
+  number: CandidateSchema.shape.number,
+  title: z.string(),
+  html_url: z.url(),
+  created_at: CandidateSchema.shape.createdAt,
+  state: z.enum(["open", "closed"]),
+  draft: z.boolean(),
+  head: z.object({ sha: CandidateSchema.shape.head }),
+  base: z.object({ sha: CandidateSchema.shape.head }),
+});
+
+/**
+ * Authenticated viewer returned by the REST identity endpoint.
+ */
+export const ViewerResponseSchema = z.object({ login: LoginSchema });
+
+/**
  * Latest API budget plus aggregate discovery cost for a complete scan.
  */
 export const RateLimitSchema = z.object({
@@ -159,6 +183,11 @@ export const InspectionResponseSchema = z.object({
  * A pull request identity and the head observed by discovery.
  */
 export type Candidate = z.infer<typeof CandidateSchema>;
+
+/**
+ * A normalised repository and pull request number.
+ */
+export type PullRequestIdentity = z.infer<typeof PullRequestIdentitySchema>;
 
 /**
  * Live evidence for one candidate, before local completion checks.

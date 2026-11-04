@@ -6,6 +6,9 @@ import {
   PAGE_SIZE,
   RepositoryAccessSchema,
   RepositorySchema,
+  PullRequestIdentitySchema,
+  PullRequestResponseSchema,
+  ViewerResponseSchema,
   type Candidate,
   type DiscoveryData,
   type GithubSourceOptions,
@@ -13,6 +16,7 @@ import {
   type InspectionData,
   type RequestHistoryPage,
   type ReviewerRequestsPage,
+  type PullRequestIdentity,
 } from "./github-contracts.js";
 import {
   buildDiscoveryDocument,
@@ -48,7 +52,7 @@ const MAX_INSPECTION_PAGES = 100;
 const DAY_MS = 86_400_000;
 
 /**
- * Discover and revalidate personal review requests through GraphQL.
+ * Discover review requests and resolve live pull request revisions.
  */
 export function createGithubSource(opts: GithubSourceOptions = {}) {
   const deps = { execute: opts.execute ?? executeGithub, now: opts.now ?? Date.now };
@@ -124,7 +128,37 @@ export function createGithubSource(opts: GithubSourceOptions = {}) {
     throw new Error("GitHub request inspection exceeded the pagination limit");
   }
 
-  return { discover, inspect };
+  /**
+   * Resolve one pull request without requiring a personal review request.
+   */
+  async function resolve(input: PullRequestIdentity, signal?: AbortSignal) {
+    const { repository, number } = PullRequestIdentitySchema.parse(input);
+    signal?.throwIfAborted();
+    const [rawPull, rawViewer] = await Promise.all([
+      deps.execute(["api", `repos/${repository}/pulls/${number}`], undefined, signal),
+      deps.execute(["api", "user"], undefined, signal),
+    ]);
+    const pull = PullRequestResponseSchema.parse(JSON.parse(rawPull));
+    if (pull.state !== "open" || pull.draft || pull.number !== number)
+      throw new Error("Pull request is not ready for review");
+    const candidate = CandidateSchema.parse({
+      repository,
+      number,
+      title: pull.title,
+      url: pull.html_url,
+      head: pull.head.sha,
+      createdAt: pull.created_at,
+    });
+    ensureCandidateUrl(candidate);
+    const viewer = ViewerResponseSchema.parse(JSON.parse(rawViewer));
+    return {
+      candidate: { ...candidate, url: `https://github.com/${repository}/pull/${number}` },
+      base: pull.base.sha,
+      reviewer: viewer.login.toLowerCase(),
+    };
+  }
+
+  return { discover, inspect, resolve };
 }
 
 /**
