@@ -1,5 +1,13 @@
 # @picco-agent/plugin-cron
 
+## 0.2.5
+
+### Patch Changes
+
+- Updated dependencies [5214fb6]
+- Updated dependencies [9de084d]
+  - @picco-agent/core@0.5.1
+
 ## 0.2.4
 
 ### Patch Changes

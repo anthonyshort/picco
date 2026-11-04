@@ -1,5 +1,13 @@
 # @picco-agent/runtime-bwrap
 
+## 0.2.4
+
+### Patch Changes
+
+- Updated dependencies [5214fb6]
+- Updated dependencies [9de084d]
+  - @picco-agent/core@0.5.1
+
 ## 0.2.3
 
 ### Patch Changes

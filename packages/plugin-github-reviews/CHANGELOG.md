@@ -1,5 +1,18 @@
 # @picco-agent/plugin-github-reviews
 
+## 0.5.0
+
+### Minor Changes
+
+- e7934f8: Run automatic review requests through accepted jobs and attempts. Keep discovery state in memory, save final reports atomically with their outcomes, and start fresh attempts after shutdown.
+- 55ccb25: Expose local-only review submission and management through agent and MCP tools. Reuse the shared review service, retain client request IDs across restarts, and return full saved reports.
+
+### Patch Changes
+
+- Updated dependencies [5214fb6]
+- Updated dependencies [9de084d]
+  - @picco-agent/core@0.5.1
+
 ## 0.4.3
 
 ### Patch Changes
