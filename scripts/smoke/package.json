@@ -5,6 +5,7 @@
   "description": "Real-model smoke tests for Pi resources, tools and plugin boundaries.",
   "type": "module",
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.0",
     "@picco-agent/core": "workspace:*",
     "@picco-agent/plugin-cron": "workspace:*",
     "@picco-agent/plugin-notifications": "workspace:*",
