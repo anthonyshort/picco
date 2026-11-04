@@ -33,7 +33,8 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
   }
   return {
     name: "github-reviews",
-    tools: createReviewTools(ensureReviews),
+    tools: createReviewTools(ensureReviews, "tool"),
+    mcpTools: createReviewTools(ensureReviews, "mcp"),
     prepareExecution: settings.holdWorkflows ? observeWorkflows : undefined,
     start(ctx) {
       if (reviews) throw new Error("GitHub reviews plugin is already started");
