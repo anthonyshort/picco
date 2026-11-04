@@ -1,5 +1,12 @@
 # smoke-tests
 
+## 0.1.10
+
+### Patch Changes
+
+- Updated dependencies [c00198d]
+  - @picco-agent/runtime-bwrap@0.2.5
+
 ## 0.1.9
 
 ### Patch Changes
