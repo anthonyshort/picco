@@ -1,14 +1,24 @@
 import { tool } from "@picco-agent/core";
 import { z } from "zod";
+import { ReviewStartSchema } from "./review-types.js";
 import type { Reviews } from "./reviews.js";
 
 /**
- * Inspect and manage automatic reviews through the shared reviews service.
+ * Define agent and external entry points for the same reviews service.
  */
-export function createReviewTools(ensureReviews: () => Reviews) {
+export function createReviewTools(ensureReviews: () => Reviews, source: "tool" | "mcp") {
   const empty = z.object({}).strict();
   const identity = z.object({ id: z.uuid() }).strict();
   return [
+    tool({
+      name: "github_reviews_start",
+      description:
+        "Queue a local-only review for a repository and PR number. Reuse requestId for the same submission; returns a job ID, not a completed report.",
+      input: ReviewStartSchema,
+      async execute(input) {
+        return JSON.stringify(await ensureReviews().submit(input, source));
+      },
+    }),
     tool({
       name: "github_reviews_status",
       description:

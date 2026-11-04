@@ -5,6 +5,7 @@ import type { Inspection } from "./github.js";
 import { ReviewRepository } from "./persistence/review-repository.js";
 import { runReview, notifyReview } from "./runner.js";
 import {
+  type ReviewStart,
   type ReviewJob,
   type ReviewAttempt,
   type ReviewFinish,
@@ -136,6 +137,59 @@ export class Reviews {
       report: run?.report ?? null,
       partial: run?.status !== "completed",
     };
+  }
+
+  /**
+   * Accept one local-only review per client key, without GitHub reads during known API backoff.
+   */
+  async submit(input: ReviewStart, source: "tool" | "mcp") {
+    this.ensureNotStopped();
+    const key = `client:${input.requestId}`;
+    const existing = this.repository.requested(key);
+    if (existing) {
+      this.ensureMatchingRequest(existing, input);
+      return existing;
+    }
+    if (Date.now() < this.admissionBackoffUntil)
+      throw new Error(
+        `GitHub requests delayed until ${new Date(this.admissionBackoffUntil).toISOString()}`,
+      );
+    let resolved: Awaited<ReturnType<typeof this.source.resolve>>;
+    try {
+      resolved = await this.source.resolve(
+        { repository: input.repository, number: input.number },
+        this.controller.signal,
+      );
+    } catch (err) {
+      if (err instanceof GithubReviewSourceError && err.retryAfterMs !== undefined) {
+        this.deferAdmission(err.retryAfterMs, err.message);
+        throw new GithubReviewSourceError(
+          `GitHub requests delayed until ${new Date(this.admissionBackoffUntil).toISOString()}: ${err.message}`,
+          err.retryAfterMs,
+        );
+      }
+      throw err;
+    }
+    this.ensureNotStopped();
+    const concurrent = this.repository.requested(key);
+    if (concurrent) {
+      this.ensureMatchingRequest(concurrent, input);
+      return concurrent;
+    }
+    const job = this.createJob({
+      requestKey: key,
+      source,
+      repository: resolved.candidate.repository,
+      number: resolved.candidate.number,
+      url: resolved.candidate.url,
+      reviewer: resolved.reviewer,
+      requestEventId: null,
+      requestedAt: null,
+      skill: input.skill,
+      delivery: "local-only",
+    });
+    this.requestDispatch();
+    return job;
   }
 
   /**
@@ -607,6 +661,18 @@ export class Reviews {
       this.active.delete(run.id);
       this.requestDispatch();
     }
+  }
+
+  /**
+   * Reject reuse of a client request ID for a different repository, PR or skill.
+   */
+  private ensureMatchingRequest(job: ReviewJob, input: ReviewStart) {
+    if (
+      job.repository !== input.repository ||
+      job.number !== input.number ||
+      job.skill !== input.skill
+    )
+      throw new Error("Request ID already belongs to different review inputs");
   }
 
   /**

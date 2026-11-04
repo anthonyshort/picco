@@ -8,6 +8,8 @@ import {
   type FakePluginContext,
 } from "@picco-agent/core/testing";
 import { createAgent, silentLogger, type Plugin, type ToolContext } from "@picco-agent/core";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import { githubReviews } from "./index.js";
 import { GithubReviewSourceError, type GithubExecute } from "./github.js";
@@ -255,20 +257,41 @@ async function realHost(
     maxConcurrentReviews: 1,
     ...options,
   });
+  let url = "";
   const agent = createAgent({
     name: "automatic-reviews",
     dataDir: path.join(directory, "agent"),
     runtime,
     plugins: [plugin],
-    logger: silentLogger(),
+    mcp: { port: 0, token: "test-token" },
+    logger: {
+      ...silentLogger(),
+      log(message, data) {
+        if (message === "MCP listening") url = z.string().parse(data?.url);
+      },
+    },
   });
   await agent.start({ handleSignals: false });
+  const client = new Client({ name: "review-test", version: "1" });
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(url), {
+      requestInit: { headers: { Authorization: "Bearer test-token" } },
+    }),
+  );
   return {
     agent,
     runtime,
     plugin,
-    call: (name: string, input = {}) => invoke(plugin, name, input),
-    stop: () => agent.stop(),
+    client,
+    async call(name: string, input = {}) {
+      const response = responseSchema.parse(await client.callTool({ name, arguments: input }));
+      if (response.isError) throw new Error(response.content[0].text);
+      return JSON.parse(response.content[0].text);
+    },
+    async stop() {
+      await client.close();
+      await agent.stop();
+    },
   };
 }
 
@@ -453,7 +476,12 @@ describe("GitHub reviews plugin", () => {
       expect((await second.call("github_reviews_report", { id })).report).toEqual({
         markdown: "Full report",
       });
-      expect(second.plugin.mcpTools).toBeUndefined();
+      expect(
+        (await second.client.listTools()).tools.some(
+          (entry) =>
+            entry.name === "github_review_finish" || entry.name === "github_review_complete",
+        ),
+      ).toBe(false);
     } finally {
       await second.stop();
     }
@@ -759,5 +787,259 @@ describe("GitHub reviews plugin", () => {
     expect(saved.job.status).toBe("completed");
     expect(saved.runs[0].report).toEqual({ markdown: "Full report" });
     expect(saved.runs[0].error).toContain("disconnected");
+  });
+  test("MCP review identity and reports survive a fresh execution and later restart", async () => {
+    const fixture = createGithubFixture();
+    const notifications: string[] = [];
+    const options = {
+      onRunStart: () => {
+        notifications.push("start");
+      },
+      onRunComplete: () => {
+        notifications.push("complete");
+      },
+    };
+    const input = { repository: Repository, number: 42, requestId: "explicit-first" };
+    const first = await realHost(fixture, "wait", false, options);
+    let id: string;
+    try {
+      id = (await first.call("github_reviews_start", input)).id;
+      await vi.waitFor(() => expect(first.runtime.spawns).toHaveLength(1));
+      expect(
+        (
+          await invoke(first.plugin, "github_reviews_start", {
+            ...input,
+            repository: "OWNER/PROJECT",
+          })
+        ).id,
+      ).toBe(id);
+      await expect(first.call("github_reviews_start", { ...input, number: 43 })).rejects.toThrow(
+        "different review inputs",
+      );
+      await vi.waitFor(() =>
+        expect(first.runtime.spawns[0].process.prompts[0]).toContain("local-only"),
+      );
+    } finally {
+      await first.stop();
+    }
+    fixture.state.head = "c".repeat(40);
+    const second = await realHost(fixture, "complete", false, options);
+    try {
+      await vi.waitFor(async () =>
+        expect((await second.call("github_reviews_details", { id })).job.status).toBe("completed"),
+      );
+      const details = await second.call("github_reviews_details", { id });
+      expect(details.job).toMatchObject({
+        source: "mcp",
+        delivery: "local-only",
+        repository: Repository,
+        number: 42,
+      });
+      expect(details.runs.map((run: { status: string }) => run.status)).toEqual([
+        "completed",
+        "interrupted",
+      ]);
+      expect(details.runs[0].head).toBe("c".repeat(40));
+      expect(details.runs[0].sessionKey).not.toBe(details.runs[1].sessionKey);
+      expect((await second.call("github_reviews_report", { id })).report).toEqual({
+        markdown: "Full report",
+      });
+      expect((await second.call("github_reviews_start", input)).id).toBe(id);
+      const exposed = (await second.client.listTools()).tools.map((entry) => entry.name);
+      expect(exposed).toContain("github_reviews_start");
+      expect(exposed).not.toContain("github_review_finish");
+      expect(exposed).not.toContain("github_review_complete");
+      await idle(second.plugin);
+    } finally {
+      await second.stop();
+    }
+    const reads = fixture.reads.length;
+    const third = await realHost(fixture, "complete", false, options);
+    try {
+      expect((await third.call("github_reviews_start", input)).id).toBe(id);
+      expect(third.runtime.spawns).toEqual([]);
+      expect(fixture.reads).toHaveLength(reads);
+      expect(notifications).toEqual([]);
+    } finally {
+      await third.stop();
+    }
+  });
+
+  test("an explicitly cancelled review remains stopped after restart", async () => {
+    const fixture = createGithubFixture();
+    const first = await realHost(fixture, "wait");
+    let id: string;
+    try {
+      id = (
+        await first.call("github_reviews_start", {
+          repository: Repository,
+          number: 42,
+          requestId: "cancel-explicit",
+        })
+      ).id;
+      await vi.waitFor(() => expect(first.runtime.spawns).toHaveLength(1));
+      expect((await first.call("github_reviews_cancel", { id })).job.status).toBe("cancelled");
+    } finally {
+      await first.stop();
+    }
+    const second = await realHost(fixture, "complete");
+    try {
+      expect((await second.call("github_reviews_details", { id })).job.status).toBe("cancelled");
+      expect(second.runtime.spawns).toEqual([]);
+    } finally {
+      await second.stop();
+    }
+  });
+
+  test("explicit retry retains failed attempts and their reports", async () => {
+    const host = await realHost(createGithubFixture(), "failed");
+    try {
+      const job = await host.call("github_reviews_start", {
+        repository: Repository,
+        number: 42,
+        requestId: "failed-explicit",
+      });
+      await vi.waitFor(async () =>
+        expect((await host.call("github_reviews_status")).activeRuns).toEqual([]),
+      );
+      expect((await host.call("github_reviews_details", { id: job.id })).job.status).toBe("failed");
+      await host.call("github_reviews_retry", { id: job.id });
+      await vi.waitFor(async () =>
+        expect((await host.call("github_reviews_details", { id: job.id })).runs).toHaveLength(2),
+      );
+      await idle(host.plugin);
+      expect(
+        (await host.call("github_reviews_details", { id: job.id })).runs.map(
+          (run: { report: unknown }) => run.report,
+        ),
+      ).toEqual([{ markdown: "Full report" }, { markdown: "Full report" }]);
+      expect((await host.call("github_reviews_report", { id: job.id })).partial).toBe(true);
+    } finally {
+      await host.stop();
+    }
+  });
+
+  test("polling and MCP submissions share the same worker capacity", async () => {
+    const fixture = createGithubFixture();
+    fixture.state.empty = true;
+    const host = await realHost(fixture, "wait", true);
+    try {
+      const explicit = await host.call("github_reviews_start", {
+        repository: Repository,
+        number: 43,
+        requestId: "shared-capacity",
+      });
+      await vi.waitFor(() => expect(host.runtime.spawns).toHaveLength(1));
+      fixture.state.empty = false;
+      vi.setSystemTime(new Date("2026-10-26T12:02:00Z"));
+      await host.call("github_reviews_poll");
+      const automatic = (await host.call("github_reviews_list")).find(
+        (job: { source: string }) => job.source === "poll",
+      );
+      expect(automatic.status).toBe("queued");
+      expect(host.runtime.spawns).toHaveLength(1);
+      await host.call("github_reviews_cancel", { id: explicit.id });
+      await vi.waitFor(() => expect(host.runtime.spawns).toHaveLength(2));
+      expect((await host.call("github_reviews_details", { id: automatic.id })).job.status).toBe(
+        "running",
+      );
+    } finally {
+      await host.stop();
+    }
+  });
+
+  test("exhausted GraphQL budget does not prevent an explicit REST submission", async () => {
+    const fixture = createGithubFixture();
+    fixture.state.inspectionRemaining = 0;
+    const host = await realHost(fixture, "complete", true);
+    try {
+      await host.call("github_reviews_poll");
+      const job = await host.call("github_reviews_start", {
+        repository: Repository,
+        number: 44,
+        requestId: "rest-budget",
+      });
+      await vi.waitFor(async () =>
+        expect((await host.call("github_reviews_details", { id: job.id })).job.status).toBe(
+          "completed",
+        ),
+      );
+      expect(host.runtime.spawns).toHaveLength(1);
+    } finally {
+      await host.stop();
+    }
+  });
+
+  test("known admission backoff wakes explicit queued work while polling is disabled", async () => {
+    vi.useRealTimers();
+    const fixture = createGithubFixture();
+    const host = await realHost(fixture, "wait");
+    try {
+      const first = await host.call("github_reviews_start", {
+        repository: Repository,
+        number: 42,
+        requestId: "before-limit",
+      });
+      await vi.waitFor(() => expect(host.runtime.spawns).toHaveLength(1));
+      const queued = await host.call("github_reviews_start", {
+        repository: Repository,
+        number: 43,
+        requestId: "after-limit",
+      });
+      fixture.limit.operation = "resolve";
+      await host.call("github_reviews_cancel", { id: first.id });
+      await vi.waitFor(async () =>
+        expect((await host.call("github_reviews_status")).retryAt).not.toBeNull(),
+      );
+      const reads = fixture.reads.length;
+      await expect(
+        host.call("github_reviews_start", {
+          repository: Repository,
+          number: 44,
+          requestId: "during-limit",
+        }),
+      ).rejects.toThrow("delayed until");
+      await host.call("github_reviews_poll");
+      await host.call("github_reviews_retry", { id: queued.id });
+      expect(fixture.reads).toHaveLength(reads);
+      expect((await host.call("github_reviews_details", { id: queued.id })).job.status).toBe(
+        "queued",
+      );
+      fixture.limit.operation = null;
+      await vi.waitFor(() => expect(host.runtime.spawns).toHaveLength(2), { timeout: 2_500 });
+      expect((await host.call("github_reviews_details", { id: queued.id })).job.status).toBe(
+        "running",
+      );
+    } finally {
+      await host.stop();
+    }
+  });
+
+  test("a rate-limited initial submission returns a retry deadline without accepting work", async () => {
+    vi.useRealTimers();
+    const fixture = createGithubFixture();
+    fixture.limit.operation = "resolve";
+    const host = await realHost(fixture, "complete");
+    const input = { repository: Repository, number: 42, requestId: "retry-submit" };
+    try {
+      await expect(host.call("github_reviews_start", input)).rejects.toThrow("delayed until");
+      const reads = fixture.reads.length;
+      await expect(host.call("github_reviews_start", input)).rejects.toThrow("delayed until");
+      expect(fixture.reads).toHaveLength(reads);
+      expect(await host.call("github_reviews_list")).toEqual([]);
+      fixture.limit.operation = null;
+      await vi.waitFor(
+        async () => expect((await host.call("github_reviews_status")).retryAt).toBeNull(),
+        { timeout: 2_500 },
+      );
+      const job = await host.call("github_reviews_start", input);
+      await vi.waitFor(async () =>
+        expect((await host.call("github_reviews_details", { id: job.id })).job.status).toBe(
+          "completed",
+        ),
+      );
+    } finally {
+      await host.stop();
+    }
   });
 });
