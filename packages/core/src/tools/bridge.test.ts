@@ -274,6 +274,80 @@ describe("session tokens", () => {
     // Nothing was minted by the failed calls.
     expect(b.tokenCount).toBe(0);
   });
+
+  describe("allowed host tools", () => {
+    test("uses one selection for the manifest and direct calls", async () => {
+      const b = await startBridge([weather]);
+      const token = b.issueToken({ source: "browser", key: "check" }, [replyTool()], ["reply"]);
+
+      expect(b.describeTools(token).map(({ name }) => name)).toEqual(["reply"]);
+      expect(await (await call(b, token, { tool: "reply", args: { text: "hi" } })).json()).toEqual({
+        content: [{ type: "text", text: "sent: hi" }],
+        isError: false,
+      });
+      expect(
+        await (await call(b, token, { tool: "get_weather", args: { city: "Sydney" } })).json(),
+      ).toMatchObject({ isError: true });
+    });
+
+    test("an empty list excludes both global and session-scoped tools", async () => {
+      const b = await startBridge([weather]);
+      const token = b.issueToken({ source: "browser", key: "empty" }, [replyTool()], []);
+
+      expect(b.describeTools(token)).toEqual([]);
+      for (const name of ["get_weather", "reply"]) {
+        expect(await (await call(b, token, { tool: name, args: {} })).json()).toMatchObject({
+          isError: true,
+        });
+      }
+    });
+
+    test("rejects duplicate and unknown names before minting a token", async () => {
+      const b = await startBridge([weather]);
+      const caller = { source: "browser", key: "invalid" };
+
+      expect(() => b.issueToken(caller, [], ["get_weather", "get_weather"])).toThrow(
+        'Duplicate allowed host tool "get_weather"',
+      );
+      expect(() => b.issueToken(caller, [], ["missing"])).toThrow(
+        'Unknown allowed host tool "missing"',
+      );
+      expect(b.tokenCount).toBe(0);
+    });
+
+    test("restricted tokens keep their selection when input and global tools change", async () => {
+      const tools = new Map<string, Tool>([[weather.name, weather]]);
+      bridge = new ToolBridge({ tools });
+      await bridge.start();
+      const allowedHostTools = ["get_weather"];
+      const restricted = bridge.issueToken(
+        { source: "browser", key: "fixed" },
+        [],
+        allowedHostTools,
+      );
+      const inherited = bridge.issueToken({ source: "chat", key: "all" });
+      allowedHostTools.push("reply");
+      tools.set("reply", replyTool());
+      tools.set("get_weather", { ...weather, execute: () => "replacement" });
+
+      expect(bridge.describeTools(restricted).map(({ name }) => name)).toEqual(["get_weather"]);
+      expect(bridge.describeTools(inherited).map(({ name }) => name)).toEqual([
+        "get_weather",
+        "reply",
+      ]);
+      expect(
+        await (
+          await call(bridge, restricted, { tool: "get_weather", args: { city: "Sydney" } })
+        ).json(),
+      ).toMatchObject({ content: [{ text: "Sunny in Sydney" }], isError: false });
+      expect(
+        await (await call(bridge, restricted, { tool: "reply", args: { text: "hi" } })).json(),
+      ).toMatchObject({ isError: true });
+      expect(
+        await (await call(bridge, inherited, { tool: "reply", args: { text: "hi" } })).json(),
+      ).toMatchObject({ isError: false });
+    });
+  });
 });
 
 /**

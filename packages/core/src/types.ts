@@ -185,6 +185,14 @@ export interface SessionOptions {
    * error thrown at session creation (same strictness as startup).
    */
   tools?: Tool[];
+
+  /**
+   * Exact host-tool names permitted for this session, including session-scoped tools. Omit to
+   * inherit all host tools; an empty list permits none. Bound when the worker is created and
+   * enforced by the host bridge. Established restrictions survive worker respawns and resets; use a
+   * new session key to change access. Does not restrict Pi tools, extensions or sandbox access.
+   */
+  allowedHostTools?: string[];
 }
 
 /**
