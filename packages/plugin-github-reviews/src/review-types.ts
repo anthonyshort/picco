@@ -61,7 +61,8 @@ export const ReviewAttemptSchema = CandidateSchema.extend({
  */
 export const ReviewStartSchema = z
   .object({
-    url: z.url().max(2048),
+    repository: CandidateSchema.shape.repository,
+    number: CandidateSchema.shape.number,
     requestId: z.string().trim().min(1).max(400),
     skill: z
       .string()
