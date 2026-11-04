@@ -15,7 +15,7 @@ interface RunnerOptions {
   run: ReviewAttempt;
   reviewsDirectory: string;
   options: GithubReviewsOptions;
-  record: (outcome: ReviewFinish, report: unknown) => void;
+  recordOutcome: (outcome: ReviewFinish, report: unknown) => void;
 }
 
 /**
@@ -38,16 +38,22 @@ export function runReview(opts: RunnerOptions) {
   };
   let submitted: ReviewFinish | undefined;
   let report: unknown = null;
+  /**
+   * Abort startup or active execution while retaining the first cancellation reason.
+   */
   const abort = (shutdown = false) => {
     cancellation ??= shutdown ? "shutdown" : "cancelled";
     const reason = cancellation === "shutdown" ? "Review host stopped" : "Review cancelled";
     controller.abort(new ExecutionError(cancellation, reason));
     turn?.abort(reason);
   };
-  const completion = execute();
+  const completion = executeAttempt();
   return { abort, completion };
 
-  async function finish(input: ReviewFinish) {
+  /**
+   * Validate one final submission and record it before acknowledging success to the worker.
+   */
+  async function submitOutcome(input: ReviewFinish) {
     if (cancellation) throw new Error("Review has been cancelled");
     if (submitted) throw new Error("Review outcome already submitted");
     if (Date.now() >= deadline) throw new ExecutionError("timeout", "Review deadline elapsed");
@@ -64,13 +70,16 @@ export function runReview(opts: RunnerOptions) {
       if (finalReport === null || finalReport === undefined)
         throw new Error("A final review report is required");
     }
-    opts.record(input, finalReport);
+    opts.recordOutcome(input, finalReport);
     report = finalReport;
     submitted = input;
     return "Review outcome and report recorded.";
   }
 
-  async function execute() {
+  /**
+   * Run the selected session within its original deadline and always await session reset.
+   */
+  async function executeAttempt() {
     let error: string | undefined;
     let output: string | undefined;
     let cleanupError: string | undefined;
@@ -107,7 +116,7 @@ export function runReview(opts: RunnerOptions) {
         session: {
           cwd: artifactDirectory,
           env: { REVIEW_RUN_ID: opts.run.id },
-          tools: createReviewFinishTools(opts.run.sessionKey, finish),
+          tools: createReviewFinishTools(opts.run.sessionKey, submitOutcome),
         },
       });
       output = (await turn).text;

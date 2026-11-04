@@ -59,7 +59,7 @@ export class Reviews {
       for (const job of this.repository.running()) {
         const run = this.repository.attempts(job.id)[0];
         if (run?.status === "completed") {
-          this.update(job, "completed");
+          this.updateJobStatus(job, "completed");
           continue;
         }
         if (run)
@@ -69,11 +69,11 @@ export class Reviews {
             finishedAt: new Date().toISOString(),
             error: "Review host restarted",
           });
-        this.update(job, "queued");
+        this.updateJobStatus(job, "queued");
       }
     });
-    this.wake();
-    this.schedule();
+    this.requestDispatch();
+    this.scheduleNextPollOrDispatch();
   }
 
   /**
@@ -91,6 +91,9 @@ export class Reviews {
     ]);
   }
 
+  /**
+   * Report process-local polling, pause, retry deadlines and active attempt IDs.
+   */
   status() {
     return {
       enabled: this.settings.enabled,
@@ -105,16 +108,25 @@ export class Reviews {
     };
   }
 
+  /**
+   * List the newest accepted jobs up to the requested limit.
+   */
   list(limit: number) {
     return this.repository.list(limit);
   }
 
+  /**
+   * Return a saved job and its newest-first attempts, or reject an unknown ID.
+   */
   details(id: string) {
     const job = this.repository.job(id);
     if (!job) throw new Error("Unknown review job");
     return { job, runs: this.repository.attempts(job.id) };
   }
 
+  /**
+   * Return the latest attempt’s report and whether it is an incomplete outcome.
+   */
   report(id: string) {
     const details = this.details(id);
     const run = details.runs[0];
@@ -138,7 +150,7 @@ export class Reviews {
       const final = this.details(id).runs[0];
       if (final?.cleanupError)
         throw new Error(`Review worker cleanup failed: ${final.cleanupError}`);
-    } else if (job.status === "queued") this.update(job, "cancelled");
+    } else if (job.status === "queued") this.updateJobStatus(job, "cancelled");
     else if (job.status === "running") throw new Error("Review worker is unavailable");
     return this.details(id);
   }
@@ -147,12 +159,12 @@ export class Reviews {
    * Queue an unsuccessful job once; active cleanup and completed outcomes are not restarted.
    */
   retry(id: string) {
-    this.ensureStarted();
+    this.ensureNotStopped();
     const { job } = this.details(id);
     if (job.status === "completed") throw new Error("Completed reviews require a new request ID");
     if ([...this.active.values()].some((active) => active.job.id === id)) return this.details(id);
-    if (job.status !== "queued" && job.status !== "running") this.update(job, "queued");
-    this.wake();
+    if (job.status !== "queued" && job.status !== "running") this.updateJobStatus(job, "queued");
+    this.requestDispatch();
     return this.details(id);
   }
 
@@ -161,7 +173,7 @@ export class Reviews {
    */
   pause(value: boolean) {
     this.paused = value;
-    if (!value) this.wake();
+    if (!value) this.requestDispatch();
     return this.status();
   }
 
@@ -208,7 +220,8 @@ export class Reviews {
           rateLimit = { ...inspection.rateLimit, cost: rateLimit.cost + inspection.rateLimit.cost };
           if (rateLimit.remaining === 0) this.rateLimitUntil = Date.parse(rateLimit.resetAt);
           if (this.stopped) break;
-          if (inspection.blockedReason || this.previousCycle(this.reviewer, inspection)) continue;
+          if (inspection.blockedReason || this.hasMatchingRequestCycle(this.reviewer, inspection))
+            continue;
           const route = this.settings.repositories.find(
             (item) => item.name === candidate.repository,
           )!;
@@ -238,7 +251,7 @@ export class Reviews {
           error: Date.now() < this.admissionBackoffUntil ? (this.pollStatus.error ?? null) : null,
           rateLimit,
         };
-        this.wake();
+        this.requestDispatch();
       } catch (err) {
         if (!this.stopped) {
           this.failures++;
@@ -259,12 +272,19 @@ export class Reviews {
       }
     })().finally(() => {
       this.polling = undefined;
-      this.schedule();
+      this.scheduleNextPollOrDispatch();
     });
     return this.polling;
   }
 
-  private previousCycle(reviewer: string, inspection: Inspection, excluding?: string): boolean {
+  /**
+   * Check saved polling jobs for this request cycle, including queued and unsuccessful work.
+   */
+  private hasMatchingRequestCycle(
+    reviewer: string,
+    inspection: Inspection,
+    excluding?: string,
+  ): boolean {
     return this.repository
       .cycles(reviewer, inspection.candidate.repository, inspection.candidate.number)
       .some((job) => {
@@ -281,6 +301,9 @@ export class Reviews {
       });
   }
 
+  /**
+   * Save newly accepted work as queued, before any execution attempt is created.
+   */
   private createJob(
     input: Omit<ReviewJob, "id" | "status" | "createdAt" | "updatedAt" | "error">,
   ): ReviewJob {
@@ -297,11 +320,21 @@ export class Reviews {
     return job;
   }
 
-  private update(job: ReviewJob, status: ReviewJob["status"], error: string | null = null) {
+  /**
+   * Save a job’s status, error and update time without changing its request identity.
+   */
+  private updateJobStatus(
+    job: ReviewJob,
+    status: ReviewJob["status"],
+    error: string | null = null,
+  ) {
     this.repository.saveJob({ ...job, status, error, updatedAt: new Date().toISOString() });
   }
 
-  private schedule() {
+  /**
+   * Set one timer for the next discovery poll or known admission retry deadline.
+   */
+  private scheduleNextPollOrDispatch() {
     if (this.stopped) return;
     if (this.timer) clearTimeout(this.timer);
     const now = Date.now();
@@ -313,22 +346,25 @@ export class Reviews {
     this.timer = setTimeout(
       () => {
         this.timer = undefined;
-        this.wake();
+        this.requestDispatch();
         if (this.settings.enabled && Date.now() >= this.nextAllowedAt) void this.poll();
-        else this.schedule();
+        else this.scheduleNextPollOrDispatch();
       },
       Math.max(0, next - now),
     );
     this.timer.unref();
   }
 
-  private wake() {
+  /**
+   * Request a queued-job scan without waiting for reviews; coalesce requests during an active scan.
+   */
+  private requestDispatch() {
     if (this.stopped) return;
     if (this.dispatching) {
       this.refill = true;
       return;
     }
-    this.dispatching = this.dispatch()
+    this.dispatching = this.dispatchQueuedJobs()
       .catch((err) => {
         this.paused = true;
         this.ctx.logger.error("Review scheduling failed; admissions paused", {
@@ -339,12 +375,15 @@ export class Reviews {
         this.dispatching = undefined;
         if (this.refill && !this.stopped) {
           this.refill = false;
-          this.wake();
+          this.requestDispatch();
         }
       });
   }
 
-  private async dispatch() {
+  /**
+   * Revalidate queued jobs and start eligible attempts within global and per-PR capacity.
+   */
+  private async dispatchQueuedJobs() {
     for (const job of this.repository.queued()) {
       if (this.stopped || this.paused || this.active.size >= this.settings.maxConcurrentReviews)
         break;
@@ -385,12 +424,16 @@ export class Reviews {
           if (inspected.rateLimit.remaining === 0) {
             this.rateLimitUntil = Date.parse(inspected.rateLimit.resetAt);
             this.nextAllowedAt = Math.max(this.nextAllowedAt, this.rateLimitUntil);
-            this.schedule();
+            this.scheduleNextPollOrDispatch();
             continue;
           }
           if (inspected.blockedReason) throw new Error(inspected.blockedReason);
-          if (this.previousCycle(job.reviewer, inspected, job.id)) {
-            this.update(job, "cancelled", "Review request was already handled by another job");
+          if (this.hasMatchingRequestCycle(job.reviewer, inspected, job.id)) {
+            this.updateJobStatus(
+              job,
+              "cancelled",
+              "Review request was already handled by another job",
+            );
             continue;
           }
           if (
@@ -429,7 +472,7 @@ export class Reviews {
         };
         this.repository.transaction(() => {
           this.repository.saveAttempt(run);
-          this.update(job, "running");
+          this.updateJobStatus(job, "running");
         });
         const worker = runReview({
           ctx: this.ctx,
@@ -437,9 +480,9 @@ export class Reviews {
           run,
           reviewsDirectory: this.directory,
           options: this.options,
-          record: (outcome, report) => this.record(job, run, outcome, report),
+          recordOutcome: (outcome, report) => this.recordOutcome(job, run, outcome, report),
         });
-        const completion = this.settle(job, run, worker);
+        const completion = this.finaliseAttempt(job, run, worker);
         this.active.set(id, { job, worker, completion });
       } catch (err) {
         if (
@@ -455,7 +498,7 @@ export class Reviews {
           break;
         }
         if (!this.stopped)
-          this.update(
+          this.updateJobStatus(
             job,
             "failed",
             err instanceof Error ? err.message : "Review admission failed",
@@ -464,6 +507,9 @@ export class Reviews {
     }
   }
 
+  /**
+   * Keep accepted jobs queued and delay admission reads until the source’s retry deadline.
+   */
   private deferAdmission(retryAfterMs: number, error: string) {
     this.admissionBackoffUntil = Math.max(
       this.admissionBackoffUntil,
@@ -475,10 +521,18 @@ export class Reviews {
       error,
       nextPollAt: new Date(this.nextAllowedAt).toISOString(),
     };
-    this.schedule();
+    this.scheduleNextPollOrDispatch();
   }
 
-  private record(job: ReviewJob, run: ReviewAttempt, outcome: ReviewFinish, report: unknown) {
+  /**
+   * Save the declared attempt outcome and report together with the job status in one transaction.
+   */
+  private recordOutcome(
+    job: ReviewJob,
+    run: ReviewAttempt,
+    outcome: ReviewFinish,
+    report: unknown,
+  ) {
     this.repository.transaction(() => {
       const current = this.repository.attempts(job.id).find((attempt) => attempt.id === run.id)!;
       this.repository.saveAttempt({
@@ -489,11 +543,18 @@ export class Reviews {
         report,
         finishedAt: new Date().toISOString(),
       });
-      this.update(job, outcome.status, outcome.error ?? null);
+      this.updateJobStatus(job, outcome.status, outcome.error ?? null);
     });
   }
 
-  private async settle(job: ReviewJob, run: ReviewAttempt, worker: ReturnType<typeof runReview>) {
+  /**
+   * Await execution and cleanup, retain declared outcomes, notify, then release capacity.
+   */
+  private async finaliseAttempt(
+    job: ReviewJob,
+    run: ReviewAttempt,
+    worker: ReturnType<typeof runReview>,
+  ) {
     try {
       const result = await worker.completion;
       const current = this.repository.attempts(job.id).find((attempt) => attempt.id === run.id)!;
@@ -518,7 +579,7 @@ export class Reviews {
           cleanupError: result.cleanupError ?? null,
           finishedAt: current.finishedAt ?? new Date().toISOString(),
         });
-        this.update(job, status === "interrupted" ? "queued" : status, error);
+        this.updateJobStatus(job, status === "interrupted" ? "queued" : status, error);
       });
       await notifyReview(
         this.options,
@@ -544,11 +605,14 @@ export class Reviews {
       });
     } finally {
       this.active.delete(run.id);
-      this.wake();
+      this.requestDispatch();
     }
   }
 
-  private ensureStarted() {
+  /**
+   * Reject operations after service shutdown has begun.
+   */
+  private ensureNotStopped() {
     if (this.stopped) throw new Error("GitHub reviews plugin is stopped");
   }
 }

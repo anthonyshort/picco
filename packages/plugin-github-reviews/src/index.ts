@@ -24,13 +24,16 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
   };
   let reviews: Reviews | undefined;
   let database: DatabaseSync | undefined;
-  function current() {
+  /**
+   * Return the started service or reject tool calls outside its lifetime.
+   */
+  function ensureReviews() {
     if (!reviews) throw new Error("GitHub reviews plugin is not started");
     return reviews;
   }
   return {
     name: "github-reviews",
-    tools: createReviewTools(current),
+    tools: createReviewTools(ensureReviews),
     prepareExecution: settings.holdWorkflows ? observeWorkflows : undefined,
     start(ctx) {
       if (reviews) throw new Error("GitHub reviews plugin is already started");

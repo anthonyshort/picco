@@ -80,7 +80,7 @@ function startRunner(input: RunnerFixtureOptions = {}) {
     run,
     reviewsDirectory: directory,
     options: input.options ?? {},
-    record: (outcome, report) => {
+    recordOutcome: (outcome, report) => {
       records.push({ outcome, report });
     },
   });

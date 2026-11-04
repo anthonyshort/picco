@@ -5,7 +5,7 @@ import type { Reviews } from "./reviews.js";
 /**
  * Inspect and manage automatic reviews through the shared reviews service.
  */
-export function createReviewTools(current: () => Reviews) {
+export function createReviewTools(ensureReviews: () => Reviews) {
   const empty = z.object({}).strict();
   const identity = z.object({ id: z.uuid() }).strict();
   return [
@@ -15,7 +15,7 @@ export function createReviewTools(current: () => Reviews) {
         "Inspect review polling, runtime pause and active workers without starting work.",
       input: empty,
       execute() {
-        return JSON.stringify(current().status());
+        return JSON.stringify(ensureReviews().status());
       },
     }),
     tool({
@@ -23,7 +23,7 @@ export function createReviewTools(current: () => Reviews) {
       description: "List accepted review jobs and their saved status.",
       input: z.object({ limit: z.number().int().min(1).max(100).default(20) }).strict(),
       execute({ limit }) {
-        return JSON.stringify(current().list(limit));
+        return JSON.stringify(ensureReviews().list(limit));
       },
     }),
     tool({
@@ -31,7 +31,7 @@ export function createReviewTools(current: () => Reviews) {
       description: "Inspect a saved review job and its previous attempts.",
       input: identity,
       execute({ id }) {
-        return JSON.stringify(current().details(id));
+        return JSON.stringify(ensureReviews().details(id));
       },
     }),
     tool({
@@ -39,7 +39,7 @@ export function createReviewTools(current: () => Reviews) {
       description: "Read the latest saved review result and its complete or partial outcome.",
       input: identity,
       execute({ id }) {
-        return JSON.stringify(current().report(id));
+        return JSON.stringify(ensureReviews().report(id));
       },
     }),
     tool({
@@ -48,7 +48,7 @@ export function createReviewTools(current: () => Reviews) {
         "Cancel queued or active review work and await worker cleanup. Does not remove saved reports.",
       input: identity,
       async execute({ id }) {
-        return JSON.stringify(await current().cancel(id));
+        return JSON.stringify(await ensureReviews().cancel(id));
       },
     }),
     tool({
@@ -57,7 +57,7 @@ export function createReviewTools(current: () => Reviews) {
         "Queue a fresh attempt of a stopped unsuccessful review. Completed jobs require a new submission.",
       input: identity,
       execute({ id }) {
-        return JSON.stringify(current().retry(id));
+        return JSON.stringify(ensureReviews().retry(id));
       },
     }),
     tool({
@@ -66,8 +66,8 @@ export function createReviewTools(current: () => Reviews) {
         "Discover current GitHub review requests subject to configured enablement and API backoff.",
       input: empty,
       async execute() {
-        await current().poll();
-        return JSON.stringify(current().status());
+        await ensureReviews().poll();
+        return JSON.stringify(ensureReviews().status());
       },
     }),
     tool({
@@ -76,7 +76,7 @@ export function createReviewTools(current: () => Reviews) {
         "Pause new review execution until resumed or the host restarts. Active workers continue.",
       input: empty,
       execute() {
-        return JSON.stringify(current().pause(true));
+        return JSON.stringify(ensureReviews().pause(true));
       },
     }),
     tool({
@@ -84,7 +84,7 @@ export function createReviewTools(current: () => Reviews) {
       description: "Resume new review execution in this host process.",
       input: empty,
       execute() {
-        return JSON.stringify(current().pause(false));
+        return JSON.stringify(ensureReviews().pause(false));
       },
     }),
   ];

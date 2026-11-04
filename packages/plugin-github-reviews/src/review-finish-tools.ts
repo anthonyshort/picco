@@ -17,7 +17,7 @@ const ReviewCompleteSchema = z
  */
 export function createReviewFinishTools(
   sessionKey: string,
-  finish: (input: ReviewFinish) => Promise<string>,
+  submitOutcome: (input: ReviewFinish) => Promise<string>,
 ): Tool[] {
   const description =
     "Record the final outcome of this selected review after its workflow and required publication finish. Include the full report as JSON in result. Do not declare success for incomplete work.";
@@ -28,7 +28,7 @@ export function createReviewFinishTools(
       input: ReviewFinishSchema,
       async execute(input, ctx) {
         ensureSelectedSession(ctx, sessionKey);
-        return finish(input);
+        return submitOutcome(input);
       },
     }),
     tool({
@@ -37,7 +37,7 @@ export function createReviewFinishTools(
       input: ReviewCompleteSchema,
       async execute(input, ctx) {
         ensureSelectedSession(ctx, sessionKey);
-        return finish({ status: "completed", summary: input.summary, result: input.result });
+        return submitOutcome({ status: "completed", summary: input.summary, result: input.result });
       },
     }),
   ];
