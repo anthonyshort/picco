@@ -1,5 +1,13 @@
 # @picco-agent/plugin-notifications
 
+## 0.3.4
+
+### Patch Changes
+
+- Updated dependencies [5214fb6]
+- Updated dependencies [9de084d]
+  - @picco-agent/core@0.5.1
+
 ## 0.3.3
 
 ### Patch Changes

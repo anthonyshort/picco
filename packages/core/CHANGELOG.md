@@ -1,5 +1,12 @@
 # @picco-agent/core
 
+## 0.5.1
+
+### Patch Changes
+
+- 5214fb6: Distinguish agent shutdown from manual execution cancellation while retaining the cancelled outcome passed to execution finalisers.
+- 9de084d: Keep failed worker termination handles so cancellation cannot falsely confirm teardown. Retain workers from startup through idle eviction and report failed resets to concurrent callers.
+
 ## 0.5.0
 
 ### Minor Changes
