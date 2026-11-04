@@ -36,6 +36,87 @@ const candidate: Candidate = {
 };
 
 describe("GitHub review source", () => {
+  test("resolves repository and number into validated canonical revisions", async () => {
+    const calls: string[][] = [];
+    const source = createGithubSource({
+      execute: async (args) => {
+        calls.push(args);
+        return JSON.stringify(
+          args[1] === "user"
+            ? { login: "Reviewer" }
+            : {
+                number: 12,
+                title: "Change",
+                html_url: "https://github.com/Owner/One/pull/12",
+                created_at: CREATED,
+                state: "open",
+                draft: false,
+                head: { sha: "A".repeat(40) },
+                base: { sha: "B".repeat(40) },
+              },
+        );
+      },
+    });
+    const resolved = await source.resolve({ repository: "Owner/One", number: 12 });
+    expect(calls).toEqual([
+      ["api", "repos/owner/one/pulls/12"],
+      ["api", "user"],
+    ]);
+    expect(resolved).toMatchObject({
+      candidate: {
+        repository: "owner/one",
+        number: 12,
+        url: "https://github.com/owner/one/pull/12",
+        head: "a".repeat(40),
+      },
+      base: "b".repeat(40),
+      reviewer: "reviewer",
+    });
+  });
+
+  test.each([
+    { number: 13 },
+    { html_url: "https://github.com/other/one/pull/12" },
+    { state: "closed" },
+    { draft: true },
+    { head: { sha: "invalid" } },
+  ])("rejects ineligible or mismatched resolved identity: %j", async (change) => {
+    const source = createGithubSource({
+      execute: async (args) =>
+        JSON.stringify(
+          args[1] === "user"
+            ? { login: "reviewer" }
+            : {
+                number: 12,
+                title: "Change",
+                html_url: "https://github.com/owner/one/pull/12",
+                created_at: CREATED,
+                state: "open",
+                draft: false,
+                head: { sha: HEAD },
+                base: { sha: "b".repeat(40) },
+                ...change,
+              },
+        ),
+    });
+    await expect(source.resolve({ repository: "owner/one", number: 12 })).rejects.toThrow();
+  });
+
+  test("cancelled resolution does not query GitHub", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    const source = createGithubSource({
+      execute: async () => {
+        calls++;
+        throw new Error("Unexpected query");
+      },
+    });
+    await expect(
+      source.resolve({ repository: "owner/one", number: 12 }, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toBe(0);
+  });
   test("discovers configured repositories in one paginated GraphQL search without starting a model", async () => {
     const calls: string[][] = [];
     const inputs: string[] = [];

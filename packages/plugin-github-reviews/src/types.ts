@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CandidateSchema, type GithubSourceOptions } from "./github.js";
-import { StoreRunSchema } from "./store.js";
+import { ReviewAttemptSchema } from "./review-types.js";
 
 /**
  * Validated polling and admission settings; callbacks stay in the host process.
@@ -46,7 +46,8 @@ export const GithubReviewsSettingsSchema = z
  * Immutable admission plus the writable session directory assigned to this review.
  */
 export const ReviewSelectionSchema = z.object({
-  run: StoreRunSchema,
+  run: ReviewAttemptSchema,
+  delivery: z.enum(["publish", "local-only"]),
   skill: z.string(),
   artifactDirectory: z.string(),
   publisherStateFile: z.string(),
@@ -90,5 +91,10 @@ export type GithubReviewsOptions = z.input<typeof GithubReviewsSettingsSchema> &
    */
   onRunStart?: (selection: ReviewSelection) => void | Promise<void>;
   onRunComplete?: (result: GithubReviewResult) => void | Promise<void>;
+  /**
+   * Require and parse completed reports. Without a schema, summary-only completion is allowed.
+   * Failed outcomes retain their partial JSON without applying the completed-report schema.
+   */
+  resultSchema?: z.ZodType<unknown>;
   github?: GithubSourceOptions;
 };

@@ -1,200 +1,165 @@
-import { deliverCallback } from "./callback.js";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { tool, type PluginContext, type Turn } from "@picco-agent/core";
-import { z } from "zod";
-import { type createReviewStore, type StoreRun } from "./store.js";
-import {
-  type GithubReviewResult,
-  type GithubReviewsOptions,
-  type ReviewSelection,
-} from "./types.js";
+import { ExecutionError, ExecutionFailure, type PluginContext, type Turn } from "@picco-agent/core";
+import { deliverCallback } from "./callback.js";
+import { createReviewFinishTools } from "./review-finish-tools.js";
+import { type ReviewAttempt, type ReviewJob, type ReviewFinish } from "./review-types.js";
+import type { GithubReviewResult, GithubReviewsOptions, ReviewSelection } from "./types.js";
 
 /**
- * Heartbeats continue until the worker has actually been closed.
- */
-const HEARTBEAT_MS = 60_000;
-
-/**
- * A worker must explicitly declare completion after its review workflow succeeds.
- */
-const CompletionSchema = z.object({ summary: z.string().trim().min(1).max(4000) }).strict();
-
-/**
- * Dependencies owned by the review plugin's dispatch lifecycle.
+ * Run one selected worker; persistence remains owned by the reviews service.
  */
 interface RunnerOptions {
   ctx: PluginContext;
-  store: ReturnType<typeof createReviewStore>;
-  run: StoreRun;
-  skill: string;
+  job: ReviewJob;
+  run: ReviewAttempt;
   reviewsDirectory: string;
-  timeoutMs: number;
-  prompt?: GithubReviewsOptions["prompt"];
-  onRunStart?: GithubReviewsOptions["onRunStart"];
-  onRunComplete?: GithubReviewsOptions["onRunComplete"];
+  options: GithubReviewsOptions;
+  recordOutcome: (outcome: ReviewFinish, report: unknown) => void;
 }
 
 /**
- * Start one claimed review and hold its reservation through teardown and recording.
+ * Execute a fresh session with one atomic final-result submission.
  */
 export function runReview(opts: RunnerOptions) {
   let turn: Turn | undefined;
-  let abortReason: string | undefined;
-  const abort = (reason: string) => {
-    abortReason = reason;
+  let cancellation: "cancelled" | "shutdown" | undefined;
+  const controller = new AbortController();
+  const timeoutMs = opts.options.reviewTimeoutMs ?? 3_600_000;
+  const deadline = Date.now() + timeoutMs;
+  const startupSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]);
+  const artifactDirectory = path.join(opts.reviewsDirectory, "runs", opts.run.id);
+  const selection: ReviewSelection = {
+    run: opts.run,
+    delivery: opts.job.delivery,
+    skill: opts.job.skill,
+    artifactDirectory,
+    publisherStateFile: path.join(artifactDirectory, "progress.json"),
+  };
+  let submitted: ReviewFinish | undefined;
+  let report: unknown = null;
+  /**
+   * Abort startup or active execution while retaining the first cancellation reason.
+   */
+  const abort = (shutdown = false) => {
+    cancellation ??= shutdown ? "shutdown" : "cancelled";
+    const reason = cancellation === "shutdown" ? "Review host stopped" : "Review cancelled";
+    controller.abort(new ExecutionError(cancellation, reason));
     turn?.abort(reason);
   };
-  const completion = execute();
+  const completion = executeAttempt();
   return { abort, completion };
 
-  async function execute(): Promise<GithubReviewResult> {
-    const artifactDirectory = path.join(opts.reviewsDirectory, "runs", opts.run.id);
-    const selection: ReviewSelection = {
-      run: opts.run,
-      skill: opts.skill,
-      artifactDirectory,
-      publisherStateFile: path.join(artifactDirectory, "progress.json"),
-    };
-    const declaration = createCompletionDeclaration(opts, () => abortReason);
-    let output: string | undefined;
+  /**
+   * Validate one final submission and record it before acknowledging success to the worker.
+   */
+  async function submitOutcome(input: ReviewFinish) {
+    if (cancellation) throw new Error("Review has been cancelled");
+    if (submitted) throw new Error("Review outcome already submitted");
+    if (Date.now() >= deadline) throw new ExecutionError("timeout", "Review deadline elapsed");
+    let finalReport: unknown = null;
+    if (input.result !== undefined) {
+      if (Buffer.byteLength(input.result) > 4 * 1024 * 1024)
+        throw new Error("Review result exceeds 4 MiB");
+      finalReport = JSON.parse(input.result);
+    }
+    if (input.status === "completed" && opts.options.resultSchema) {
+      if (finalReport === null || finalReport === undefined)
+        throw new Error("A final review report is required");
+      finalReport = opts.options.resultSchema.parse(finalReport);
+      if (finalReport === null || finalReport === undefined)
+        throw new Error("A final review report is required");
+    }
+    opts.recordOutcome(input, finalReport);
+    report = finalReport;
+    submitted = input;
+    return "Review outcome and report recorded.";
+  }
+
+  /**
+   * Run the selected session within its original deadline and always await session reset.
+   */
+  async function executeAttempt() {
     let error: string | undefined;
-    let cleanupFailed = false;
-    const heartbeat = setInterval(() => {
-      try {
-        if (!opts.store.renew(opts.run.id)) abort("Review reservation expired or was lost");
-      } catch {
-        abort("Review reservation could not be renewed");
-      }
-    }, HEARTBEAT_MS);
-    heartbeat.unref();
+    let output: string | undefined;
+    let cleanupError: string | undefined;
     try {
       await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
-      if (abortReason) throw new Error(abortReason);
-      await reportStart(opts, selection);
-      if (abortReason) throw new Error(abortReason);
-      turn = opts.ctx.sessions.run(
-        opts.run.sessionKey,
-        opts.prompt?.(selection) ?? buildPrompt(selection),
-        {
-          timeoutMs: opts.timeoutMs,
-          session: {
-            cwd: artifactDirectory,
-            env: { REVIEW_RUN_ID: opts.run.id },
-            tools: [declaration.tool],
-          },
+      controller.signal.throwIfAborted();
+      if (Date.now() >= deadline)
+        throw new ExecutionError("timeout", "Review timed out before worker startup");
+      if (opts.job.delivery === "publish" && opts.options.onRunStart) {
+        try {
+          await deliverCallback(opts.options.onRunStart, selection, startupSignal);
+        } catch {
+          controller.signal.throwIfAborted();
+          if (startupSignal.aborted)
+            throw new ExecutionError("timeout", "Review timed out before worker startup");
+          opts.ctx.logger.error("Review start notification failed", { runId: opts.run.id });
+        }
+      }
+      if (cancellation) throw new Error("Review cancelled before startup");
+      if (Date.now() >= deadline)
+        throw new ExecutionError("timeout", "Review timed out before worker startup");
+      const prompt =
+        opts.options.prompt?.(selection) ??
+        [
+          `Use the ${opts.job.skill} skill to review ${opts.run.url} at exactly commit ${opts.run.head}, base ${opts.run.base}.`,
+          `Keep artifacts in ${artifactDirectory}. Do not discover or select another PR.`,
+          opts.job.delivery === "local-only"
+            ? "This review is local-only. Do not publish to GitHub or send notifications."
+            : "Complete the configured publication and verify the live PR head before publishing. Stop if it changed.",
+          "When finished call github_review_finish once, with status, summary and the full result as JSON. Failed or partial work must use status failed with its actual error. A successful launch or final prose is not completion.",
+        ].join("\n\n");
+      turn = opts.ctx.sessions.run(opts.run.sessionKey, prompt, {
+        timeoutMs: Math.max(1, deadline - Date.now()),
+        session: {
+          cwd: artifactDirectory,
+          env: { REVIEW_RUN_ID: opts.run.id },
+          tools: createReviewFinishTools(opts.run.sessionKey, submitOutcome),
         },
-      );
-      if (abortReason) turn.abort(abortReason);
+      });
       output = (await turn).text;
     } catch (err) {
+      const primary = err instanceof ExecutionFailure ? err.primary : err;
+      if (primary instanceof ExecutionError && primary.code === "shutdown")
+        cancellation ??= "shutdown";
       error = err instanceof Error ? err.message : "Review execution failed";
     } finally {
       try {
         await opts.ctx.sessions.reset(opts.run.sessionKey);
-      } catch {
-        cleanupFailed = true;
-        error = "Review worker teardown could not be confirmed";
+      } catch (err) {
+        cleanupError = err instanceof Error ? err.message : "Review worker teardown failed";
       }
-      clearInterval(heartbeat);
     }
-    const summary = declaration.summary();
-    const status =
-      error || abortReason || cleanupFailed ? "interrupted" : summary ? "completed" : "blocked";
-    const result: GithubReviewResult = {
-      selection,
-      status,
-      finishedAt: new Date().toISOString(),
-      summary,
-      output: output?.slice(0, 12_000),
-      error: error ?? abortReason,
-    };
-    opts.store.finish(opts.run.id, {
-      status,
-      reason: status === "completed" ? undefined : "publication-uncertain",
-      output: result.output,
-    });
-    await reportCompletion(opts, result);
-    return result;
+    return { selection, submitted, report, error, output, cleanupError, cancellation };
   }
 }
 
 /**
- * Bind a durable completion declaration to the selected worker session.
+ * Report terminal outcomes without repeating review execution on callback failures.
  */
-function createCompletionDeclaration(opts: RunnerOptions, abortReason: () => string | undefined) {
-  let summary: string | undefined;
-  const complete = tool({
-    name: "github_review_complete",
-    description:
-      "Record this selected PR and commit as reviewed only after the entire review skill has finished successfully, including any publication it requires. This records local review completion; it does not post to GitHub. Do not call for a blocked, partial or failed review.",
-    input: CompletionSchema,
-    async execute(input, ctx) {
-      if (
-        ctx.caller.kind !== "session" ||
-        ctx.caller.ref.source !== "github-reviews" ||
-        ctx.caller.ref.key !== opts.run.sessionKey
-      ) {
-        throw new Error("Only this review's session may record its completion");
-      }
-      if (abortReason()) throw new Error("Review has been aborted; completion cannot be recorded");
-      const checked = CompletionSchema.parse(input);
-      if (!opts.store.markReviewed(opts.run.id, checked.summary)) {
-        throw new Error("Review reservation expired or was lost; completion was not recorded");
-      }
-      summary = checked.summary;
-      return "Review completion recorded for this PR, commit and request cycle.";
-    },
-  });
-  return { tool: complete, summary: () => summary };
-}
-
-/**
- * Attempt start reporting without making notification delivery a review prerequisite.
- */
-async function reportStart(opts: RunnerOptions, selection: ReviewSelection) {
-  if (!opts.onRunStart) return;
+export async function notifyReview(
+  opts: GithubReviewsOptions,
+  ctx: PluginContext,
+  selection: ReviewSelection,
+  status: GithubReviewResult["status"],
+  summary?: string,
+  error?: string,
+  output?: string,
+): Promise<void> {
+  if (selection.delivery !== "publish" || !opts.onRunComplete) return;
+  const result: GithubReviewResult = {
+    selection,
+    status,
+    summary,
+    finishedAt: new Date().toISOString(),
+    error,
+    output,
+  };
   try {
-    await deliverCallback(opts.onRunStart, selection);
+    await deliverCallback(opts.onRunComplete, result);
   } catch {
-    opts.ctx.logger.error("review start callback failed; delivery will not be retried", {
-      runId: opts.run.id,
-    });
+    ctx.logger.error("Review completion notification failed", { runId: selection.run.id });
   }
-}
-
-/**
- * Record one callback attempt after the review outcome is durable.
- */
-async function reportCompletion(opts: RunnerOptions, result: GithubReviewResult) {
-  if (opts.onRunComplete && opts.store.recordNotificationAttempt(opts.run.id)) {
-    try {
-      await deliverCallback(opts.onRunComplete, result);
-      opts.store.completeNotification(opts.run.id, "confirmed");
-    } catch {
-      opts.store.completeNotification(
-        opts.run.id,
-        "uncertain",
-        "Completion callback did not confirm delivery",
-      );
-      opts.ctx.logger.error("review completion callback failed; delivery will not be retried", {
-        runId: opts.run.id,
-      });
-    }
-  }
-}
-
-/**
- * Bind the shared skill to one already selected PR without a second discovery step.
- */
-function buildPrompt(selection: ReviewSelection): string {
-  const { run } = selection;
-  return [
-    `Use the ${selection.skill} skill to review ${run.url}.`,
-    `Review exactly commit ${run.head}; the selected reviewer is ${run.reviewer}.`,
-    "The server has already selected and reserved this PR. Do not discover or claim another PR.",
-    "Follow the skill's research, delegation and publication instructions. Verify the live head before publishing; if it changed, stop and report the blocker.",
-    `Keep artifacts in ${selection.artifactDirectory}; use ${selection.publisherStateFile} for publisher state when the skill supports it.`,
-    "After the entire workflow succeeds, call github_review_complete once with a concise summary. If blocked or uncertain, do not call it. The host reports the outcome; do not send a separate notification.",
-  ].join("\n\n");
 }
