@@ -730,6 +730,27 @@ describe("SessionManager", () => {
     );
   });
 
+  test("shutdown has a distinct reason while execution finalisers retain cancelled outcome", async () => {
+    const runtime = new FakeRuntime({ neverFinish: true });
+    const outcomes: string[] = [];
+    const mgr = manager(runtime, {
+      finalisers: [
+        {
+          name: "record",
+          run: (ctx) => {
+            outcomes.push(ctx.outcome.status);
+          },
+        },
+      ],
+    });
+    const turn = mgr.namespace("reviews").run("shutdown", "Review");
+    const rejection = expect(turn).rejects.toMatchObject({ code: "shutdown" });
+    await vi.waitFor(() => expect(runtime.spawns).toHaveLength(1));
+    await mgr.stopAll();
+    await rejection;
+    expect(outcomes).toEqual(["cancelled"]);
+  });
+
   test("stopAll kills every live session and refuses new work", async () => {
     const runtime = new FakeRuntime();
     const mgr = manager(runtime);
