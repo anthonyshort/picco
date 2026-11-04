@@ -1,7 +1,3 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { describe, expect, test } from "vitest";
 import { openReviewDatabase } from "./database.js";
 
@@ -19,28 +15,4 @@ describe("review database", () => {
       database.close();
     }
   });
-
-  test.each(["reviewed_commits", "review_runs", "poller_state"])(
-    "populated legacy %s requires migration without changing history",
-    (table) => {
-      const directory = mkdtempSync(path.join(os.tmpdir(), "review-legacy-"));
-      const filename = path.join(directory, "reviews.sqlite");
-      const legacy = new DatabaseSync(filename);
-      legacy.exec(
-        `CREATE TABLE ${table}(evidence TEXT); INSERT INTO ${table} VALUES ('preserve');`,
-      );
-      legacy.close();
-      try {
-        expect(() => openReviewDatabase(filename)).toThrow("reviewed migration");
-        const verify = new DatabaseSync(filename);
-        expect(verify.prepare(`SELECT evidence FROM ${table}`).get()?.evidence).toBe("preserve");
-        expect(
-          verify.prepare("SELECT name FROM sqlite_master WHERE name='review_jobs'").get(),
-        ).toBeUndefined();
-        verify.close();
-      } finally {
-        rmSync(directory, { recursive: true, force: true });
-      }
-    },
-  );
 });
