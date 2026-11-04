@@ -1,5 +1,11 @@
 # @picco-agent/runtime-bwrap
 
+## 0.2.5
+
+### Patch Changes
+
+- c00198d: Keep explicit read-only mounts inside a shared Pi profile read-only for sessions and commands.
+
 ## 0.2.4
 
 ### Patch Changes
