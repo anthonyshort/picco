@@ -21,7 +21,7 @@ const reviews = githubReviews({
 });
 ```
 
-Put `reviews` in the agent's `plugins` array. Authentication uses the host's GitHub CLI by default. The plugin polls on startup, validates personal review requests and checks the PR again before each execution. A new commit does not trigger another automatic review unless a newer review request exists. Genuine failures and manual cancellations stay stopped until an explicit retry or a newer request. Known GitHub retry deadlines leave accepted work queued and delay further GitHub admission reads until the deadline; polling and queued execution resume automatically.
+Put `reviews` in the agent's `plugins` array. Authentication uses the host's GitHub CLI by default. The plugin polls on startup, validates personal review requests and checks the PR again before each execution. Open draft PRs are eligible for both automatic and explicit reviews; closed and merged PRs are excluded. A new commit does not trigger another automatic review unless a newer review request exists. Genuine failures and manual cancellations stay stopped until an explicit retry or a newer request. Known GitHub retry deadlines leave accepted work queued and delay further GitHub admission reads until the deadline; polling and queued execution resume automatically.
 
 `enabled: false` disables automatic polling and execution of queued polling jobs. Explicit local-only submissions remain available. Removing a repository route also stops its queued automatic work. Runtime pause, poll timing and backoff reset after restart; permanent disablement belongs in configuration.
 

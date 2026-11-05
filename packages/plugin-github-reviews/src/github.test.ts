@@ -36,7 +36,7 @@ const candidate: Candidate = {
 };
 
 describe("GitHub review source", () => {
-  test("resolves repository and number into validated canonical revisions", async () => {
+  test.each([false, true])("resolves canonical revisions, draft=%s", async (draft) => {
     const calls: string[][] = [];
     const source = createGithubSource({
       execute: async (args) => {
@@ -50,7 +50,7 @@ describe("GitHub review source", () => {
                 html_url: "https://github.com/Owner/One/pull/12",
                 created_at: CREATED,
                 state: "open",
-                draft: false,
+                draft,
                 head: { sha: "A".repeat(40) },
                 base: { sha: "B".repeat(40) },
               },
@@ -78,7 +78,6 @@ describe("GitHub review source", () => {
     { number: 13 },
     { html_url: "https://github.com/other/one/pull/12" },
     { state: "closed" },
-    { draft: true },
     { head: { sha: "invalid" } },
   ])("rejects ineligible or mismatched resolved identity: %j", async (change) => {
     const source = createGithubSource({
@@ -137,6 +136,7 @@ describe("GitHub review source", () => {
     expect(inputs[0]).toContain("repo:owner/one OR repo:owner/two");
     expect(inputs[0]).toContain("type: ISSUE_ADVANCED");
     expect(inputs[0]).toContain("created:>=2026-09-28");
+    expect(inputs[0]).not.toContain("draft:");
     expect(result).toEqual({
       reviewer: "reviewer",
       candidates: [candidate],
@@ -169,8 +169,9 @@ describe("GitHub review source", () => {
     expect(result.rateLimit.cost).toBe(2);
   });
 
-  test("enforces exact age boundary, state and draft checks locally", async () => {
+  test("discovers drafts while enforcing exact age boundary and open state locally", async () => {
     const atCutoff = { ...candidate, createdAt: "2026-09-28T12:00:00Z" };
+    const draft = { ...candidate, number: 14, url: "https://github.com/owner/one/pull/14" };
     const beforeCutoff = {
       ...candidate,
       number: 13,
@@ -185,9 +186,7 @@ describe("GitHub review source", () => {
             pull(atCutoff),
             pull(beforeCutoff),
             {
-              ...pull(candidate),
-              number: 14,
-              url: "https://github.com/owner/one/pull/14",
+              ...pull(draft),
               isDraft: true,
             },
             {
@@ -199,7 +198,7 @@ describe("GitHub review source", () => {
           ]),
         ),
     });
-    expect((await source.discover(["owner/one"], 28)).candidates).toEqual([atCutoff]);
+    expect((await source.discover(["owner/one"], 28)).candidates).toEqual([atCutoff, draft]);
   });
 
   test("fails closed on GraphQL errors despite usable partial data", async () => {
@@ -334,10 +333,29 @@ describe("GitHub review source", () => {
     expect(fixture.calls.every((args) => !args.includes("--method"))).toBe(true);
   });
 
+  test.each([true, false])(
+    "inspects drafts across pagination, historyFirst=%s",
+    async (historyFirst) => {
+      const fixture = inspectionFixture({
+        ...(historyFirst
+          ? {
+              events: [request()],
+              requests: [],
+              secondRequestPage: [{ requestedReviewer: { login: "reviewer" } }],
+            }
+          : { events: [], secondEventPage: [request()] }),
+        live: { isDraft: true },
+      });
+      const result = await fixture.source.inspect(candidate, "reviewer");
+      expect(result.blockedReason).toBeUndefined();
+      expect(result.requestEventId).toBe("event:70");
+      expect(result.rateLimit.cost).toBe(2);
+    },
+  );
+
   test("rechecks live readiness, head and direct reviewer before detailed evidence reads", async () => {
     for (const [live, reason] of [
       [{ state: "CLOSED" }, "no-longer-ready-for-review"],
-      [{ isDraft: true }, "no-longer-ready-for-review"],
       [{ headRefOid: "b".repeat(40) }, "head-changed"],
       [
         { reviewRequests: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
@@ -388,7 +406,6 @@ describe("GitHub review source", () => {
     for (const historyFirst of [true, false]) {
       for (const [change, reason] of [
         [{ headRefOid: "b".repeat(40) }, "head-changed"],
-        [{ isDraft: true }, "no-longer-ready-for-review"],
         [{ state: "CLOSED" }, "no-longer-ready-for-review"],
       ] as const) {
         const fixture = inspectionFixture({
