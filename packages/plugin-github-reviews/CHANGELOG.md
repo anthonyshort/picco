@@ -1,5 +1,11 @@
 # @picco-agent/plugin-github-reviews
 
+## 0.5.1
+
+### Patch Changes
+
+- d66125b: Accept open draft pull requests in review discovery, live eligibility checks and explicit submissions.
+
 ## 0.5.0
 
 ### Minor Changes
