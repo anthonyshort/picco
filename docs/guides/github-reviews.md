@@ -23,9 +23,9 @@ const reviews = githubReviews({
 
 Put `reviews` in the agent's `plugins` array. Authentication uses the host's GitHub CLI by default. The plugin polls on startup, validates personal review requests and checks the PR again before each execution. Open draft PRs are eligible for both automatic and explicit reviews; closed and merged PRs are excluded. A new commit does not trigger another automatic review unless a newer review request exists. Genuine failures and manual cancellations stay stopped until an explicit retry or a newer request. Known GitHub retry deadlines leave accepted work queued and delay further GitHub admission reads until the deadline; polling and queued execution resume automatically.
 
-`enabled: false` disables automatic polling and execution of queued polling jobs. Explicit local-only submissions remain available. Removing a repository route also stops its queued automatic work. Runtime pause, poll timing and backoff reset after restart; permanent disablement belongs in configuration.
+`enabled: false` disables automatic polling and execution of queued polling jobs. Explicit submissions remain available in either delivery mode. Removing a repository route also stops its queued automatic work. Runtime pause, poll timing and backoff reset after restart; permanent disablement belongs in configuration.
 
-## Request a local review through MCP
+## Request a review through MCP
 
 Picco core supplies the MCP transport. Enable `mcp` on `createAgent()` and register the reviews plugin normally:
 
@@ -56,7 +56,7 @@ Here `createAgent` comes from `@picco-agent/core`; `runtime` is your configured 
 }
 ```
 
-The response contains a saved job ID, not a completed review. Reusing the request ID with the same inputs returns that job, including after restart; conflicting inputs are rejected. The repository and PR number identify the review; prompt URLs are derived from that identity. During known GitHub backoff, new submissions report the retry deadline without additional API calls or an accepted job. Repeating an already accepted key still returns its job. Explicit submissions are local-only: they do not post GitHub comments, send lifecycle notifications or mark an automatic request reviewed.
+The response contains a saved job ID, not a completed review. Reusing the request ID with the same inputs returns that job, including after restart; conflicting inputs are rejected. The repository and PR number identify the review; prompt URLs are derived from that identity. During known GitHub backoff, new submissions report the retry deadline without additional API calls or an accepted job. Repeating an already accepted key still returns its job. Explicit submissions default to `delivery: "local-only"`, which suppresses GitHub publication and lifecycle callbacks. Set `delivery: "publish"` in the start arguments to use the application’s publication workflow and lifecycle callbacks. Delivery is saved with the job and retained through retries and restarts; changing it requires a new request ID. Neither mode marks an automatic review request handled.
 
 Use `github_reviews_details` with `{ "id": "<returned job ID>" }` to inspect its attempts, then `github_reviews_report` with the same ID to retrieve its latest full report. A queued job has no report yet. Failed attempts may retain partial evidence. Reports are bounded to 4 MiB; diagnostic output is a separate bounded preview.
 

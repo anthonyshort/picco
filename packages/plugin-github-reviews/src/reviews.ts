@@ -140,7 +140,7 @@ export class Reviews {
   }
 
   /**
-   * Accept one local-only review per client key, without GitHub reads during known API backoff.
+   * Accept one review per client key, without GitHub reads during known API backoff.
    */
   async submit(input: ReviewStart, source: "tool" | "mcp") {
     this.ensureNotStopped();
@@ -186,7 +186,7 @@ export class Reviews {
       requestEventId: null,
       requestedAt: null,
       skill: input.skill,
-      delivery: "local-only",
+      delivery: input.delivery,
     });
     this.requestDispatch();
     return job;
@@ -664,13 +664,14 @@ export class Reviews {
   }
 
   /**
-   * Reject reuse of a client request ID for a different repository, PR or skill.
+   * Reject reuse of a client request ID with different review inputs.
    */
   private ensureMatchingRequest(job: ReviewJob, input: ReviewStart) {
     if (
       job.repository !== input.repository ||
       job.number !== input.number ||
-      job.skill !== input.skill
+      job.skill !== input.skill ||
+      job.delivery !== input.delivery
     )
       throw new Error("Request ID already belongs to different review inputs");
   }

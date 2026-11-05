@@ -69,6 +69,7 @@ export const ReviewStartSchema = z
       .regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/)
       .max(200)
       .default("review"),
+    delivery: ReviewJobSchema.shape.delivery.default("local-only"),
   })
   .strict();
 
