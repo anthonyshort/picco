@@ -788,81 +788,174 @@ describe("GitHub reviews plugin", () => {
     expect(saved.runs[0].report).toEqual({ markdown: "Full report" });
     expect(saved.runs[0].error).toContain("disconnected");
   });
-  test("MCP review identity and reports survive a fresh execution and later restart", async () => {
-    const fixture = createGithubFixture();
-    const notifications: string[] = [];
-    const options = {
-      onRunStart: () => {
-        notifications.push("start");
-      },
-      onRunComplete: () => {
-        notifications.push("complete");
-      },
-    };
-    const input = { repository: Repository, number: 42, requestId: "explicit-first" };
-    const first = await realHost(fixture, "wait", false, options);
-    let id: string;
-    try {
-      id = (await first.call("github_reviews_start", input)).id;
-      await vi.waitFor(() => expect(first.runtime.spawns).toHaveLength(1));
-      expect(
-        (
-          await invoke(first.plugin, "github_reviews_start", {
-            ...input,
-            repository: "OWNER/PROJECT",
-          })
-        ).id,
-      ).toBe(id);
-      await expect(first.call("github_reviews_start", { ...input, number: 43 })).rejects.toThrow(
-        "different review inputs",
-      );
-      await vi.waitFor(() =>
-        expect(first.runtime.spawns[0].process.prompts[0]).toContain("local-only"),
-      );
-    } finally {
-      await first.stop();
-    }
-    fixture.state.head = "c".repeat(40);
-    const second = await realHost(fixture, "complete", false, options);
-    try {
-      await vi.waitFor(async () =>
-        expect((await second.call("github_reviews_details", { id })).job.status).toBe("completed"),
-      );
-      const details = await second.call("github_reviews_details", { id });
-      expect(details.job).toMatchObject({
-        source: "mcp",
-        delivery: "local-only",
+  test.each([undefined, "local-only", "publish"] as const)(
+    "MCP reviews preserve delivery and identity across restart, delivery=%s",
+    async (delivery) => {
+      const expectedDelivery = delivery ?? "local-only";
+      const fixture = createGithubFixture();
+      const notifications: string[] = [];
+      const options = {
+        onRunStart: () => {
+          notifications.push("start");
+        },
+        onRunComplete: () => {
+          notifications.push("complete");
+        },
+      };
+      const input = {
         repository: Repository,
         number: 42,
-      });
-      expect(details.runs.map((run: { status: string }) => run.status)).toEqual([
-        "completed",
-        "interrupted",
-      ]);
-      expect(details.runs[0].head).toBe("c".repeat(40));
-      expect(details.runs[0].sessionKey).not.toBe(details.runs[1].sessionKey);
-      expect((await second.call("github_reviews_report", { id })).report).toEqual({
-        markdown: "Full report",
-      });
-      expect((await second.call("github_reviews_start", input)).id).toBe(id);
-      const exposed = (await second.client.listTools()).tools.map((entry) => entry.name);
-      expect(exposed).toContain("github_reviews_start");
-      expect(exposed).not.toContain("github_review_finish");
-      expect(exposed).not.toContain("github_review_complete");
-      await idle(second.plugin);
-    } finally {
-      await second.stop();
-    }
-    const reads = fixture.reads.length;
-    const third = await realHost(fixture, "complete", false, options);
-    try {
-      expect((await third.call("github_reviews_start", input)).id).toBe(id);
-      expect(third.runtime.spawns).toEqual([]);
-      expect(fixture.reads).toHaveLength(reads);
-      expect(notifications).toEqual([]);
-    } finally {
-      await third.stop();
-    }
+        requestId: "explicit-first",
+        ...(delivery ? { delivery } : {}),
+      };
+      const first = await realHost(fixture, "wait", false, options);
+      let id: string;
+      try {
+        id = (await first.call("github_reviews_start", input)).id;
+        await vi.waitFor(() => expect(first.runtime.spawns).toHaveLength(1));
+        expect(
+          (
+            await invoke(first.plugin, "github_reviews_start", {
+              ...input,
+              repository: "OWNER/PROJECT",
+            })
+          ).id,
+        ).toBe(id);
+        await expect(first.call("github_reviews_start", { ...input, number: 43 })).rejects.toThrow(
+          "different review inputs",
+        );
+        await expect(
+          first.call("github_reviews_start", {
+            ...input,
+            delivery: expectedDelivery === "publish" ? "local-only" : "publish",
+          }),
+        ).rejects.toThrow("different review inputs");
+        await vi.waitFor(() =>
+          expect(first.runtime.spawns[0].process.prompts[0]).toContain(
+            expectedDelivery === "publish" ? "Complete the configured publication" : "local-only",
+          ),
+        );
+      } finally {
+        await first.stop();
+      }
+      fixture.state.head = "c".repeat(40);
+      const second = await realHost(fixture, "complete", false, options);
+      try {
+        await vi.waitFor(async () =>
+          expect((await second.call("github_reviews_details", { id })).job.status).toBe(
+            "completed",
+          ),
+        );
+        const details = await second.call("github_reviews_details", { id });
+        expect(details.job).toMatchObject({
+          source: "mcp",
+          delivery: expectedDelivery,
+          repository: Repository,
+          number: 42,
+        });
+        expect(details.runs.map((run: { status: string }) => run.status)).toEqual([
+          "completed",
+          "interrupted",
+        ]);
+        expect(details.runs[0].head).toBe("c".repeat(40));
+        expect(details.runs[0].sessionKey).not.toBe(details.runs[1].sessionKey);
+        expect((await second.call("github_reviews_report", { id })).report).toEqual({
+          markdown: "Full report",
+        });
+        expect((await second.call("github_reviews_start", input)).id).toBe(id);
+        const exposed = (await second.client.listTools()).tools.map((entry) => entry.name);
+        expect(exposed).toContain("github_reviews_start");
+        expect(exposed).not.toContain("github_review_finish");
+        expect(exposed).not.toContain("github_review_complete");
+        await idle(second.plugin);
+      } finally {
+        await second.stop();
+      }
+      const reads = fixture.reads.length;
+      const third = await realHost(fixture, "complete", false, options);
+      try {
+        expect((await third.call("github_reviews_start", input)).id).toBe(id);
+        await expect(
+          third.call("github_reviews_start", {
+            ...input,
+            delivery: expectedDelivery === "publish" ? "local-only" : "publish",
+          }),
+        ).rejects.toThrow("different review inputs");
+        expect(third.runtime.spawns).toEqual([]);
+        expect(fixture.reads).toHaveLength(reads);
+        expect(notifications).toEqual(
+          expectedDelivery === "publish" ? ["start", "complete", "start", "complete"] : [],
+        );
+      } finally {
+        await third.stop();
+      }
+    },
+  );
+
+  test("concurrent delivery changes cannot reuse one request ID", async () => {
+    const fixture = createGithubFixture();
+    const resolving = gate();
+    const release = gate();
+    let resolutions = 0;
+    const current = await start({
+      enabled: false,
+      github: {
+        execute: async (args, input, signal) => {
+          if (args[1]?.startsWith("repos/")) {
+            if (++resolutions === 2) resolving.resolve();
+            await release.promise;
+          }
+          return fixture.execute(args, input, signal);
+        },
+      },
+    });
+    const input = { repository: Repository, number: 42, requestId: "concurrent-delivery" };
+    const submissions = Promise.allSettled([
+      invoke(current.plugin, "github_reviews_start", input),
+      invoke(current.plugin, "github_reviews_start", { ...input, delivery: "publish" }),
+    ]);
+    await resolving.promise;
+    release.resolve();
+    const outcomes = await submissions;
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.find((outcome) => outcome.status === "rejected")).toMatchObject({
+      reason: new Error("Request ID already belongs to different review inputs"),
+    });
+    await vi.waitFor(() => expect(current.ctx.turns).toHaveLength(1));
+    await idle(current.plugin);
+    expect(await invoke(current.plugin, "github_reviews_list")).toHaveLength(1);
+  });
+
+  test("manual publication does not consume an automatic review request", async () => {
+    const fixture = createGithubFixture();
+    fixture.state.empty = true;
+    const current = await start({}, undefined, fixture);
+    const manual = await invoke(current.plugin, "github_reviews_start", {
+      repository: Repository,
+      number: 42,
+      requestId: "manual-publish",
+      delivery: "publish",
+    });
+    await vi.waitFor(async () =>
+      expect(
+        (await invoke(current.plugin, "github_reviews_details", { id: manual.id })).job.status,
+      ).toBe("completed"),
+    );
+    fixture.state.empty = false;
+    vi.setSystemTime(new Date("2026-10-26T12:02:00Z"));
+    await invoke(current.plugin, "github_reviews_poll");
+    await vi.waitFor(() => expect(current.ends).toHaveLength(2));
+    await idle(current.plugin);
+    expect(await invoke(current.plugin, "github_reviews_list")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "tool", delivery: "publish", requestEventId: null }),
+        expect.objectContaining({
+          source: "poll",
+          delivery: "publish",
+          requestEventId: "request:first",
+        }),
+      ]),
+    );
   });
 
   test("an explicitly cancelled review remains stopped after restart", async () => {
@@ -891,33 +984,45 @@ describe("GitHub reviews plugin", () => {
     }
   });
 
-  test("explicit retry retains failed attempts and their reports", async () => {
-    const host = await realHost(createGithubFixture(), "failed");
-    try {
-      const job = await host.call("github_reviews_start", {
-        repository: Repository,
-        number: 42,
-        requestId: "failed-explicit",
-      });
-      await vi.waitFor(async () =>
-        expect((await host.call("github_reviews_status")).activeRuns).toEqual([]),
-      );
-      expect((await host.call("github_reviews_details", { id: job.id })).job.status).toBe("failed");
-      await host.call("github_reviews_retry", { id: job.id });
-      await vi.waitFor(async () =>
-        expect((await host.call("github_reviews_details", { id: job.id })).runs).toHaveLength(2),
-      );
-      await idle(host.plugin);
-      expect(
-        (await host.call("github_reviews_details", { id: job.id })).runs.map(
-          (run: { report: unknown }) => run.report,
-        ),
-      ).toEqual([{ markdown: "Full report" }, { markdown: "Full report" }]);
-      expect((await host.call("github_reviews_report", { id: job.id })).partial).toBe(true);
-    } finally {
-      await host.stop();
-    }
-  });
+  test.each(["local-only", "publish"] as const)(
+    "explicit retry retains delivery and reports, delivery=%s",
+    async (delivery) => {
+      const host = await realHost(createGithubFixture(), "failed");
+      try {
+        const job = await host.call("github_reviews_start", {
+          repository: Repository,
+          number: 42,
+          requestId: "failed-explicit",
+          delivery,
+        });
+        await vi.waitFor(async () =>
+          expect((await host.call("github_reviews_status")).activeRuns).toEqual([]),
+        );
+        expect((await host.call("github_reviews_details", { id: job.id })).job.status).toBe(
+          "failed",
+        );
+        await host.call("github_reviews_retry", { id: job.id });
+        await vi.waitFor(async () =>
+          expect((await host.call("github_reviews_details", { id: job.id })).runs).toHaveLength(2),
+        );
+        await idle(host.plugin);
+        expect(
+          (await host.call("github_reviews_details", { id: job.id })).runs.map(
+            (run: { report: unknown }) => run.report,
+          ),
+        ).toEqual([{ markdown: "Full report" }, { markdown: "Full report" }]);
+        expect((await host.call("github_reviews_report", { id: job.id })).partial).toBe(true);
+        expect((await host.call("github_reviews_details", { id: job.id })).job.delivery).toBe(
+          delivery,
+        );
+        expect(host.runtime.spawns[1].process.prompts[0]).toContain(
+          delivery === "publish" ? "Complete the configured publication" : "local-only",
+        );
+      } finally {
+        await host.stop();
+      }
+    },
+  );
 
   test("polling and MCP submissions share the same worker capacity", async () => {
     const fixture = createGithubFixture();

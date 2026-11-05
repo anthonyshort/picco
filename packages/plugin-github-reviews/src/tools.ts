@@ -13,7 +13,7 @@ export function createReviewTools(ensureReviews: () => Reviews, source: "tool" |
     tool({
       name: "github_reviews_start",
       description:
-        "Queue a local-only review for a repository and PR number. Reuse requestId for the same submission; returns a job ID, not a completed report.",
+        "Queue a review for a repository and PR number. Delivery defaults to local-only; choose publish to allow GitHub publication and lifecycle notifications. Reuse requestId for the same inputs; returns a job ID, not a completed report.",
       input: ReviewStartSchema,
       async execute(input) {
         return JSON.stringify(await ensureReviews().submit(input, source));
