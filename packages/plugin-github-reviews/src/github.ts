@@ -66,7 +66,7 @@ export function createGithubSource(opts: GithubSourceOptions = {}) {
     if (new Set(repositories).size !== repositories.length)
       throw new Error("Review repositories must be unique");
     const cutoff = deps.now() - z.number().int().min(1).max(3_650).parse(maxPrAgeDays) * DAY_MS;
-    const query = `(${repositories.map((repository) => `repo:${repository}`).join(" OR ")}) is:pr is:open draft:false review-requested:@me created:>=${new Date(cutoff).toISOString().slice(0, 10)}`;
+    const query = `(${repositories.map((repository) => `repo:${repository}`).join(" OR ")}) is:pr is:open review-requested:@me created:>=${new Date(cutoff).toISOString().slice(0, 10)}`;
     const document = buildDiscoveryDocument(repositories);
     const collection = createDiscoveryCollection(repositories, cutoff);
     const cursors = new Set<string>();
@@ -139,7 +139,7 @@ export function createGithubSource(opts: GithubSourceOptions = {}) {
       deps.execute(["api", "user"], undefined, signal),
     ]);
     const pull = PullRequestResponseSchema.parse(JSON.parse(rawPull));
-    if (pull.state !== "open" || pull.draft || pull.number !== number)
+    if (pull.state !== "open" || pull.number !== number)
       throw new Error("Pull request is not ready for review");
     const candidate = CandidateSchema.parse({
       repository,
@@ -221,8 +221,7 @@ function discoveryCandidate(
   ensureCandidateUrl(candidate);
   if (!repositories.includes(candidate.repository))
     throw new Error("GitHub discovery returned an unconfigured repository");
-  if (pull.isDraft || pull.state !== "OPEN" || Date.parse(candidate.createdAt) < cutoff)
-    return undefined;
+  if (pull.state !== "OPEN" || Date.parse(candidate.createdAt) < cutoff) return undefined;
   return candidate;
 }
 
@@ -239,7 +238,7 @@ function inspectLiveCandidate(data: InspectionData, candidate: Candidate, review
   if (live.number !== candidate.number || live.createdAt !== candidate.createdAt)
     throw new Error("GitHub live pull request identity does not match discovery");
   const blockedReason =
-    live.state !== "OPEN" || live.isDraft
+    live.state !== "OPEN"
       ? "no-longer-ready-for-review"
       : live.headRefOid !== candidate.head
         ? "head-changed"
