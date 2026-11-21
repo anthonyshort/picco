@@ -72,6 +72,7 @@ export interface SetupSessionInfo {
   ref: SessionRef;
   cwd: string;
   tools?: Tool[];
+  allowedHostTools?: string[];
   pi?: Partial<PiOptions>;
   env?: Record<string, string>;
 }
@@ -172,6 +173,11 @@ interface LiveSession {
 interface Slot {
   ref: SessionRef;
   live: LiveSession | null;
+  /**
+   * Retain an established restriction across worker respawns; omitted spawn options must not
+   * restore agent-wide access. Session-scoped tools still need rebinding after teardown.
+   */
+  allowedHostTools?: string[];
   /**
    * Tail of the FIFO queue for this key.
    */
@@ -410,6 +416,7 @@ export class SessionManager {
               pi: opts.pi,
               env: opts.env,
               tools: opts.tools,
+              allowedHostTools: opts.allowedHostTools,
             });
             return this.driveTurn(execution, live.rpc, prompt, opts.timeoutMs);
           },
@@ -807,6 +814,7 @@ export class SessionManager {
     const prepared = Promise.withResolvers<void>();
     slot.acquisition = prepared.promise;
     const cwd = opts?.cwd ?? this.defaultCwd(slot.ref);
+    const allowedHostTools = slot.allowedHostTools ?? opts?.allowedHostTools?.slice();
     const resume = !slot.freshNextSpawn;
     slot.freshNextSpawn = false;
     slot.released = false;
@@ -817,6 +825,7 @@ export class SessionManager {
         pi: opts?.pi,
         env: opts?.env,
         tools: opts?.tools,
+        allowedHostTools,
         resume,
         check,
         onSpawn: (spawnedRpc) => {
@@ -830,6 +839,7 @@ export class SessionManager {
         },
       });
       check();
+      slot.allowedHostTools ??= allowedHostTools;
       slot.live = { rpc, cwd, startedAt: new Date(), lastActiveAt: new Date(), turns: 0 };
       return slot.live;
     } catch (err) {
@@ -852,6 +862,7 @@ export class SessionManager {
     pi?: Partial<PiOptions>;
     env?: Record<string, string>;
     tools?: Tool[];
+    allowedHostTools?: string[];
     resume?: boolean;
     check: () => void;
     onSpawn: (rpc: RpcSession) => void;
@@ -869,6 +880,7 @@ export class SessionManager {
       ref,
       cwd: info.cwd,
       tools: info.tools,
+      allowedHostTools: info.allowedHostTools,
       pi: info.pi,
       env: info.env,
     });

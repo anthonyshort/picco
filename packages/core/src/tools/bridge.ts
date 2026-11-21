@@ -61,6 +61,10 @@ interface TokenEntry {
    * Tools bound to this session only, served alongside the agent-wide map.
    */
   sessionTools: Map<string, Tool>;
+  /**
+   * When supplied, the token resolves only this fixed selection of host tools.
+   */
+  allowedTools?: Map<string, Tool>;
 }
 
 /**
@@ -119,7 +123,7 @@ export class ToolBridge {
    * Create a bearer token identifying one session as the caller. Session-scoped tools are validated
    * here — throwing fails the session creation, before the session process spawns.
    */
-  issueToken(caller: SessionRef, sessionTools?: Tool[]): string {
+  issueToken(caller: SessionRef, sessionTools?: Tool[], allowedHostTools?: string[]): string {
     const bound = new Map<string, Tool>();
     for (const tool of sessionTools ?? []) {
       if (this.tools.has(tool.name) || bound.has(tool.name)) {
@@ -132,9 +136,37 @@ export class ToolBridge {
       }
       bound.set(tool.name, tool);
     }
+    let allowedTools: Map<string, Tool> | undefined;
+    if (allowedHostTools !== undefined) {
+      allowedTools = new Map();
+      for (const name of allowedHostTools) {
+        if (allowedTools.has(name)) throw new Error(`Duplicate allowed host tool "${name}"`);
+        const tool = this.tools.get(name) ?? bound.get(name);
+        if (!tool) throw new Error(`Unknown allowed host tool "${name}"`);
+        allowedTools.set(name, tool);
+      }
+    }
     const token = randomBytes(32).toString("hex");
-    this.tokens.set(token, { caller: { kind: "session", ref: caller }, sessionTools: bound });
+    this.tokens.set(token, {
+      caller: { kind: "session", ref: caller },
+      sessionTools: bound,
+      allowedTools,
+    });
     return token;
+  }
+
+  /**
+   * Describe the same tools this token can invoke, in registration or explicit allowlist order.
+   */
+  describeTools(token: string) {
+    const entry = this.tokens.get(token);
+    if (!entry) throw new Error("Unknown session tool token");
+    const tools = entry.allowedTools ?? new Map([...this.tools, ...entry.sessionTools]);
+    return [...tools.values()].map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: z.toJSONSchema(tool.input, { io: "input" }),
+    }));
   }
 
   /**
@@ -242,10 +274,10 @@ export class ToolBridge {
       res.writeHead(409).end("The tool call's owning execution has ended");
       return;
     }
-    // Agent-wide tools are shared by every session; sessionTools are scoped to this token. A name
-    // resolves to one or the other — issueToken rejects a session tool that collides with an
-    // agent-wide one.
-    const tool = this.tools.get(parsed.tool) ?? entry.sessionTools.get(parsed.tool);
+    // Restricted tokens never fall back to the agent-wide map.
+    const tool = entry.allowedTools
+      ? entry.allowedTools.get(parsed.tool)
+      : (this.tools.get(parsed.tool) ?? entry.sessionTools.get(parsed.tool));
     const { caller } = entry;
     const operation = tool
       ? this.runTool(tool, parsed.args, {

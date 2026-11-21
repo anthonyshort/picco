@@ -90,6 +90,31 @@ ctx.sessions.run(channel.id, message.text, {
 
 Session tools are bound when the session is created and removed when its process is released.
 
+## Restrict a session's host tools
+
+Sessions inherit every agent-wide host tool by default. To give a worker only a specific set, name
+the permitted tools in `allowedHostTools`, including any session-scoped tools it needs:
+
+```ts
+const session = await ctx.sessions.open(channel.id, {
+  tools: [reply],
+  allowedHostTools: ["reply"],
+});
+await session.run(message.text);
+```
+
+Picco advertises only those tools and rejects calls to other host tools, even direct bridge calls.
+The selection is fixed when the worker is created. Unknown and duplicate names fail creation;
+an empty list permits no host tools. Omitting the list keeps the default access. The same option
+is available in `ctx.run()` and `ctx.sessions.run()` session options.
+
+Once established, a restriction stays with that session key across worker restarts and resets.
+Use a new key to change access. After teardown, re-supply any session-scoped tools when opening the
+session again; a missing permitted tool fails creation rather than restoring inherited access.
+
+This restricts Picco host tools only. Pi tools, extensions, native MCP access, sandbox mounts and
+environment credentials need their own configuration. See [Security](../concepts/security.md).
+
 Use an identity [connector](./identity.md) for sender-owned credentials, a [skill](./skills.md) for
 instructions that run inside Pi, or an [MCP server](./mcp.md) when an existing service already
 provides the tool surface.
