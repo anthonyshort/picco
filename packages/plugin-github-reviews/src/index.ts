@@ -6,18 +6,18 @@ import { ReviewRepository } from "./persistence/review-repository.js";
 import { Reviews } from "./reviews.js";
 import { createReviewTools } from "./tools.js";
 import { GithubReviewsSettingsSchema, type GithubReviewsOptions } from "./types.js";
-import { observeWorkflows } from "./workflows.js";
 
 /**
  * Own GitHub reviews and their execution; polling discovers review requests.
  */
 export function githubReviews(opts: GithubReviewsOptions): Plugin {
-  const { github, prompt, runReview, onRunStart, onRunComplete, resultSchema, ...input } = opts;
+  if (typeof opts?.runReview !== "function")
+    throw new Error("Configure runReview to run GitHub reviews");
+  const { github, runReview, onRunStart, onRunComplete, resultSchema, ...input } = opts;
   const settings = GithubReviewsSettingsSchema.parse(input);
   const options = {
     ...settings,
     github,
-    prompt,
     runReview,
     onRunStart,
     onRunComplete,
@@ -36,7 +36,6 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
     name: "github-reviews",
     tools: createReviewTools(ensureReviews, "tool"),
     mcpTools: createReviewTools(ensureReviews, "mcp"),
-    prepareExecution: settings.holdWorkflows && !runReview ? observeWorkflows : undefined,
     start(ctx) {
       if (reviews) throw new Error("GitHub reviews plugin is already started");
       const directory = path.resolve(settings.reviewsDirectory ?? ctx.filePath());

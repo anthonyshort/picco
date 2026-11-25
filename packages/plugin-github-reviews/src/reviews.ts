@@ -201,9 +201,6 @@ export class Reviews {
     if (worker) {
       worker.worker.abort();
       await worker.completion;
-      const final = this.details(id).runs[0];
-      if (final?.cleanupError)
-        throw new Error(`Review worker cleanup failed: ${final.cleanupError}`);
     } else if (job.status === "queued") this.updateJobStatus(job, "cancelled");
     else if (job.status === "running") throw new Error("Review worker is unavailable");
     return this.details(id);
@@ -620,17 +617,12 @@ export class Reviews {
           : result.cancellation === "cancelled"
             ? "cancelled"
             : "failed");
-      const error =
-        result.submitted?.error ??
-        result.error ??
-        (result.submitted ? null : "Worker finished without recording a review outcome");
+      const error = result.submitted?.error ?? result.error ?? null;
       this.repository.transaction(() => {
         this.repository.saveAttempt({
           ...current,
           status,
           error,
-          output: result.output?.slice(0, 12_000) ?? null,
-          cleanupError: result.cleanupError ?? null,
           finishedAt: current.finishedAt ?? new Date().toISOString(),
         });
         this.updateJobStatus(job, status === "interrupted" ? "queued" : status, error);
@@ -642,15 +634,7 @@ export class Reviews {
         status === "completed" ? "completed" : status === "interrupted" ? "interrupted" : "blocked",
         current.summary ?? undefined,
         error ?? undefined,
-        result.output,
       );
-      if (result.cleanupError) {
-        this.paused = true;
-        this.ctx.logger.error("Review worker cleanup failed; admissions paused", {
-          runId: run.id,
-          error: result.cleanupError,
-        });
-      }
     } catch (err) {
       this.paused = true;
       this.ctx.logger.error("Review result could not be saved; admissions paused", {

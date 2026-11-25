@@ -1,8 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { ExecutionError, ExecutionFailure, type PluginContext, type Turn } from "@picco-agent/core";
+import { ExecutionError, type PluginContext } from "@picco-agent/core";
 import { deliverCallback } from "./callback.js";
-import { createReviewFinishTools } from "./review-finish-tools.js";
 import {
   ReviewFinishSchema,
   type ReviewAttempt,
@@ -15,7 +14,7 @@ import type { GithubReviewResult, GithubReviewsOptions, ReviewSelection } from "
  * Run one selected worker; persistence remains owned by the reviews service.
  */
 interface RunnerOptions {
-  ctx: PluginContext;
+  ctx: Pick<PluginContext, "logger">;
   job: ReviewJob;
   run: ReviewAttempt;
   reviewsDirectory: string;
@@ -27,7 +26,6 @@ interface RunnerOptions {
  * Run a selected review and save one final outcome.
  */
 export function runReview(opts: RunnerOptions) {
-  let turn: Turn | undefined;
   let cancellation: "cancelled" | "shutdown" | undefined;
   const controller = new AbortController();
   const timeoutMs = opts.options.reviewTimeoutMs ?? 3_600_000;
@@ -39,7 +37,6 @@ export function runReview(opts: RunnerOptions) {
     delivery: opts.job.delivery,
     skill: opts.job.skill,
     artifactDirectory,
-    publisherStateFile: path.join(artifactDirectory, "progress.json"),
   };
   let submitted: ReviewFinish | undefined;
   let report: unknown = null;
@@ -50,17 +47,15 @@ export function runReview(opts: RunnerOptions) {
     cancellation ??= shutdown ? "shutdown" : "cancelled";
     const reason = cancellation === "shutdown" ? "Review host stopped" : "Review cancelled";
     controller.abort(new ExecutionError(cancellation, reason));
-    turn?.abort(reason);
   };
   const completion = executeAttempt();
   return { abort, completion };
 
   /**
-   * Validate one final submission and record it before acknowledging success to the worker.
+   * Validate and save the returned report with its outcome.
    */
-  async function submitOutcome(input: ReviewFinish) {
+  function submitOutcome(input: ReviewFinish) {
     if (cancellation) throw new Error("Review has been cancelled");
-    if (submitted) throw new Error("Review outcome already submitted");
     if (Date.now() >= deadline) throw new ExecutionError("timeout", "Review deadline elapsed");
     let finalReport: unknown = null;
     if (input.result !== undefined) {
@@ -78,7 +73,6 @@ export function runReview(opts: RunnerOptions) {
     opts.recordOutcome(input, finalReport);
     report = finalReport;
     submitted = input;
-    return "Review outcome and report recorded.";
   }
 
   /**
@@ -86,8 +80,6 @@ export function runReview(opts: RunnerOptions) {
    */
   async function executeAttempt() {
     let error: string | undefined;
-    let output: string | undefined;
-    let cleanupError: string | undefined;
     try {
       await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
       controller.signal.throwIfAborted();
@@ -106,46 +98,13 @@ export function runReview(opts: RunnerOptions) {
       if (cancellation) throw new Error("Review cancelled before startup");
       if (Date.now() >= deadline)
         throw new ExecutionError("timeout", "Review timed out before worker startup");
-      if (opts.options.runReview) {
-        const outcome = await opts.options.runReview(selection, executionSignal);
-        executionSignal.throwIfAborted();
-        await submitOutcome(ReviewFinishSchema.parse(outcome));
-      } else {
-        const prompt =
-          opts.options.prompt?.(selection) ??
-          [
-            `Use the ${opts.job.skill} skill to review ${opts.run.url} at exactly commit ${opts.run.head}, base ${opts.run.base}.`,
-            `Keep artifacts in ${artifactDirectory}. Do not discover or select another PR.`,
-            opts.job.delivery === "local-only"
-              ? "This review is local-only. Do not publish to GitHub or send notifications."
-              : "Complete the configured publication and verify the live PR head before publishing. Stop if it changed.",
-            "When finished call github_review_finish once, with status, summary and the full result as JSON. Failed or partial work must use status failed with its actual error. A successful launch or final prose is not completion.",
-          ].join("\n\n");
-        turn = opts.ctx.sessions.run(opts.run.sessionKey, prompt, {
-          timeoutMs: Math.max(1, deadline - Date.now()),
-          session: {
-            cwd: artifactDirectory,
-            env: { REVIEW_RUN_ID: opts.run.id },
-            tools: createReviewFinishTools(opts.run.sessionKey, submitOutcome),
-          },
-        });
-        output = (await turn).text;
-      }
+      const outcome = await opts.options.runReview(selection, executionSignal);
+      executionSignal.throwIfAborted();
+      submitOutcome(ReviewFinishSchema.parse(outcome));
     } catch (err) {
-      const primary = err instanceof ExecutionFailure ? err.primary : err;
-      if (primary instanceof ExecutionError && primary.code === "shutdown")
-        cancellation ??= "shutdown";
       error = err instanceof Error ? err.message : "Review execution failed";
-    } finally {
-      if (!opts.options.runReview) {
-        try {
-          await opts.ctx.sessions.reset(opts.run.sessionKey);
-        } catch (err) {
-          cleanupError = err instanceof Error ? err.message : "Review worker teardown failed";
-        }
-      }
     }
-    return { selection, submitted, report, error, output, cleanupError, cancellation };
+    return { selection, submitted, report, error, cancellation };
   }
 }
 
@@ -159,7 +118,6 @@ export async function notifyReview(
   status: GithubReviewResult["status"],
   summary?: string,
   error?: string,
-  output?: string,
 ): Promise<void> {
   if (selection.delivery !== "publish" || !opts.onRunComplete) return;
   const result: GithubReviewResult = {
@@ -168,7 +126,6 @@ export async function notifyReview(
     summary,
     finishedAt: new Date().toISOString(),
     error,
-    output,
   };
   try {
     await deliverCallback(opts.onRunComplete, result);

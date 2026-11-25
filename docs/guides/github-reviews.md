@@ -6,14 +6,16 @@ To address reviews on your own PRs, use the separate [feedback workflow](./githu
 
 ## Configure the plugin
 
-Register the plugin using the usual Pi model, installed review skills and sandbox configuration:
+Supply your application’s review runner when registering the plugin:
 
 ```ts
 import { githubReviews } from "@picco-agent/plugin-github-reviews";
 import { z } from "zod";
+import { runReview } from "./review.js";
 
 const Report = z.object({ markdown: z.string() });
 const reviews = githubReviews({
+  runReview,
   enabled: true,
   repositories: [{ name: "example/widgets", skill: "review" }],
   maxConcurrentReviews: 2,
@@ -56,31 +58,13 @@ Here `createAgent` comes from `@picco-agent/core`; `runtime` is your configured 
 }
 ```
 
-The response contains a saved job ID, not a completed review. Reusing the request ID with the same inputs returns that job, including after restart; conflicting inputs are rejected. The repository and PR number identify the review; prompt URLs are derived from that identity. During known GitHub backoff, new submissions report the retry deadline without additional API calls or an accepted job. Repeating an already accepted key still returns its job. Explicit submissions default to `delivery: "local-only"`, which suppresses GitHub publication and lifecycle callbacks. Set `delivery: "publish"` in the start arguments to use the application’s publication workflow and lifecycle callbacks. Delivery is saved with the job and retained through retries and restarts; changing it requires a new request ID. Neither mode marks an automatic review request handled.
+The response contains a saved job ID, not a completed review. Reusing the request ID with the same inputs returns that job, including after restart; conflicting inputs are rejected. The repository and PR number identify the review; the callback receives the URL derived from that identity. During known GitHub backoff, new submissions report the retry deadline without additional API calls or an accepted job. Repeating an already accepted key still returns its job. Explicit submissions default to `delivery: "local-only"`, which suppresses GitHub publication and notification callbacks. Set `delivery: "publish"` in the start arguments to use the application’s publication workflow and notifications. Delivery is saved with the job and retained through retries and restarts; changing it requires a new request ID. Neither mode marks an automatic review request handled.
 
-Use `github_reviews_details` with `{ "id": "<returned job ID>" }` to inspect its attempts, then `github_reviews_report` with the same ID to retrieve its latest full report. A queued job has no report yet. Failed attempts may retain partial evidence. Reports are bounded to 4 MiB; diagnostic output is a separate bounded preview.
+Use `github_reviews_details` with `{ "id": "<returned job ID>" }` to inspect its attempts, then `github_reviews_report` with the same ID to retrieve its latest full report. A queued job has no report yet. Failed attempts may retain partial evidence. Reports are bounded to 4 MiB.
 
-## Finish a selected review
+## Return a review result
 
-The selected worker receives `github_review_finish`. Its arguments contain the final outcome and JSON-encoded report in one submission:
-
-```json
-{
-  "status": "completed",
-  "summary": "No required changes.",
-  "result": "{\"markdown\":\"No required changes.\"}"
-}
-```
-
-Reports are bounded to 4 MiB; diagnostic output is a separate bounded preview. With `resultSchema`, a completed review must supply a non-null report accepted by that schema. The host saves the parsed report together with completion. Without a schema, generic JSON or summary-only completion is allowed. Failed outcomes can retain partial JSON without applying the completed-report schema. Only the selected review session may call this tool. A launch receipt or final prose does not complete a review. For unsuccessful work, use `status: "failed"`, its actual `error`, and an optional partial `result`. `github_review_complete` remains a compatibility adapter for successful submissions through the same path; it accepts `summary` and optional `result`. Both worker tools belong to the selected review session.
-
-The application can supply `prompt(selection)` for its saved workflow and report format. Finish and verify required GitHub publication before declaring success. Picco does not independently verify that write. Recorded completion remains complete if later worker cleanup fails, with cleanup failure reported separately.
-
-Use `onRunStart` and `onRunComplete` for application notifications on published reviews. Callback failure is logged and does not repeat execution or change a saved successful outcome. Callbacks are bounded to 30 seconds. Cancellation or the review deadline also ends the start-callback wait; worker startup receives only the time remaining in the original review budget. Notification delivery is best effort, without a persistent delivery/reconciliation protocol.
-
-## Run reviews in application code
-
-Use `runReview` when your application can start its workflow directly. The callback receives the selected PR, pinned revisions, delivery mode and cancellation signal. It returns the final outcome for Picco to save:
+The required `runReview` callback receives the selected PR, pinned revisions, delivery mode and cancellation signal. It returns the final outcome for Picco to save:
 
 ```ts
 const reviews = githubReviews({
@@ -95,13 +79,11 @@ const reviews = githubReviews({
 });
 ```
 
-Here `runWorkflow` is application code that prepares and runs the review, including any required publication. Picco validates and saves the returned report through the same result path as the selected finish tool. Failed outcomes can return an error and a partial report.
+Here `runWorkflow` is application code that prepares and runs the review, including any required publication. Picco validates and saves the returned report together with its outcome. Reports are bounded to 4 MiB. With `resultSchema`, completed reviews require a non-null report accepted by that schema. Failed outcomes can return an error and a partial report.
 
-The callback runs for both delivery modes without opening a Picco session or calling a launcher model. It must honour the cancellation signal and await its worker's cleanup before returning or throwing. The original review deadline aborts that signal, and cancellation waits for the callback to settle before releasing the worker slot. Background workflow holds are not used for this path.
+The callback runs for both delivery modes without opening a Picco session or calling a launcher model. It must honour the cancellation signal and await its worker's cleanup before returning or throwing. The original review deadline aborts that signal, and cancellation waits for the callback to settle before releasing the worker slot.
 
-## Run a saved Pi workflow
-
-Install pi-subagents and the saved workflow into the worker's Pi profile. Set `holdWorkflows: true` and supply a prompt that launches `SubagentWorkflow`, yields, waits for its completion notification, verifies its result and calls `github_review_finish`. The initial task ID acknowledges launch only. The host retains the review execution and concurrency slot through the background workflow and parent follow-up, under its original deadline. Failed or stopped workflows fail execution.
+Use `onRunStart` and `onRunComplete` for notifications on published reviews. Notification failures do not repeat execution or change a saved successful outcome. Notification callbacks are bounded to 30 seconds; the review runner itself uses the original review deadline.
 
 ## Inspect, cancel and retry
 
@@ -109,8 +91,8 @@ Install pi-subagents and the saved workflow into the worker's Pi profile. Set `h
 
 `github_reviews_cancel` stops queued work or waits for active worker teardown. `github_reviews_retry` queues a fresh attempt of an unsuccessful job and retains earlier results. Retry while queued or active does not enqueue another attempt. A delayed duplicate retry after its attempt finishes can start another run; there is no per-command receipt protocol. Completed jobs require a new submission request ID or a newer automatic review request.
 
-On crash or normal shutdown, unfinished attempts become interrupted and restart as new sessions at the current PR revisions. Completed, genuinely failed and manually cancelled jobs stay stopped. There is no workflow resumption, persistent dispatcher lease, publication claim or operator attestation. Do not run overlapping hosts against one directory.
+On crash or normal shutdown, unfinished attempts become interrupted and restart as new attempts at the current PR revisions. Completed, genuinely failed and manually cancelled jobs stay stopped. There is no workflow resumption, persistent dispatcher lease, publication claim or operator attestation. Do not run overlapping hosts against one directory.
 
 Publication remains application policy. Best-effort reuse of the authenticated author's comment on the same PR and full commit can reduce duplicates after restart. GitHub publication and SQLite completion are separate operations, so this does not guarantee exactly-once comments.
 
-The exported `GithubReviewsOptions` type is the configuration reference. See [Plugins](./plugins.md) for lifecycle and [Sessions](../concepts/sessions.md) for worker ownership.
+The exported `GithubReviewsOptions` type is the configuration reference. See [Plugins](./plugins.md) for lifecycle.
