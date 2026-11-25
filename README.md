@@ -45,6 +45,20 @@ await agent.stop();
 ANTHROPIC_API_KEY=... node assistant.mjs
 ```
 
+### Workflows in application code
+
+Write a workflow as an ordinary async function. Call it while the agent is started; Picco runs each model step in a fresh managed session.
+
+```ts
+async function writeUpdate(changes: string) {
+  const draft = await agent.run(`Draft a project update from these changes: ${changes}`);
+  const edited = await agent.run(`Make this update clear and brief: ${draft.text}`);
+  return edited.text;
+}
+```
+
+Your code owns the order, shared state and saving. See [Build workflows](docs/guides/workflows.md) for structured answers, cancellation and tool access.
+
 ### Always-on Telegram assistant
 
 Add the Telegram and cron plugins and the bubblewrap runtime:

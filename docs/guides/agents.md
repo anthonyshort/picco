@@ -93,6 +93,8 @@ Each call creates a session, runs one turn, and stops the process. Plugins can d
 `ctx.run()`. Picco limits concurrent one-shot runs to prevent background work from creating
 unbounded processes; configure the limit with `sessions.maxRuns` when needed.
 
+Use these calls inside ordinary application functions to [build workflows](./workflows.md) with several steps, structured results and cancellation.
+
 ## Reclaim idle processes
 
 Sessions stay live by default. Enable idle eviction when a long-running assistant may accumulate

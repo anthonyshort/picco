@@ -66,6 +66,8 @@ Use `github_reviews_details` with `{ "id": "<returned job ID>" }` to inspect its
 
 The required `runReview` callback receives the selected PR, pinned revisions, delivery mode and cancellation signal. It returns the final outcome for Picco to save:
 
+Implement it as an ordinary async function. [Build workflows](./workflows.md) shows how that function can run model stages through Picco while keeping preparation, state and publication in application code.
+
 ```ts
 const reviews = githubReviews({
   runReview: async (selection, signal) => {

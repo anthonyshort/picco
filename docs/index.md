@@ -21,6 +21,7 @@ extensions, skills, or packages.
 ## Build
 
 - [Agents](./guides/agents.md) — create an agent, run conversations, and run one-shot work.
+- [Workflows](./guides/workflows.md) — run application code with managed model steps and structured results.
 - [Configure Pi](./guides/configuring-pi.md) — choose a model and add instructions or Pi resources.
 - [Tools](./guides/tools.md) — expose controlled host-side capabilities.
 - [Plugins](./guides/plugins.md) — add gateways, services, commands, and session behaviour.
