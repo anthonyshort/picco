@@ -2,22 +2,20 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import { silentLogger } from "@picco-agent/core";
-import { createFakePluginContext, type FakePluginContext } from "@picco-agent/core/testing";
 import { runReview } from "./runner.js";
 import type { ReviewJob, ReviewAttempt, ReviewFinish } from "./review-types.js";
 import type { GithubReviewsOptions } from "./types.js";
 
 interface RunnerFixtureOptions {
-  options?: GithubReviewsOptions;
+  options?: Partial<GithubReviewsOptions>;
   delivery?: ReviewJob["delivery"];
-  reply?: (ctx: FakePluginContext) => Promise<string>;
 }
 
 const directories: string[] = [];
-const FINISH_TOOLS = ["github_review_finish", "github_review_complete"] as const;
 
 afterEach(() => {
   vi.useRealTimers();
@@ -70,16 +68,16 @@ function startRunner(input: RunnerFixtureOptions = {}) {
     report: null,
   };
   const records: { outcome: ReviewFinish; report: unknown }[] = [];
-  const ctx = createFakePluginContext({
-    source: "github-reviews",
-    reply: () => input.reply?.(ctx) ?? "Done",
-  });
+  const ctx = { logger: silentLogger() };
   const worker = runReview({
     ctx,
     job,
     run,
     reviewsDirectory: directory,
-    options: input.options ?? {},
+    options: {
+      runReview: async () => ({ status: "completed", summary: "Reviewed" }),
+      ...input.options,
+    },
     recordOutcome: (outcome, report) => {
       records.push({ outcome, report });
     },
@@ -87,123 +85,129 @@ function startRunner(input: RunnerFixtureOptions = {}) {
   return { ctx, worker, records };
 }
 
-async function submit(ctx: FakePluginContext, name: string, input: object) {
-  const selected = ctx.sessionTools[0].tools.find((entry) => entry.name === name)!;
-  return selected.execute(selected.input.parse(input), {
-    caller: { kind: "session", ref: { source: "github-reviews", key: "selected" } },
-    logger: silentLogger(),
-  });
-}
-
-function completed(name: string, result?: string) {
-  return name === "github_review_finish"
-    ? { status: "completed", summary: "Done", result }
-    : { summary: "Done", result };
-}
-
 describe("review runner", () => {
+  describe("application review runner", () => {
+    test.each(["publish", "local-only"] as const)(
+      "saves the %s runner's result without a session",
+      async (delivery) => {
+        const report = { markdown: "Full report".repeat(20_000) };
+        const customRunner = vi.fn(
+          async (
+            selection: Parameters<NonNullable<GithubReviewsOptions["runReview"]>>[0],
+            signal: AbortSignal,
+          ): Promise<ReviewFinish> => {
+            expect(selection.delivery).toBe(delivery);
+            expect(selection.run.head).toBe("a".repeat(40));
+            expect(signal.aborted).toBe(false);
+            return { status: "completed", summary: "Reviewed", result: JSON.stringify(report) };
+          },
+        );
+        const fixture = startRunner({
+          delivery,
+          options: { runReview: customRunner, resultSchema: z.object({ markdown: z.string() }) },
+        });
+        const result = await fixture.worker.completion;
+        expect(result.submitted?.status).toBe("completed");
+        expect(result.report).toEqual(report);
+        expect(fixture.records).toHaveLength(1);
+        expect(customRunner).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    test("retains a failed runner's partial report", async () => {
+      const fixture = startRunner({
+        options: {
+          resultSchema: z.object({ markdown: z.string() }),
+          runReview: async () => ({
+            status: "failed",
+            error: "Missing evidence",
+            result: '{"inspected":["file.ts"]}',
+          }),
+        },
+      });
+      const result = await fixture.worker.completion;
+      expect(result.submitted?.status).toBe("failed");
+      expect(fixture.records).toEqual([
+        {
+          outcome: {
+            status: "failed",
+            error: "Missing evidence",
+            result: '{"inspected":["file.ts"]}',
+          },
+          report: { inspected: ["file.ts"] },
+        },
+      ]);
+    });
+
+    test("rejects an invalid completed outcome without saving it", async () => {
+      const fixture = startRunner({
+        options: { runReview: async () => ({ status: "completed" }) },
+      });
+      expect((await fixture.worker.completion).error).toContain(
+        "Completed reviews require a summary",
+      );
+      expect(fixture.records).toEqual([]);
+    });
+
+    test("keeps the runner's error without starting a fallback session", async () => {
+      const fixture = startRunner({
+        options: {
+          runReview: async () => {
+            throw new Error("Pinned head changed");
+          },
+        },
+      });
+      expect((await fixture.worker.completion).error).toBe("Pinned head changed");
+      expect(fixture.records).toEqual([]);
+    });
+
+    test.each(["cancel", "timeout"] as const)(
+      "awaits runner teardown after %s before finishing",
+      async (reason) => {
+        const started = Promise.withResolvers<AbortSignal>();
+        const aborted = Promise.withResolvers<void>();
+        const cleanup = Promise.withResolvers<void>();
+        const fixture = startRunner({
+          options: {
+            reviewTimeoutMs: reason === "timeout" ? 50 : 1000,
+            runReview: async (selection, signal) => {
+              expect(selection.delivery).toBe("local-only");
+              started.resolve(signal);
+              await new Promise<void>((resolve) =>
+                signal.addEventListener("abort", () => resolve(), { once: true }),
+              );
+              aborted.resolve();
+              await cleanup.promise;
+              return { status: "completed", summary: "Too late" };
+            },
+          },
+        });
+        const signal = await started.promise;
+        let settled = false;
+        void fixture.worker.completion.then(() => {
+          settled = true;
+          return undefined;
+        });
+        if (reason === "cancel") fixture.worker.abort();
+        await aborted.promise;
+        await setImmediate();
+        expect(signal.aborted).toBe(true);
+        expect(settled).toBe(false);
+        cleanup.resolve();
+        const result = await fixture.worker.completion;
+        expect(result.error).toBeDefined();
+        expect(result.submitted).toBeUndefined();
+        expect(fixture.records).toEqual([]);
+      },
+    );
+  });
+
   test("shutdown does not replace an earlier manual cancellation", async () => {
     const fixture = startRunner();
     fixture.worker.abort();
     fixture.worker.abort(true);
     expect((await fixture.worker.completion).cancellation).toBe("cancelled");
     expect(fixture.records).toEqual([]);
-  });
-
-  test.each(FINISH_TOOLS)(
-    "%s validates required reports and records only an accepted report",
-    async (name) => {
-      const fixture = startRunner({
-        options: { resultSchema: z.object({ markdown: z.string() }) },
-        reply: async (ctx) => {
-          for (const invalid of [undefined, "null", "{", "{}"])
-            await expect(submit(ctx, name, completed(name, invalid))).rejects.toThrow();
-          await submit(
-            ctx,
-            name,
-            completed(name, JSON.stringify({ markdown: "Report", ignored: true })),
-          );
-          await expect(
-            submit(ctx, name, completed(name, JSON.stringify({ markdown: "Replacement" }))),
-          ).rejects.toThrow("already submitted");
-          return "Done";
-        },
-      });
-      const result = await fixture.worker.completion;
-      expect(result.submitted?.status).toBe("completed");
-      expect(fixture.records).toHaveLength(1);
-      expect(fixture.records[0].report).toEqual({ markdown: "Report" });
-    },
-  );
-
-  test.each([undefined, null])(
-    "a schema cannot discard a required report to %s",
-    async (output) => {
-      const fixture = startRunner({
-        options: { resultSchema: z.unknown().transform(() => output) },
-        reply: async (ctx) => {
-          await expect(
-            submit(
-              ctx,
-              "github_review_finish",
-              completed("github_review_finish", '{"markdown":"Report"}'),
-            ),
-          ).rejects.toThrow("report is required");
-          return "No completion";
-        },
-      });
-      expect((await fixture.worker.completion).submitted).toBeUndefined();
-      expect(fixture.records).toEqual([]);
-    },
-  );
-
-  test("failed work retains useful partial JSON without applying the complete-report schema", async () => {
-    const partial = { evidence: ["One inspected file"] };
-    const fixture = startRunner({
-      options: { resultSchema: z.object({ markdown: z.string() }) },
-      reply: async (ctx) => {
-        await submit(ctx, "github_review_finish", {
-          status: "failed",
-          error: "Missing evidence",
-          result: JSON.stringify(partial),
-        });
-        return "Stopped";
-      },
-    });
-    expect((await fixture.worker.completion).submitted?.status).toBe("failed");
-    expect(fixture.records[0].report).toEqual(partial);
-  });
-
-  test("direct skills can complete with a summary when no report schema is configured", async () => {
-    const fixture = startRunner({
-      reply: async (ctx) => {
-        await submit(ctx, "github_review_complete", { summary: "Reviewed" });
-        return "Done";
-      },
-    });
-    expect((await fixture.worker.completion).submitted?.status).toBe("completed");
-    expect(fixture.records).toEqual([
-      { outcome: { status: "completed", summary: "Reviewed" }, report: null },
-    ]);
-  });
-
-  test.each(FINISH_TOOLS)("%s enforces the UTF-8 limit at and beyond 4 MiB", async (name) => {
-    const limit = 4 * 1024 * 1024;
-    const exact = JSON.stringify("é".repeat((limit - 2) / 2));
-    const oversized = JSON.stringify("é".repeat(limit / 2));
-    expect(Buffer.byteLength(exact)).toBe(limit);
-    expect(oversized.length).toBeLessThan(limit);
-    const fixture = startRunner({
-      options: { resultSchema: z.string() },
-      reply: async (ctx) => {
-        await expect(submit(ctx, name, completed(name, oversized))).rejects.toThrow("4 MiB");
-        await submit(ctx, name, completed(name, exact));
-        return "Done";
-      },
-    });
-    expect((await fixture.worker.completion).submitted?.status).toBe("completed");
-    expect(fixture.records).toHaveLength(1);
-    expect(fixture.records[0].report).toHaveLength((limit - 2) / 2);
   });
 
   test("cancellation ends a pending start notification without starting a worker", async () => {
@@ -221,7 +225,6 @@ describe("review runner", () => {
     await started.promise;
     fixture.worker.abort();
     expect((await fixture.worker.completion).cancellation).toBe("cancelled");
-    expect(fixture.ctx.turns).toEqual([]);
     delivery.resolve();
   });
 
@@ -234,52 +237,58 @@ describe("review runner", () => {
     const result = await fixture.worker.completion;
     expect(result.error).toContain("timed out before worker startup");
     expect(result.cancellation).toBeUndefined();
-    expect(fixture.ctx.turns).toEqual([]);
     delivery.resolve();
   });
 
-  test("worker startup receives only the time remaining after notification", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-11-04T12:00:00Z"));
-    const started = Promise.withResolvers<void>();
-    const delivery = Promise.withResolvers<void>();
-    const fixture = startRunner({
-      delivery: "publish",
-      options: {
-        reviewTimeoutMs: 1_000,
-        onRunStart: () => {
-          started.resolve();
-          return delivery.promise;
+  test.each([undefined, "null", "{", "{}"])(
+    "rejects an invalid report %s without saving",
+    async (result) => {
+      const fixture = startRunner({
+        options: {
+          resultSchema: z.object({ markdown: z.string() }),
+          runReview: async () => ({ status: "completed", summary: "Reviewed", result }),
         },
+      });
+      expect((await fixture.worker.completion).error).toBeDefined();
+      expect(fixture.records).toEqual([]);
+    },
+  );
+
+  test.each([undefined, null])("rejects a schema that discards the report to %s", async (value) => {
+    const fixture = startRunner({
+      options: {
+        resultSchema: z.unknown().transform(() => value),
+        runReview: async () => ({
+          status: "completed",
+          summary: "Reviewed",
+          result: '{"markdown":"Report"}',
+        }),
       },
     });
-    const run = fixture.ctx.sessions.run;
-    const budgets: (number | undefined)[] = [];
-    fixture.ctx.sessions.run = (key, prompt, options) => {
-      budgets.push(options?.timeoutMs);
-      return run(key, prompt, options);
-    };
-    await started.promise;
-    vi.setSystemTime(new Date("2026-11-04T12:00:00.400Z"));
-    delivery.resolve();
-    await fixture.worker.completion;
-    expect(budgets).toEqual([600]);
+    expect((await fixture.worker.completion).error).toContain("report is required");
+    expect(fixture.records).toEqual([]);
   });
 
-  test("recorded completion survives a later worker execution error", async () => {
-    const fixture = startRunner({
-      reply: async (ctx) => {
-        await submit(
-          ctx,
-          "github_review_finish",
-          completed("github_review_finish", '{"markdown":"Report"}'),
-        );
-        throw new Error("Worker disconnected after completion");
-      },
-    });
-    const result = await fixture.worker.completion;
-    expect(result.submitted?.status).toBe("completed");
-    expect(result.error).toContain("disconnected");
-    expect(fixture.records[0].report).toEqual({ markdown: "Report" });
-  });
+  test.each([false, true])(
+    "checks the 4 MiB UTF-8 result boundary, oversized=%s",
+    async (oversized) => {
+      const limit = 4 * 1024 * 1024;
+      const result = JSON.stringify("é".repeat((limit - (oversized ? 0 : 2)) / 2));
+      const fixture = startRunner({
+        options: {
+          resultSchema: z.string(),
+          runReview: async () => ({ status: "completed", summary: "Reviewed", result }),
+        },
+      });
+      const outcome = await fixture.worker.completion;
+      if (oversized) {
+        expect(outcome.error).toContain("4 MiB");
+        expect(fixture.records).toEqual([]);
+      } else {
+        expect(outcome.submitted?.status).toBe("completed");
+        expect(fixture.records).toHaveLength(1);
+        expect(fixture.records[0].report).toHaveLength((limit - 2) / 2);
+      }
+    },
+  );
 });

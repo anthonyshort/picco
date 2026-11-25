@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CandidateSchema, type GithubSourceOptions } from "./github.js";
-import { ReviewAttemptSchema } from "./review-types.js";
+import { ReviewAttemptSchema, type ReviewFinish } from "./review-types.js";
 
 /**
  * Validated polling and admission settings; callbacks stay in the host process.
@@ -8,10 +8,6 @@ import { ReviewAttemptSchema } from "./review-types.js";
 export const GithubReviewsSettingsSchema = z
   .object({
     enabled: z.boolean().default(false),
-    /**
-     * Hold accepted saved workflows until the review parent handles their completion.
-     */
-    holdWorkflows: z.boolean().default(false),
     repositories: z
       .array(
         z
@@ -43,14 +39,13 @@ export const GithubReviewsSettingsSchema = z
   });
 
 /**
- * Immutable admission plus the writable session directory assigned to this review.
+ * Immutable selection and the artifact directory assigned to this review.
  */
 export const ReviewSelectionSchema = z.object({
   run: ReviewAttemptSchema,
   delivery: z.enum(["publish", "local-only"]),
   skill: z.string(),
   artifactDirectory: z.string(),
-  publisherStateFile: z.string(),
 });
 
 /**
@@ -61,7 +56,6 @@ export const GithubReviewResultSchema = z.object({
   status: z.enum(["completed", "blocked", "interrupted"]),
   finishedAt: z.iso.datetime(),
   summary: z.string().optional(),
-  output: z.string().optional(),
   error: z.string().optional(),
 });
 
@@ -71,7 +65,7 @@ export const GithubReviewResultSchema = z.object({
 export type GithubReviewsSettings = z.infer<typeof GithubReviewsSettingsSchema>;
 
 /**
- * Selection passed to an application's prompt builder.
+ * Selected PR and artifact directory passed to the application runner.
  */
 export type ReviewSelection = z.infer<typeof ReviewSelectionSchema>;
 
@@ -84,7 +78,11 @@ export type GithubReviewResult = z.infer<typeof GithubReviewResultSchema>;
  * Public plugin options; authentication uses the host's GitHub CLI by default.
  */
 export type GithubReviewsOptions = z.input<typeof GithubReviewsSettingsSchema> & {
-  prompt?: (selection: ReviewSelection) => string;
+  /**
+   * Run the selected review in application code, returning its final outcome after cleanup. Must
+   * honour cancellation and await all owned work before returning.
+   */
+  runReview: (selection: ReviewSelection, signal: AbortSignal) => Promise<ReviewFinish>;
   /**
    * Report an admitted review before worker startup. Waits up to 30 seconds; failure is logged
    * without stopping the review or retrying the callback.

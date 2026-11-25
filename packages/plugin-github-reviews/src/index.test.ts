@@ -2,18 +2,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import {
-  createFakePluginContext,
-  FakeRuntime,
-  type FakePluginContext,
-} from "@picco-agent/core/testing";
+import { createFakePluginContext, FakeRuntime } from "@picco-agent/core/testing";
 import { createAgent, silentLogger, type Plugin, type ToolContext } from "@picco-agent/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import { githubReviews } from "./index.js";
+import type { ReviewFinish } from "./review-types.js";
 import { GithubReviewSourceError, type GithubExecute } from "./github.js";
-import type { GithubReviewsOptions } from "./types.js";
+import type { GithubReviewsOptions, ReviewSelection } from "./types.js";
 
 const Repository = "owner/project";
 const Head = "a".repeat(40);
@@ -150,39 +147,23 @@ async function invoke(plugin: Plugin, name: string, input = {}) {
   return JSON.parse(String(await selected.execute(selected.input.parse(input), ToolContext)));
 }
 
-async function finish(
-  ctx: FakePluginContext,
-  key: string,
-  value = {
+function completedReview(): ReviewFinish {
+  return {
     status: "completed",
     summary: "Reviewed",
     result: JSON.stringify({ markdown: "Full report" }),
-  },
-) {
-  const selected = ctx.sessionTools
-    .find((entry) => entry.key === key)!
-    .tools.find((entry) => entry.name === "github_review_finish")!;
-  return selected.execute(selected.input.parse(value), {
-    caller: { kind: "session", ref: { source: "github-reviews", key } },
-    logger: silentLogger(),
-  });
+  };
 }
 
 async function start(
   options: Partial<GithubReviewsOptions> = {},
-  reply?: (ctx: FakePluginContext, key: string) => Promise<string>,
+  callback?: GithubReviewsOptions["runReview"],
   fixture = createGithubFixture(),
 ) {
   const starts: string[] = [];
   const ends: string[] = [];
-  const ctx = createFakePluginContext({
-    source: "github-reviews",
-    reply: async ({ key }) => {
-      if (reply) return reply(ctx, key!);
-      await finish(ctx, key!);
-      return "Done";
-    },
-  });
+  const reviewCalls: ReviewSelection[] = [];
+  const ctx = createFakePluginContext({ source: "github-reviews" });
   const plugin = githubReviews({
     enabled: true,
     repositories: [{ name: Repository, skill: "review" }],
@@ -195,10 +176,14 @@ async function start(
       ends.push(selection.run.id);
     },
     ...options,
+    runReview: async (selection, signal) => {
+      reviewCalls.push(selection);
+      return (options.runReview ?? callback)?.(selection, signal) ?? completedReview();
+    },
   });
   await plugin.start!(ctx);
   plugins.push(plugin);
-  return { ...fixture, ctx, plugin, starts, ends };
+  return { ...fixture, ctx, plugin, starts, ends, reviewCalls };
 }
 
 async function idle(plugin: Plugin) {
@@ -217,37 +202,13 @@ async function realHost(
   mode: "wait" | "complete" | "failed",
   enabled = false,
   options: Partial<GithubReviewsOptions> = {},
-  afterFinish?: () => Promise<void>,
 ) {
   const responseSchema = z.object({
     isError: z.boolean().optional(),
     content: z.array(z.object({ type: z.literal("text"), text: z.string() })).max(10),
   });
-  const runtime = new FakeRuntime({
-    neverFinish: mode === "wait",
-    async reply() {
-      const spawn = runtime.spawns.at(-1)!;
-      const response = await fetch(spawn.spec.bridge.url, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${spawn.spec.bridge.token}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          tool: "github_review_finish",
-          args: {
-            status: mode === "failed" ? "failed" : "completed",
-            summary: mode === "failed" ? undefined : "Done",
-            error: mode === "failed" ? "Incomplete evidence" : undefined,
-            result: JSON.stringify({ markdown: "Full report" }),
-          },
-        }),
-      });
-      expect(responseSchema.parse(await response.json()).isError).toBe(false);
-      await afterFinish?.();
-      return "Finished";
-    },
-  });
+  const runtime = new FakeRuntime();
+  const reviewCalls: ReviewSelection[] = [];
   const plugin = githubReviews({
     enabled,
     repositories: [{ name: Repository, skill: "review" }],
@@ -256,6 +217,24 @@ async function realHost(
     resultSchema: z.object({ markdown: z.string() }),
     maxConcurrentReviews: 1,
     ...options,
+    runReview: async (selection, signal) => {
+      reviewCalls.push(selection);
+      if (options.runReview) return options.runReview(selection, signal);
+      if (mode === "wait") {
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        signal.throwIfAborted();
+      }
+      return mode === "failed"
+        ? {
+            status: "failed",
+            error: "Incomplete evidence",
+            result: JSON.stringify({ markdown: "Full report" }),
+          }
+        : completedReview();
+    },
   });
   let url = "";
   const agent = createAgent({
@@ -281,6 +260,7 @@ async function realHost(
   return {
     agent,
     runtime,
+    reviewCalls,
     plugin,
     client,
     async call(name: string, input = {}) {
@@ -295,11 +275,65 @@ async function realHost(
   };
 }
 
-async function pollReview(plugin: Plugin) {
-  await invoke(plugin, "github_reviews_poll");
-  return (await invoke(plugin, "github_reviews_list"))[0];
-}
 describe("GitHub reviews plugin", () => {
+  test.each(["local-only", "publish"] as const)(
+    "saves application results through MCP and SQLite for %s",
+    async (delivery) => {
+      const report = { markdown: "Full report ".repeat(20_000) };
+      const runReview = vi.fn(
+        async (
+          selection: Parameters<NonNullable<GithubReviewsOptions["runReview"]>>[0],
+          signal: AbortSignal,
+        ) => {
+          expect(selection.delivery).toBe(delivery);
+          expect(signal.aborted).toBe(false);
+          return {
+            status: "completed" as const,
+            summary: "Reviewed",
+            result: JSON.stringify(report),
+          };
+        },
+      );
+      const fixture = createGithubFixture();
+      const host = await realHost(fixture, "complete", false, { runReview });
+      let id: string;
+      try {
+        const job = await host.call("github_reviews_start", {
+          repository: Repository,
+          number: 42,
+          requestId: `application-${delivery}`,
+          delivery,
+        });
+        id = job.id;
+        await idle(host.plugin);
+        const saved = await host.call("github_reviews_report", { id });
+        expect(saved.job.status).toBe("completed");
+        expect(saved.report).toEqual(report);
+        expect(saved.partial).toBe(false);
+        expect((await host.call("github_reviews_details", { id })).runs).toHaveLength(1);
+        expect(runReview).toHaveBeenCalledTimes(1);
+        expect(host.runtime.spawns).toEqual([]);
+      } finally {
+        await host.stop();
+      }
+      const reopened = await realHost(fixture, "complete", false, { runReview });
+      try {
+        expect((await reopened.call("github_reviews_report", { id })).report).toEqual(report);
+        expect(reopened.runtime.spawns).toEqual([]);
+        expect(runReview).toHaveBeenCalledTimes(1);
+      } finally {
+        await reopened.stop();
+      }
+    },
+  );
+
+  test.each(["null", "{}", '{"runReview":true}'])(
+    "requires an application runner at construction for %s",
+    (input) => {
+      expect(() => githubReviews(JSON.parse(input))).toThrow("Configure runReview");
+    },
+  );
+
   test.each([true, false])(
     "polling handles a request once across commits and restart, timeline=%s",
     async (timeline) => {
@@ -312,13 +346,13 @@ describe("GitHub reviews plugin", () => {
       current.state.head = "c".repeat(40);
       vi.setSystemTime(new Date("2026-10-26T12:02:00Z"));
       await invoke(current.plugin, "github_reviews_poll");
-      expect(current.ctx.turns).toHaveLength(1);
+      expect(current.reviewCalls).toHaveLength(1);
       await current.plugin.stop!();
       const restarted = await start({ enabled: true });
       restarted.state.head = "c".repeat(40);
       restarted.state.timeline = true;
       await invoke(restarted.plugin, "github_reviews_poll");
-      expect(restarted.ctx.turns).toHaveLength(0);
+      expect(restarted.reviewCalls).toHaveLength(0);
       expect((await invoke(restarted.plugin, "github_reviews_list"))[0].id).toBe(first.id);
       restarted.state.request = "request:second";
       restarted.state.requestedAt = "2026-10-26T12:03:00Z";
@@ -340,7 +374,7 @@ describe("GitHub reviews plugin", () => {
     current.state.head = "c".repeat(40);
     vi.setSystemTime(new Date("2026-10-26T12:02:00Z"));
     await invoke(current.plugin, "github_reviews_poll");
-    expect(current.ctx.turns).toHaveLength(1);
+    expect(current.reviewCalls).toHaveLength(1);
     expect(
       (
         await invoke(current.plugin, "github_reviews_details", {
@@ -350,104 +384,24 @@ describe("GitHub reviews plugin", () => {
     ).toContain("authentication");
   });
 
-  test("a request after declared completion is accepted before old worker cleanup finishes", async () => {
-    const hold = gate();
-    const current = await start({ enabled: true, maxConcurrentReviews: 1 }, async (ctx, key) => {
-      await finish(ctx, key);
-      await hold.promise;
-      return "Done";
-    });
-    await invoke(current.plugin, "github_reviews_poll");
-    await vi.waitFor(async () =>
-      expect((await invoke(current.plugin, "github_reviews_list"))[0]?.status).toBe("completed"),
-    );
-    current.state.request = "request:new";
-    current.state.requestedAt = "2026-10-26T12:01:00Z";
-    vi.setSystemTime(new Date("2026-10-26T12:02:00Z"));
-    await invoke(current.plugin, "github_reviews_poll");
-    expect(await invoke(current.plugin, "github_reviews_list")).toHaveLength(2);
-    expect(current.ctx.turns).toHaveLength(1);
-    hold.resolve();
-    await vi.waitFor(() => expect(current.ctx.turns).toHaveLength(2));
-    await idle(current.plugin);
-  });
-
-  test("plain output cannot declare completion and retries retain previous errors", async () => {
-    const current = await start({}, async () => "Review complete");
-    const job = await pollReview(current.plugin);
-    await vi.waitFor(async () =>
-      expect(
-        (await invoke(current.plugin, "github_reviews_details", { id: job.id })).job.status,
-      ).toBe("failed"),
-    );
-    await idle(current.plugin);
-    await invoke(current.plugin, "github_reviews_retry", { id: job.id });
-    await vi.waitFor(async () =>
-      expect(
-        (await invoke(current.plugin, "github_reviews_details", { id: job.id })).runs,
-      ).toHaveLength(2),
-    );
-    await idle(current.plugin);
-    expect(
-      (await invoke(current.plugin, "github_reviews_details", { id: job.id })).runs.every(
-        (run: { status: string }) => run.status === "failed",
-      ),
-    ).toBe(true);
-  });
-
   test("pause is in memory and worker slots remain held until teardown", async () => {
     const hold = gate();
-    const current = await start({ maxConcurrentReviews: 1 }, async (ctx, key) => {
-      await finish(ctx, key);
+    const current = await start({ maxConcurrentReviews: 1 }, async () => {
       await hold.promise;
-      return "Done";
+      return completedReview();
     });
     current.state.numbers = [42, 43];
     await invoke(current.plugin, "github_reviews_poll");
-    await vi.waitFor(() => expect(current.ctx.turns).toHaveLength(1));
+    await vi.waitFor(() => expect(current.reviewCalls).toHaveLength(1));
     expect(await invoke(current.plugin, "github_reviews_list")).toHaveLength(2);
     await invoke(current.plugin, "github_reviews_pause");
     hold.resolve();
     await idle(current.plugin);
-    expect(current.ctx.turns).toHaveLength(1);
+    expect(current.reviewCalls).toHaveLength(1);
     await current.plugin.stop!();
     const restarted = await start();
-    await vi.waitFor(() => expect(restarted.ctx.turns).toHaveLength(1));
+    await vi.waitFor(() => expect(restarted.reviewCalls).toHaveLength(1));
     expect((await invoke(restarted.plugin, "github_reviews_status")).paused).toBe(false);
-  });
-
-  test("a worker cannot finish another session and required reports are validated atomically", async () => {
-    const current = await start(
-      {
-        resultSchema: z.object({ markdown: z.string() }),
-      },
-      async (ctx, key) => {
-        const selected = ctx.sessionTools
-          .find((entry) => entry.key === key)!
-          .tools.find((entry) => entry.name === "github_review_finish")!;
-        await expect(
-          selected.execute(
-            selected.input.parse({ status: "completed", summary: "Done" }),
-            ToolContext,
-          ),
-        ).rejects.toThrow("selected");
-        await expect(
-          finish(ctx, key, { status: "completed", summary: "Done", result: "{}" }),
-        ).rejects.toThrow();
-        await finish(ctx, key);
-        return "Done";
-      },
-    );
-    const job = await pollReview(current.plugin);
-    await vi.waitFor(async () =>
-      expect(
-        (await invoke(current.plugin, "github_reviews_report", { id: job.id })).report,
-      ).toEqual({ markdown: "Full report" }),
-    );
-    await idle(current.plugin);
-    expect(
-      (await invoke(current.plugin, "github_reviews_details", { id: job.id })).job.status,
-    ).toBe("completed");
   });
 
   test("real agent shutdown restarts unfinished automatic reviews at current revisions", async () => {
@@ -458,7 +412,7 @@ describe("GitHub reviews plugin", () => {
       await first.call("github_reviews_poll");
       await vi.waitFor(async () => expect(await first.call("github_reviews_list")).toHaveLength(1));
       id = (await first.call("github_reviews_list"))[0].id;
-      await vi.waitFor(() => expect(first.runtime.spawns).toHaveLength(1));
+      await vi.waitFor(() => expect(first.reviewCalls).toHaveLength(1));
     } finally {
       await first.stop();
     }
@@ -476,12 +430,6 @@ describe("GitHub reviews plugin", () => {
       expect((await second.call("github_reviews_report", { id })).report).toEqual({
         markdown: "Full report",
       });
-      expect(
-        (await second.client.listTools()).tools.some(
-          (entry) =>
-            entry.name === "github_review_finish" || entry.name === "github_review_complete",
-        ),
-      ).toBe(false);
     } finally {
       await second.stop();
     }
@@ -489,7 +437,7 @@ describe("GitHub reviews plugin", () => {
     try {
       await third.call("github_reviews_poll");
       expect((await third.call("github_reviews_details", { id })).job.status).toBe("completed");
-      expect(third.runtime.spawns).toHaveLength(0);
+      expect(third.reviewCalls).toHaveLength(0);
     } finally {
       await third.stop();
     }
@@ -502,7 +450,7 @@ describe("GitHub reviews plugin", () => {
     try {
       await first.call("github_reviews_poll");
       id = (await first.call("github_reviews_list"))[0].id;
-      await vi.waitFor(() => expect(first.runtime.spawns).toHaveLength(1));
+      await vi.waitFor(() => expect(first.reviewCalls).toHaveLength(1));
       expect((await first.call("github_reviews_cancel", { id })).job.status).toBe("cancelled");
     } finally {
       await first.stop();
@@ -510,7 +458,7 @@ describe("GitHub reviews plugin", () => {
     const second = await realHost(fixture, "complete", true);
     try {
       expect((await second.call("github_reviews_details", { id })).job.status).toBe("cancelled");
-      expect(second.runtime.spawns).toHaveLength(0);
+      expect(second.reviewCalls).toHaveLength(0);
     } finally {
       await second.stop();
     }
@@ -518,13 +466,12 @@ describe("GitHub reviews plugin", () => {
 
   test("a newer request queued before earlier completion is not reviewed twice", async () => {
     const beforeFinish = gate();
-    const current = await start({ enabled: true, maxConcurrentReviews: 1 }, async (ctx, key) => {
+    const current = await start({ enabled: true, maxConcurrentReviews: 1 }, async () => {
       await beforeFinish.promise;
-      await finish(ctx, key);
-      return "Done";
+      return completedReview();
     });
     await invoke(current.plugin, "github_reviews_poll");
-    await vi.waitFor(() => expect(current.ctx.turns).toHaveLength(1));
+    await vi.waitFor(() => expect(current.reviewCalls).toHaveLength(1));
     vi.setSystemTime(new Date("2026-10-26T12:02:00Z"));
     current.state.request = "request:second";
     current.state.requestedAt = "2026-10-26T12:01:00Z";
@@ -535,7 +482,7 @@ describe("GitHub reviews plugin", () => {
     await vi.waitFor(async () =>
       expect((await invoke(current.plugin, "github_reviews_list"))[0].status).toBe("cancelled"),
     );
-    expect(current.ctx.turns).toHaveLength(1);
+    expect(current.reviewCalls).toHaveLength(1);
   });
 
   test.each([false, true])(
@@ -551,7 +498,7 @@ describe("GitHub reviews plugin", () => {
         enabled: removed,
         repositories: removed ? [{ name: "owner/other", skill: "review" }] : [],
       });
-      expect(second.ctx.turns).toHaveLength(0);
+      expect(second.reviewCalls).toHaveLength(0);
       expect(
         (await invoke(second.plugin, "github_reviews_details", { id: job.id })).job.status,
       ).toBe("queued");
@@ -571,19 +518,18 @@ describe("GitHub reviews plugin", () => {
           throw new Error("Notification unavailable");
         },
       },
-      async (ctx, key) => {
+      async () => {
         await hold.promise;
-        await finish(ctx, key);
-        return "Done";
+        return completedReview();
       },
     );
     current.state.numbers = [42, 43];
     await invoke(current.plugin, "github_reviews_poll");
-    await vi.waitFor(() => expect(current.ctx.turns).toHaveLength(1));
+    await vi.waitFor(() => expect(current.reviewCalls).toHaveLength(1));
     expect(await invoke(current.plugin, "github_reviews_list")).toHaveLength(2);
-    expect(current.ctx.turns).toHaveLength(1);
+    expect(current.reviewCalls).toHaveLength(1);
     hold.resolve();
-    await vi.waitFor(() => expect(current.ctx.turns).toHaveLength(2));
+    await vi.waitFor(() => expect(current.reviewCalls).toHaveLength(2));
     await idle(current.plugin);
     expect(
       (await invoke(current.plugin, "github_reviews_list")).every(
@@ -601,64 +547,9 @@ describe("GitHub reviews plugin", () => {
     expect(reads).toBe(2);
     await invoke(current.plugin, "github_reviews_poll");
     expect(current.calls).toHaveLength(reads);
-    expect(current.ctx.turns).toHaveLength(0);
+    expect(current.reviewCalls).toHaveLength(0);
   });
 
-  test("retry during a failed worker's cleanup cannot enqueue a second attempt", async () => {
-    const cleanup = gate();
-    const current = await start({}, async (ctx, key) => {
-      const selected = ctx.sessionTools
-        .find((entry) => entry.key === key)!
-        .tools.find((entry) => entry.name === "github_review_finish")!;
-      await selected.execute(
-        selected.input.parse({
-          status: "failed",
-          error: "Incomplete evidence",
-          result: JSON.stringify({ markdown: "Partial report" }),
-        }),
-        {
-          caller: { kind: "session", ref: { source: "github-reviews", key } },
-          logger: silentLogger(),
-        },
-      );
-      await cleanup.promise;
-      return "Failed";
-    });
-    const job = await pollReview(current.plugin);
-    await vi.waitFor(async () =>
-      expect(
-        (await invoke(current.plugin, "github_reviews_details", { id: job.id })).job.status,
-      ).toBe("failed"),
-    );
-    expect((await invoke(current.plugin, "github_reviews_retry", { id: job.id })).job.status).toBe(
-      "failed",
-    );
-    cleanup.resolve();
-    await idle(current.plugin);
-    expect(current.ctx.turns).toHaveLength(1);
-    expect((await invoke(current.plugin, "github_reviews_report", { id: job.id })).report).toEqual({
-      markdown: "Partial report",
-    });
-  });
-
-  test("worker cleanup failure preserves a recorded completion and reports the failure", async () => {
-    const current = await start();
-    current.ctx.sessions.reset = async () => {
-      throw new Error("Worker termination failed");
-    };
-    const job = await pollReview(current.plugin);
-    await vi.waitFor(async () =>
-      expect(
-        (await invoke(current.plugin, "github_reviews_details", { id: job.id })).runs[0]
-          ?.cleanupError,
-      ).toContain("termination"),
-    );
-    await idle(current.plugin);
-    expect(
-      (await invoke(current.plugin, "github_reviews_details", { id: job.id })).job.status,
-    ).toBe("completed");
-    expect((await invoke(current.plugin, "github_reviews_status")).paused).toBe(true);
-  });
   test.each(["resolve", "inspect"] as const)(
     "known %s limits retain queued work and resume after backoff and restart",
     async (operation) => {
@@ -683,7 +574,7 @@ describe("GitHub reviews plugin", () => {
       await invoke(current.plugin, "github_reviews_retry", { id: jobs[0].id });
       await vi.advanceTimersByTimeAsync(999);
       expect(fixture.reads).toHaveLength(reads);
-      expect(current.ctx.turns).toEqual([]);
+      expect(current.reviewCalls).toEqual([]);
       await current.plugin.stop!();
 
       const restarted = await start({ enabled: true }, undefined, fixture);
@@ -695,7 +586,7 @@ describe("GitHub reviews plugin", () => {
       expect(fixture.reads).toHaveLength(restartReads);
       fixture.limit.operation = null;
       await vi.advanceTimersByTimeAsync(1);
-      await vi.waitFor(() => expect(restarted.ctx.turns).toHaveLength(2));
+      await vi.waitFor(() => expect(restarted.reviewCalls).toHaveLength(2));
       expect(
         (await invoke(restarted.plugin, "github_reviews_list")).map(
           (job: { status: string }) => job.status,
@@ -708,21 +599,14 @@ describe("GitHub reviews plugin", () => {
     "cancel awaits an active worker after its %s outcome without erasing the report",
     async (mode) => {
       const fixture = createGithubFixture();
-      const execution = gate();
       const notification = gate();
       const notified = gate();
-      const host = await realHost(
-        fixture,
-        mode,
-        true,
-        {
-          onRunComplete: () => {
-            notified.resolve();
-            return notification.promise;
-          },
+      const host = await realHost(fixture, mode, true, {
+        onRunComplete: () => {
+          notified.resolve();
+          return notification.promise;
         },
-        () => execution.promise,
-      );
+      });
       try {
         await host.call("github_reviews_poll");
         await vi.waitFor(async () =>
@@ -737,7 +621,6 @@ describe("GitHub reviews plugin", () => {
           return result;
         });
         await notified.promise;
-        expect(host.runtime.spawns[0].process.alive).toBe(false);
         expect(returned).toBe(false);
         notification.resolve();
         const result = await cancelled;
@@ -745,7 +628,6 @@ describe("GitHub reviews plugin", () => {
         expect(result.runs[0].report).toEqual({ markdown: "Full report" });
         expect((await host.call("github_reviews_status")).activeRuns).toEqual([]);
       } finally {
-        execution.resolve();
         notification.resolve();
         await host.stop();
       }
@@ -767,27 +649,12 @@ describe("GitHub reviews plugin", () => {
       );
       vi.setSystemTime(new Date("2026-10-26T12:02:00Z"));
       await host.call("github_reviews_poll");
-      expect(host.runtime.spawns).toHaveLength(1);
+      expect(host.reviewCalls).toHaveLength(1);
     } finally {
       await host.stop();
     }
   });
 
-  test("saved completion and its report survive a later worker error", async () => {
-    const current = await start(
-      { resultSchema: z.object({ markdown: z.string() }) },
-      async (ctx, key) => {
-        await finish(ctx, key);
-        throw new Error("Worker disconnected after completion");
-      },
-    );
-    const job = await pollReview(current.plugin);
-    await idle(current.plugin);
-    const saved = await invoke(current.plugin, "github_reviews_details", { id: job.id });
-    expect(saved.job.status).toBe("completed");
-    expect(saved.runs[0].report).toEqual({ markdown: "Full report" });
-    expect(saved.runs[0].error).toContain("disconnected");
-  });
   test.each([undefined, "local-only", "publish"] as const)(
     "MCP reviews preserve delivery and identity across restart, delivery=%s",
     async (delivery) => {
@@ -812,7 +679,7 @@ describe("GitHub reviews plugin", () => {
       let id: string;
       try {
         id = (await first.call("github_reviews_start", input)).id;
-        await vi.waitFor(() => expect(first.runtime.spawns).toHaveLength(1));
+        await vi.waitFor(() => expect(first.reviewCalls).toHaveLength(1));
         expect(
           (
             await invoke(first.plugin, "github_reviews_start", {
@@ -830,11 +697,7 @@ describe("GitHub reviews plugin", () => {
             delivery: expectedDelivery === "publish" ? "local-only" : "publish",
           }),
         ).rejects.toThrow("different review inputs");
-        await vi.waitFor(() =>
-          expect(first.runtime.spawns[0].process.prompts[0]).toContain(
-            expectedDelivery === "publish" ? "Complete the configured publication" : "local-only",
-          ),
-        );
+        expect(first.reviewCalls[0].delivery).toBe(expectedDelivery);
       } finally {
         await first.stop();
       }
@@ -865,8 +728,6 @@ describe("GitHub reviews plugin", () => {
         expect((await second.call("github_reviews_start", input)).id).toBe(id);
         const exposed = (await second.client.listTools()).tools.map((entry) => entry.name);
         expect(exposed).toContain("github_reviews_start");
-        expect(exposed).not.toContain("github_review_finish");
-        expect(exposed).not.toContain("github_review_complete");
         await idle(second.plugin);
       } finally {
         await second.stop();
@@ -881,7 +742,7 @@ describe("GitHub reviews plugin", () => {
             delivery: expectedDelivery === "publish" ? "local-only" : "publish",
           }),
         ).rejects.toThrow("different review inputs");
-        expect(third.runtime.spawns).toEqual([]);
+        expect(third.reviewCalls).toEqual([]);
         expect(fixture.reads).toHaveLength(reads);
         expect(notifications).toEqual(
           expectedDelivery === "publish" ? ["start", "complete", "start", "complete"] : [],
@@ -921,7 +782,7 @@ describe("GitHub reviews plugin", () => {
     expect(outcomes.find((outcome) => outcome.status === "rejected")).toMatchObject({
       reason: new Error("Request ID already belongs to different review inputs"),
     });
-    await vi.waitFor(() => expect(current.ctx.turns).toHaveLength(1));
+    await vi.waitFor(() => expect(current.reviewCalls).toHaveLength(1));
     await idle(current.plugin);
     expect(await invoke(current.plugin, "github_reviews_list")).toHaveLength(1);
   });
@@ -970,7 +831,7 @@ describe("GitHub reviews plugin", () => {
           requestId: "cancel-explicit",
         })
       ).id;
-      await vi.waitFor(() => expect(first.runtime.spawns).toHaveLength(1));
+      await vi.waitFor(() => expect(first.reviewCalls).toHaveLength(1));
       expect((await first.call("github_reviews_cancel", { id })).job.status).toBe("cancelled");
     } finally {
       await first.stop();
@@ -978,7 +839,7 @@ describe("GitHub reviews plugin", () => {
     const second = await realHost(fixture, "complete");
     try {
       expect((await second.call("github_reviews_details", { id })).job.status).toBe("cancelled");
-      expect(second.runtime.spawns).toEqual([]);
+      expect(second.reviewCalls).toEqual([]);
     } finally {
       await second.stop();
     }
@@ -1015,9 +876,7 @@ describe("GitHub reviews plugin", () => {
         expect((await host.call("github_reviews_details", { id: job.id })).job.delivery).toBe(
           delivery,
         );
-        expect(host.runtime.spawns[1].process.prompts[0]).toContain(
-          delivery === "publish" ? "Complete the configured publication" : "local-only",
-        );
+        expect(host.reviewCalls[1].delivery).toBe(delivery);
       } finally {
         await host.stop();
       }
@@ -1034,7 +893,7 @@ describe("GitHub reviews plugin", () => {
         number: 43,
         requestId: "shared-capacity",
       });
-      await vi.waitFor(() => expect(host.runtime.spawns).toHaveLength(1));
+      await vi.waitFor(() => expect(host.reviewCalls).toHaveLength(1));
       fixture.state.empty = false;
       vi.setSystemTime(new Date("2026-10-26T12:02:00Z"));
       await host.call("github_reviews_poll");
@@ -1042,9 +901,9 @@ describe("GitHub reviews plugin", () => {
         (job: { source: string }) => job.source === "poll",
       );
       expect(automatic.status).toBe("queued");
-      expect(host.runtime.spawns).toHaveLength(1);
+      expect(host.reviewCalls).toHaveLength(1);
       await host.call("github_reviews_cancel", { id: explicit.id });
-      await vi.waitFor(() => expect(host.runtime.spawns).toHaveLength(2));
+      await vi.waitFor(() => expect(host.reviewCalls).toHaveLength(2));
       expect((await host.call("github_reviews_details", { id: automatic.id })).job.status).toBe(
         "running",
       );
@@ -1069,7 +928,7 @@ describe("GitHub reviews plugin", () => {
           "completed",
         ),
       );
-      expect(host.runtime.spawns).toHaveLength(1);
+      expect(host.reviewCalls).toHaveLength(1);
     } finally {
       await host.stop();
     }
@@ -1085,7 +944,7 @@ describe("GitHub reviews plugin", () => {
         number: 42,
         requestId: "before-limit",
       });
-      await vi.waitFor(() => expect(host.runtime.spawns).toHaveLength(1));
+      await vi.waitFor(() => expect(host.reviewCalls).toHaveLength(1));
       const queued = await host.call("github_reviews_start", {
         repository: Repository,
         number: 43,
@@ -1111,7 +970,7 @@ describe("GitHub reviews plugin", () => {
         "queued",
       );
       fixture.limit.operation = null;
-      await vi.waitFor(() => expect(host.runtime.spawns).toHaveLength(2), { timeout: 2_500 });
+      await vi.waitFor(() => expect(host.reviewCalls).toHaveLength(2), { timeout: 2_500 });
       expect((await host.call("github_reviews_details", { id: queued.id })).job.status).toBe(
         "running",
       );
