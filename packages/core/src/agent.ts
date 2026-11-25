@@ -180,7 +180,6 @@ export function createAgent(config: AgentConfig): AgentHandle {
     const ns = () => ensureManager().namespace(pluginName);
     return {
       run: (key, prompt, opts) => ns().run(key, prompt, opts),
-      runTool: (key, toolName, args, opts) => ns().runTool(key, toolName, args, opts),
       open: (key, opts) => ns().open(key, opts),
       get: (key) => ns().get(key),
       reset: (key) => ns().reset(key),

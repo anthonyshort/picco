@@ -1,5 +1,3 @@
-import { z } from "zod";
-import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import type { JsonObject } from "../session/jsonl.js";
 import type { Runtime, RuntimeExecOptions, RuntimeProcess, SpawnRequest } from "../types.js";
 
@@ -7,13 +5,6 @@ import type { Runtime, RuntimeExecOptions, RuntimeProcess, SpawnRequest } from "
  * Scripted behaviour for a FakeRuntimeProcess.
  */
 export interface FakeRuntimeProcessOptions {
-  /**
-   * Result returned by a direct tool operation.
-   */
-  toolResult?: (
-    name: string,
-    args: Record<string, unknown>,
-  ) => AgentToolResult<unknown> | Promise<AgentToolResult<unknown>>;
   /**
    * Reply text for a prompt. Default: `echo: ${prompt}`.
    */
@@ -220,41 +211,6 @@ export class FakeRuntimeProcess implements RuntimeProcess {
         this.activePrompt = false;
         this.push({ type: "agent_end" });
         this.push({ type: "agent_settled" });
-        return;
-      }
-      case "execute_tool": {
-        this.activePrompt = true;
-        const name = String(msg.name);
-        this.push({ type: "tool_execution_start", toolName: name, toolCallId: "direct" });
-        if (this.behavior.neverFinish) return;
-        try {
-          const result = await (this.behavior.toolResult?.(
-            name,
-            z.record(z.string(), z.unknown()).parse(msg.args),
-          ) ?? { content: [], details: {} });
-          this.activePrompt = false;
-          this.push({
-            type: "tool_execution_end",
-            toolName: name,
-            toolCallId: "direct",
-            isError: result.isError ?? false,
-          });
-          this.push({
-            type: "response",
-            command: "execute_tool",
-            id,
-            success: true,
-            data: { result },
-          });
-        } catch (err) {
-          this.push({
-            type: "response",
-            command: "execute_tool",
-            id,
-            success: false,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
         return;
       }
       case "get_commands":

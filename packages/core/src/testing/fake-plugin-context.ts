@@ -52,14 +52,6 @@ export interface FakePluginContextOptions {
    */
   reply?: (turn: { key: string | null; prompt: string }) => ScriptedReply | Promise<ScriptedReply>;
   /**
-   * Scripted direct tool operation. No model reply is requested.
-   */
-  toolReply?: (call: {
-    key: string;
-    name: string;
-    args: Record<string, unknown>;
-  }) => ScriptedReply | Promise<ScriptedReply>;
-  /**
    * Scripted shell for ctx.runtime.exec. Default: `ran: ${command}`. Throw to simulate a failing
    * command.
    */
@@ -77,11 +69,7 @@ export interface FakePluginContextOptions {
  */
 export interface FakePluginContext extends PluginContext {
   /**
-   * Every directly requested tool operation, in order.
-   */
-  toolCalls: { key: string; name: string; args: Record<string, unknown> }[];
-  /**
-   * Every prompted turn, in order.
+   * Every turn any code ran through this context, in order.
    */
   turns: {
     source: string;
@@ -123,7 +111,6 @@ export function createFakePluginContext(opts: FakePluginContextOptions = {}): Fa
   const testPaths = createAgentPaths(baseDir, source);
   const live = new Map<string, FakeSessionState>();
   const turns: FakePluginContext["turns"] = [];
-  const toolCalls: FakePluginContext["toolCalls"] = [];
   const execs: FakePluginContext["execs"] = [];
   const sessionTools: FakePluginContext["sessionTools"] = [];
   const commandMap = new Map((opts.commands ?? []).map((command) => [command.name, command]));
@@ -161,17 +148,13 @@ export function createFakePluginContext(opts: FakePluginContextOptions = {}): Fa
     state?: FakeSessionState,
     user?: SessionIdentity,
     session?: SessionOptions,
-    toolCall?: { key: string; name: string; args: Record<string, unknown> },
   ): Turn {
-    if (toolCall) toolCalls.push(toolCall);
-    else turns.push({ source, key, prompt, user, session });
+    turns.push({ source, key, prompt, user, session });
     const controller = createTurn();
     controller.turn.catch(() => {});
     (async () => {
       try {
-        const scripted = await (toolCall
-          ? (opts.toolReply?.(toolCall) ?? "")
-          : reply({ key, prompt }));
+        const scripted = await reply({ key, prompt });
         const result: ScriptedResult = typeof scripted === "string" ? { text: scripted } : scripted;
         controller.emit({ type: "turn_start" });
         for (const event of result.events ?? []) controller.emit(event);
@@ -225,8 +208,6 @@ export function createFakePluginContext(opts: FakePluginContextOptions = {}): Fa
       cwd: state.cwd,
       run: (prompt: string, turnOpts?: TurnOptions) =>
         runTurn(state.key, prompt, state, turnOpts?.user),
-      runTool: (name, args, turnOpts) =>
-        runTurn(state.key, "", state, turnOpts?.user, undefined, { key: state.key, name, args }),
       stats: async (): Promise<SessionStats> => ({
         tokens: state.turns > 0 ? tokens : null,
         turns: state.turns,
@@ -242,12 +223,6 @@ export function createFakePluginContext(opts: FakePluginContextOptions = {}): Fa
   const sessions: Sessions = {
     run: (key, prompt, runOpts) =>
       runTurn(key, prompt, ensure(key, runOpts?.session), runOpts?.user, runOpts?.session),
-    runTool: (key, name, args, runOpts) =>
-      runTurn(key, "", ensure(key, runOpts?.session), runOpts?.user, runOpts?.session, {
-        key,
-        name,
-        args,
-      }),
     open: async (key, sessionOpts) => handle(ensure(key, sessionOpts)),
     get: (key) => {
       const state = live.get(key);
@@ -287,7 +262,6 @@ export function createFakePluginContext(opts: FakePluginContextOptions = {}): Fa
     commands,
     currentUser: opts.currentUser ?? (() => undefined),
     turns,
-    toolCalls,
     execs,
     sessionTools,
   };

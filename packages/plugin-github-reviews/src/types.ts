@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CandidateSchema, type GithubSourceOptions } from "./github.js";
-import { ReviewAttemptSchema } from "./review-types.js";
+import { ReviewAttemptSchema, type ReviewFinish } from "./review-types.js";
 
 /**
  * Validated polling and admission settings; callbacks stay in the host process.
@@ -12,7 +12,6 @@ export const GithubReviewsSettingsSchema = z
      * Hold accepted saved workflows until the review parent handles their completion.
      */
     holdWorkflows: z.boolean().default(false),
-    entryTool: z.string().trim().min(1).max(200).optional(),
     repositories: z
       .array(
         z
@@ -87,9 +86,11 @@ export type GithubReviewResult = z.infer<typeof GithubReviewResultSchema>;
 export type GithubReviewsOptions = z.input<typeof GithubReviewsSettingsSchema> & {
   prompt?: (selection: ReviewSelection) => string;
   /**
-   * Prepare selected inputs before either delivery mode opens its worker. Failure stops the run.
+   * Run the selected review in application code, returning its final outcome after cleanup.
+   * Replaces the prompt session; must honour cancellation and await all owned work before
+   * returning.
    */
-  prepareReview?: (selection: ReviewSelection, signal: AbortSignal) => void | Promise<void>;
+  runReview?: (selection: ReviewSelection, signal: AbortSignal) => Promise<ReviewFinish>;
   /**
    * Report an admitted review before worker startup. Waits up to 30 seconds; failure is logged
    * without stopping the review or retrying the callback.

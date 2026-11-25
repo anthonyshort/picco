@@ -1,4 +1,3 @@
-import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import type { ExecutionRef } from "./execution.js";
 
 /**
@@ -13,10 +12,6 @@ export interface TurnResult {
    * Final assistant message.
    */
   text: string;
-  /**
-   * Original result for a direct tool operation. These operations have no assistant text.
-   */
-  toolResult?: AgentToolResult<unknown>;
   /**
    * Wall-clock duration of the turn, in milliseconds.
    */

@@ -56,7 +56,7 @@ Here `createAgent` comes from `@picco-agent/core`; `runtime` is your configured 
 }
 ```
 
-The response contains a saved job ID, not a completed review. Reusing the request ID with the same inputs returns that job, including after restart; conflicting inputs are rejected. The repository and PR number identify the review; prompt URLs are derived from that identity. During known GitHub backoff, new submissions report the retry deadline without additional API calls or an accepted job. Repeating an already accepted key still returns its job. Explicit submissions default to `delivery: "local-only"`, which suppresses GitHub publication and notification callbacks. Set `delivery: "publish"` in the start arguments to use the application’s publication workflow and lifecycle callbacks. Delivery is saved with the job and retained through retries and restarts; changing it requires a new request ID. Neither mode marks an automatic review request handled.
+The response contains a saved job ID, not a completed review. Reusing the request ID with the same inputs returns that job, including after restart; conflicting inputs are rejected. The repository and PR number identify the review; prompt URLs are derived from that identity. During known GitHub backoff, new submissions report the retry deadline without additional API calls or an accepted job. Repeating an already accepted key still returns its job. Explicit submissions default to `delivery: "local-only"`, which suppresses GitHub publication and lifecycle callbacks. Set `delivery: "publish"` in the start arguments to use the application’s publication workflow and lifecycle callbacks. Delivery is saved with the job and retained through retries and restarts; changing it requires a new request ID. Neither mode marks an automatic review request handled.
 
 Use `github_reviews_details` with `{ "id": "<returned job ID>" }` to inspect its attempts, then `github_reviews_report` with the same ID to retrieve its latest full report. A queued job has no report yet. Failed attempts may retain partial evidence. Reports are bounded to 4 MiB; diagnostic output is a separate bounded preview.
 
@@ -78,23 +78,26 @@ The application can supply `prompt(selection)` for its saved workflow and report
 
 Use `onRunStart` and `onRunComplete` for application notifications on published reviews. Callback failure is logged and does not repeat execution or change a saved successful outcome. Callbacks are bounded to 30 seconds. Cancellation or the review deadline also ends the start-callback wait; worker startup receives only the time remaining in the original review budget. Notification delivery is best effort, without a persistent delivery/reconciliation protocol.
 
-## Start a review without a launcher model
+## Run reviews in application code
 
-An application can register an entry tool that prepares the checkout, runs its review workflow, publishes and calls the selected finish tool. Configure its name with `entryTool`:
+Use `runReview` when your application can start its workflow directly. The callback receives the selected PR, pinned revisions, delivery mode and cancellation signal. It returns the final outcome for Picco to save:
 
 ```ts
 const reviews = githubReviews({
-  entryTool: "run_selected_review",
-  prepareReview: async (selection, signal) => {
-    signal.throwIfAborted();
-    await writeSelectedRequest(selection, signal);
+  runReview: async (selection, signal) => {
+    const report = await runWorkflow(selection, signal);
+    return {
+      status: "completed",
+      summary: "Review complete",
+      result: JSON.stringify(report),
+    };
   },
 });
 ```
 
-Here `writeSelectedRequest` is application code that writes the selected run's inputs. Preparation runs for published and local-only reviews before opening the worker. A failure stops that attempt. It shares the original deadline and has a 30-second callback limit; it must honour its cancellation signal.
+Here `runWorkflow` is application code that prepares and runs the review, including any required publication. Picco validates and saves the returned report through the same result path as the selected finish tool. Failed outcomes can return an error and a partial report.
 
-The runner calls the entry tool with empty arguments through [direct session execution](../concepts/sessions.md#run-a-tool-directly). It does not call the prompt builder or enable workflow holds. The entry tool must await the full workflow and save its result before returning. The selected finish tools and report validation work as before.
+The callback runs for both delivery modes without opening a Picco session or calling a launcher model. It must honour the cancellation signal and await its worker's cleanup before returning or throwing. The original review deadline aborts that signal, and cancellation waits for the callback to settle before releasing the worker slot. Background workflow holds are not used for this path.
 
 ## Run a saved Pi workflow
 

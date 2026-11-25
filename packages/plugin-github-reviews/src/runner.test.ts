@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import { silentLogger } from "@picco-agent/core";
@@ -13,7 +14,6 @@ import type { GithubReviewsOptions } from "./types.js";
 interface RunnerFixtureOptions {
   options?: GithubReviewsOptions;
   delivery?: ReviewJob["delivery"];
-  toolReply?: (ctx: FakePluginContext) => Promise<string>;
   reply?: (ctx: FakePluginContext) => Promise<string>;
 }
 
@@ -74,7 +74,6 @@ function startRunner(input: RunnerFixtureOptions = {}) {
   const ctx = createFakePluginContext({
     source: "github-reviews",
     reply: () => input.reply?.(ctx) ?? "Done",
-    toolReply: () => input.toolReply?.(ctx) ?? "",
   });
   const worker = runReview({
     ctx,
@@ -104,76 +103,127 @@ function completed(name: string, result?: string) {
 }
 
 describe("review runner", () => {
-  test.each(["publish", "local-only"] as const)(
-    "prepares %s input before direct execution, with no parent prompt",
-    async (delivery) => {
-      let prepared = false;
-      const fixture = startRunner({
-        delivery,
-        options: {
-          entryTool: "run_selected_review",
-          prepareReview: (selection, signal) => {
+  describe("application review runner", () => {
+    test.each(["publish", "local-only"] as const)(
+      "saves the %s runner's result without a session",
+      async (delivery) => {
+        const report = { markdown: "Full report".repeat(20_000) };
+        const customRunner = vi.fn(
+          async (
+            selection: Parameters<NonNullable<GithubReviewsOptions["runReview"]>>[0],
+            signal: AbortSignal,
+          ): Promise<ReviewFinish> => {
             expect(selection.delivery).toBe(delivery);
+            expect(selection.run.head).toBe("a".repeat(40));
             expect(signal.aborted).toBe(false);
-            prepared = true;
+            return { status: "completed", summary: "Reviewed", result: JSON.stringify(report) };
           },
-        },
-        reply: async () => {
-          throw new Error("Parent model must not run");
-        },
-        toolReply: async (ctx) => {
-          expect(prepared).toBe(true);
-          await submit(
-            ctx,
-            "github_review_finish",
-            completed("github_review_finish", '{"markdown":"Report"}'),
-          );
-          return "";
+        );
+        const fixture = startRunner({
+          delivery,
+          options: { runReview: customRunner, resultSchema: z.object({ markdown: z.string() }) },
+        });
+        const reset = vi.spyOn(fixture.ctx.sessions, "reset");
+        const result = await fixture.worker.completion;
+        expect(result.submitted?.status).toBe("completed");
+        expect(result.report).toEqual(report);
+        expect(fixture.records).toHaveLength(1);
+        expect(customRunner).toHaveBeenCalledTimes(1);
+        expect(fixture.ctx.turns).toEqual([]);
+        expect(fixture.ctx.sessionTools).toEqual([]);
+        expect(reset).not.toHaveBeenCalled();
+      },
+    );
+
+    test("retains a failed runner's partial report", async () => {
+      const fixture = startRunner({
+        options: {
+          resultSchema: z.object({ markdown: z.string() }),
+          runReview: async () => ({
+            status: "failed",
+            error: "Missing evidence",
+            result: '{"inspected":["file.ts"]}',
+          }),
         },
       });
-      expect((await fixture.worker.completion).submitted?.status).toBe("completed");
-      expect(fixture.ctx.turns).toEqual([]);
-      expect(fixture.ctx.toolCalls).toEqual([
-        { key: "selected", name: "run_selected_review", args: {} },
+      const result = await fixture.worker.completion;
+      expect(result.submitted?.status).toBe("failed");
+      expect(fixture.records).toEqual([
+        {
+          outcome: {
+            status: "failed",
+            error: "Missing evidence",
+            result: '{"inspected":["file.ts"]}',
+          },
+          report: { inspected: ["file.ts"] },
+        },
       ]);
-      expect(fixture.records).toHaveLength(1);
-    },
-  );
-
-  test("cancelling preparation stops before worker startup", async () => {
-    const started = Promise.withResolvers<AbortSignal>();
-    const prepared = Promise.withResolvers<void>();
-    const fixture = startRunner({
-      options: {
-        entryTool: "review",
-        prepareReview: (selection, signal) => {
-          expect(selection.delivery).toBe("local-only");
-          started.resolve(signal);
-          return prepared.promise;
-        },
-      },
     });
-    const signal = await started.promise;
-    fixture.worker.abort();
-    expect((await fixture.worker.completion).cancellation).toBe("cancelled");
-    expect(signal.aborted).toBe(true);
-    expect(fixture.ctx.toolCalls).toEqual([]);
-    expect(fixture.ctx.turns).toEqual([]);
-    prepared.resolve();
-  });
 
-  test("failed preparation stops before creating a worker", async () => {
-    const fixture = startRunner({
-      options: {
-        entryTool: "review",
-        prepareReview: () => {
-          throw new Error("Request cannot be written");
-        },
-      },
+    test("rejects an invalid completed outcome without saving it", async () => {
+      const fixture = startRunner({
+        options: { runReview: async () => ({ status: "completed" }) },
+      });
+      expect((await fixture.worker.completion).error).toContain(
+        "Completed reviews require a summary",
+      );
+      expect(fixture.records).toEqual([]);
+      expect(fixture.ctx.turns).toEqual([]);
     });
-    expect((await fixture.worker.completion).error).toContain("Request cannot be written");
-    expect(fixture.ctx.turns).toEqual([]);
-    expect(fixture.ctx.toolCalls).toEqual([]);
+
+    test("keeps the runner's error without starting a fallback session", async () => {
+      const fixture = startRunner({
+        options: {
+          runReview: async () => {
+            throw new Error("Pinned head changed");
+          },
+        },
+      });
+      expect((await fixture.worker.completion).error).toBe("Pinned head changed");
+      expect(fixture.records).toEqual([]);
+      expect(fixture.ctx.turns).toEqual([]);
+    });
+
+    test.each(["cancel", "timeout"] as const)(
+      "awaits runner teardown after %s before finishing",
+      async (reason) => {
+        const started = Promise.withResolvers<AbortSignal>();
+        const aborted = Promise.withResolvers<void>();
+        const cleanup = Promise.withResolvers<void>();
+        const fixture = startRunner({
+          options: {
+            reviewTimeoutMs: reason === "timeout" ? 50 : 1000,
+            runReview: async (selection, signal) => {
+              expect(selection.delivery).toBe("local-only");
+              started.resolve(signal);
+              await new Promise<void>((resolve) =>
+                signal.addEventListener("abort", () => resolve(), { once: true }),
+              );
+              aborted.resolve();
+              await cleanup.promise;
+              return { status: "completed", summary: "Too late" };
+            },
+          },
+        });
+        const signal = await started.promise;
+        let settled = false;
+        void fixture.worker.completion.then(() => {
+          settled = true;
+          return undefined;
+        });
+        if (reason === "cancel") fixture.worker.abort();
+        await aborted.promise;
+        await setImmediate();
+        expect(signal.aborted).toBe(true);
+        expect(settled).toBe(false);
+        cleanup.resolve();
+        const result = await fixture.worker.completion;
+        expect(result.error).toBeDefined();
+        expect(result.submitted).toBeUndefined();
+        expect(fixture.records).toEqual([]);
+        expect(fixture.ctx.turns).toEqual([]);
+      },
+    );
   });
 
   test("shutdown does not replace an earlier manual cancellation", async () => {

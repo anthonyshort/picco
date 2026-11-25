@@ -16,18 +16,6 @@ conversation. Turns within one session run in order; different sessions run conc
 Plugins receive a namespaced session API. A Telegram plugin and the host can both use `"planning"`
 without sharing a conversation because their sources differ.
 
-## Run a tool directly
-
-Use a registered tool when the application already knows what should run:
-
-```ts
-const { toolResult } = await agent.sessions.runTool("review", "run_selected_review", {});
-```
-
-This uses Pi's `execute_tool` RPC operation and requires a Pi release that supports it. Picco does not send a prompt or request an assistant reply. The original tool result is returned in `toolResult`; `text` is empty. Tool failures reject the operation. Prompts and direct tools share the session queue, cancellation, bridge permissions and finalisers.
-
-The entry tool must await its work before returning. Direct tools do not use background-work observers or holds to wait for a parent model continuation.
-
 ## Resume interrupted sessions
 
 The Pi process is disposable; its transcript is not. Picco starts the next process in the same

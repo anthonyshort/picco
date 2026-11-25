@@ -3,7 +3,12 @@ import path from "node:path";
 import { ExecutionError, ExecutionFailure, type PluginContext, type Turn } from "@picco-agent/core";
 import { deliverCallback } from "./callback.js";
 import { createReviewFinishTools } from "./review-finish-tools.js";
-import { type ReviewAttempt, type ReviewJob, type ReviewFinish } from "./review-types.js";
+import {
+  ReviewFinishSchema,
+  type ReviewAttempt,
+  type ReviewJob,
+  type ReviewFinish,
+} from "./review-types.js";
 import type { GithubReviewResult, GithubReviewsOptions, ReviewSelection } from "./types.js";
 
 /**
@@ -19,7 +24,7 @@ interface RunnerOptions {
 }
 
 /**
- * Execute a fresh session with one atomic final-result submission.
+ * Run a selected review and save one final outcome.
  */
 export function runReview(opts: RunnerOptions) {
   let turn: Turn | undefined;
@@ -27,7 +32,7 @@ export function runReview(opts: RunnerOptions) {
   const controller = new AbortController();
   const timeoutMs = opts.options.reviewTimeoutMs ?? 3_600_000;
   const deadline = Date.now() + timeoutMs;
-  const startupSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]);
+  const executionSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]);
   const artifactDirectory = path.join(opts.reviewsDirectory, "runs", opts.run.id);
   const selection: ReviewSelection = {
     run: opts.run,
@@ -77,7 +82,7 @@ export function runReview(opts: RunnerOptions) {
   }
 
   /**
-   * Run the selected session within its original deadline and always await session reset.
+   * Await the selected runner and its cleanup within the original cancellation boundary.
    */
   async function executeAttempt() {
     let error: string | undefined;
@@ -88,21 +93,12 @@ export function runReview(opts: RunnerOptions) {
       controller.signal.throwIfAborted();
       if (Date.now() >= deadline)
         throw new ExecutionError("timeout", "Review timed out before worker startup");
-      const prepare = opts.options.prepareReview;
-      if (prepare) {
-        await deliverCallback(
-          (selected) => prepare(selected, startupSignal),
-          selection,
-          startupSignal,
-        );
-      }
-      startupSignal.throwIfAborted();
       if (opts.job.delivery === "publish" && opts.options.onRunStart) {
         try {
-          await deliverCallback(opts.options.onRunStart, selection, startupSignal);
+          await deliverCallback(opts.options.onRunStart, selection, executionSignal);
         } catch {
           controller.signal.throwIfAborted();
-          if (startupSignal.aborted)
+          if (executionSignal.aborted)
             throw new ExecutionError("timeout", "Review timed out before worker startup");
           opts.ctx.logger.error("Review start notification failed", { runId: opts.run.id });
         }
@@ -110,21 +106,10 @@ export function runReview(opts: RunnerOptions) {
       if (cancellation) throw new Error("Review cancelled before startup");
       if (Date.now() >= deadline)
         throw new ExecutionError("timeout", "Review timed out before worker startup");
-      const sessionOptions = {
-        timeoutMs: Math.max(1, deadline - Date.now()),
-        session: {
-          cwd: artifactDirectory,
-          env: { REVIEW_RUN_ID: opts.run.id },
-          tools: createReviewFinishTools(opts.run.sessionKey, submitOutcome),
-        },
-      };
-      if (opts.options.entryTool) {
-        turn = opts.ctx.sessions.runTool(
-          opts.run.sessionKey,
-          opts.options.entryTool,
-          {},
-          sessionOptions,
-        );
+      if (opts.options.runReview) {
+        const outcome = await opts.options.runReview(selection, executionSignal);
+        executionSignal.throwIfAborted();
+        await submitOutcome(ReviewFinishSchema.parse(outcome));
       } else {
         const prompt =
           opts.options.prompt?.(selection) ??
@@ -136,20 +121,28 @@ export function runReview(opts: RunnerOptions) {
               : "Complete the configured publication and verify the live PR head before publishing. Stop if it changed.",
             "When finished call github_review_finish once, with status, summary and the full result as JSON. Failed or partial work must use status failed with its actual error. A successful launch or final prose is not completion.",
           ].join("\n\n");
-        turn = opts.ctx.sessions.run(opts.run.sessionKey, prompt, sessionOptions);
+        turn = opts.ctx.sessions.run(opts.run.sessionKey, prompt, {
+          timeoutMs: Math.max(1, deadline - Date.now()),
+          session: {
+            cwd: artifactDirectory,
+            env: { REVIEW_RUN_ID: opts.run.id },
+            tools: createReviewFinishTools(opts.run.sessionKey, submitOutcome),
+          },
+        });
+        output = (await turn).text;
       }
-      output = (await turn).text;
     } catch (err) {
-      controller.abort(err);
       const primary = err instanceof ExecutionFailure ? err.primary : err;
       if (primary instanceof ExecutionError && primary.code === "shutdown")
         cancellation ??= "shutdown";
       error = err instanceof Error ? err.message : "Review execution failed";
     } finally {
-      try {
-        await opts.ctx.sessions.reset(opts.run.sessionKey);
-      } catch (err) {
-        cleanupError = err instanceof Error ? err.message : "Review worker teardown failed";
+      if (!opts.options.runReview) {
+        try {
+          await opts.ctx.sessions.reset(opts.run.sessionKey);
+        } catch (err) {
+          cleanupError = err instanceof Error ? err.message : "Review worker teardown failed";
+        }
       }
     }
     return { selection, submitted, report, error, output, cleanupError, cancellation };

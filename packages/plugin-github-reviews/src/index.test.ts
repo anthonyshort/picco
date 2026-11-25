@@ -300,8 +300,62 @@ async function pollReview(plugin: Plugin) {
   return (await invoke(plugin, "github_reviews_list"))[0];
 }
 describe("GitHub reviews plugin", () => {
-  test("direct entry tools disable the parent workflow observer", () => {
-    const plugin = githubReviews({ entryTool: "run_selected_review", holdWorkflows: true });
+  test.each(["local-only", "publish"] as const)(
+    "saves application results through MCP and SQLite for %s",
+    async (delivery) => {
+      const report = { markdown: "Full report ".repeat(20_000) };
+      const runReview = vi.fn(
+        async (
+          selection: Parameters<NonNullable<GithubReviewsOptions["runReview"]>>[0],
+          signal: AbortSignal,
+        ) => {
+          expect(selection.delivery).toBe(delivery);
+          expect(signal.aborted).toBe(false);
+          return {
+            status: "completed" as const,
+            summary: "Reviewed",
+            result: JSON.stringify(report),
+          };
+        },
+      );
+      const fixture = createGithubFixture();
+      const host = await realHost(fixture, "complete", false, { runReview });
+      let id: string;
+      try {
+        const job = await host.call("github_reviews_start", {
+          repository: Repository,
+          number: 42,
+          requestId: `application-${delivery}`,
+          delivery,
+        });
+        id = job.id;
+        await idle(host.plugin);
+        const saved = await host.call("github_reviews_report", { id });
+        expect(saved.job.status).toBe("completed");
+        expect(saved.report).toEqual(report);
+        expect(saved.partial).toBe(false);
+        expect((await host.call("github_reviews_details", { id })).runs).toHaveLength(1);
+        expect(runReview).toHaveBeenCalledTimes(1);
+        expect(host.runtime.spawns).toEqual([]);
+      } finally {
+        await host.stop();
+      }
+      const reopened = await realHost(fixture, "complete", false, { runReview });
+      try {
+        expect((await reopened.call("github_reviews_report", { id })).report).toEqual(report);
+        expect(reopened.runtime.spawns).toEqual([]);
+        expect(runReview).toHaveBeenCalledTimes(1);
+      } finally {
+        await reopened.stop();
+      }
+    },
+  );
+
+  test("application runners do not wait for a parent workflow model", () => {
+    const plugin = githubReviews({
+      holdWorkflows: true,
+      runReview: async () => ({ status: "completed", summary: "Reviewed" }),
+    });
     expect(plugin.prepareExecution).toBeUndefined();
   });
 

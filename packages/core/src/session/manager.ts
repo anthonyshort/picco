@@ -41,13 +41,6 @@ const READY_DELAY_MS = 100; // no ready message from RPC mode — wait, then che
 const SWEEP_INTERVAL_MS = 60_000;
 
 /**
- * Work queued on the existing session execution boundary.
- */
-type SessionOperation =
-  | { kind: "prompt"; prompt: string }
-  | { kind: "tool"; name: string; args: Record<string, unknown> };
-
-/**
  * What setupSession hands back: the session's resolved pi config, tool manifest, and bridge token.
  */
 export interface SessionSetup {
@@ -268,7 +261,6 @@ export class SessionManager {
   namespace(source: string): Sessions {
     return {
       run: (key, prompt, opts) => this.run(source, key, prompt, opts),
-      runTool: (key, name, args, opts) => this.runTool(source, key, name, args, opts),
       open: (key, opts) => this.open(source, key, opts),
       get: (key) => {
         const slot = this.slots.get(fullKey(source, key));
@@ -288,31 +280,6 @@ export class SessionManager {
     prompt: string,
     opts?: TurnOptions & { session?: SessionOptions },
   ): Turn {
-    return this.schedule(source, key, { kind: "prompt", prompt }, opts);
-  }
-
-  /**
-   * Execute a registered tool without asking the model to launch it.
-   */
-  runTool(
-    source: string,
-    key: string,
-    name: string,
-    args: Record<string, unknown>,
-    opts?: TurnOptions & { session?: SessionOptions },
-  ): Turn {
-    return this.schedule(source, key, { kind: "tool", name, args }, opts);
-  }
-
-  /**
-   * Queue prompts and direct tools through the same execution and cleanup path.
-   */
-  private schedule(
-    source: string,
-    key: string,
-    operation: SessionOperation,
-    opts?: TurnOptions & { session?: SessionOptions },
-  ): Turn {
     const slot = this.slot(source, key);
     const execution = this.createExecution(slot);
     const { controller } = execution;
@@ -325,7 +292,7 @@ export class SessionManager {
         async () => {
           const live = await this.ensureLive(slot, opts?.session);
           live.lastActiveAt = new Date();
-          const result = await this.driveTurn(execution, live.rpc, operation, opts?.timeoutMs);
+          const result = await this.driveTurn(execution, live.rpc, prompt, opts?.timeoutMs);
           live.turns++;
           live.lastActiveAt = new Date();
           return result;
@@ -444,7 +411,7 @@ export class SessionManager {
               env: opts.env,
               tools: opts.tools,
             });
-            return this.driveTurn(execution, live.rpc, { kind: "prompt", prompt }, opts.timeoutMs);
+            return this.driveTurn(execution, live.rpc, prompt, opts.timeoutMs);
           },
           true,
         );
@@ -758,27 +725,11 @@ export class SessionManager {
   private async driveTurn(
     execution: ManagedExecution,
     rpc: RpcSession,
-    operation: SessionOperation,
+    prompt: string,
     timeoutMs?: number,
   ): Promise<TurnResult> {
     const startedAt = Date.now();
     const { controller } = execution;
-    switch (operation.kind) {
-      case "tool": {
-        controller.emit({ type: "turn_start" });
-        const toolResult = await rpc.executeTool(operation.name, operation.args, {
-          timeoutMs: timeoutMs ?? this.turnTimeoutMs,
-          onEvent: (event) => controller.emit(event),
-        });
-        return { text: "", toolResult, durationMs: Date.now() - startedAt };
-      }
-      case "prompt":
-        break;
-      default: {
-        const unexpected: never = operation;
-        throw new Error(`Unknown session operation: ${unexpected}`);
-      }
-    }
     const work = new ExecutionWork(
       execution.ref,
       execution.abort.signal,
@@ -787,7 +738,7 @@ export class SessionManager {
     );
     controller.emit({ type: "turn_start" });
     try {
-      const text = await rpc.prompt(operation.prompt, {
+      const text = await rpc.prompt(prompt, {
         timeoutMs: timeoutMs ?? this.turnTimeoutMs,
         onEvent: (event) => controller.emit(event),
         work,
@@ -809,7 +760,6 @@ export class SessionManager {
       key: slot.ref.key,
       cwd: slot.live?.cwd ?? this.defaultCwd(slot.ref),
       run: (prompt, opts) => this.run(slot.ref.source, slot.ref.key, prompt, opts),
-      runTool: (name, args, opts) => this.runTool(slot.ref.source, slot.ref.key, name, args, opts),
       stats: async (): Promise<SessionStats> => {
         const live = slot.live;
         if (!live) throw new Error(`Session ${slot.ref.key} is not live`);
