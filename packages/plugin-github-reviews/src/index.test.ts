@@ -300,6 +300,11 @@ async function pollReview(plugin: Plugin) {
   return (await invoke(plugin, "github_reviews_list"))[0];
 }
 describe("GitHub reviews plugin", () => {
+  test("direct entry tools disable the parent workflow observer", () => {
+    const plugin = githubReviews({ entryTool: "run_selected_review", holdWorkflows: true });
+    expect(plugin.prepareExecution).toBeUndefined();
+  });
+
   test.each([true, false])(
     "polling handles a request once across commits and restart, timeline=%s",
     async (timeline) => {

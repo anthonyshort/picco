@@ -55,6 +55,52 @@ describe("parseDuration", () => {
 });
 
 describe("SessionManager", () => {
+  describe("direct tools", () => {
+    test("shares the prompt queue, execution authority and finalisers", async () => {
+      const receipt = Promise.withResolvers<{ content: []; details: { saved: boolean } }>();
+      const finalised: string[] = [];
+      const runtime = new FakeRuntime({ toolResult: () => receipt.promise });
+      const mgr = manager(runtime, {
+        finalisers: [
+          {
+            name: "record",
+            run: ({ execution }) => {
+              finalised.push(execution.id);
+            },
+          },
+        ],
+      });
+      const sessions = mgr.namespace("test");
+      const direct = sessions.runTool("one", "review", {});
+      await vi.waitFor(() =>
+        expect(runtime.spawns[0]?.process.requests[0]?.type).toBe("execute_tool"),
+      );
+      const prompt = sessions.run("one", "next");
+      expect(mgr.currentExecution({ source: "test", key: "one" })?.execution.id).toBe(
+        direct.execution?.id,
+      );
+      expect(runtime.spawns[0].process.prompts).toEqual([]);
+      receipt.resolve({ content: [], details: { saved: true } });
+      expect((await direct).toolResult?.details).toEqual({ saved: true });
+      expect((await prompt).text).toBe("echo: next");
+      expect(finalised).toEqual([direct.execution?.id, prompt.execution?.id]);
+      expect(runtime.spawns).toHaveLength(1);
+    });
+
+    test("cancellation tears down the worker before releasing the execution", async () => {
+      const runtime = new FakeRuntime({ neverFinish: true });
+      const mgr = manager(runtime);
+      const turn = mgr.namespace("test").runTool("one", "review", {});
+      await vi.waitFor(() =>
+        expect(runtime.spawns[0]?.process.requests[0]?.type).toBe("execute_tool"),
+      );
+      turn.abort("Stop");
+      await expect(turn).rejects.toMatchObject({ code: "cancelled" });
+      expect(runtime.spawns[0].process.killed).toBe(true);
+      expect(mgr.currentExecution({ source: "test", key: "one" })).toBeUndefined();
+    });
+  });
+
   describe("execution holds", () => {
     test("handled commands keep authority and queue ownership until their hold completes", async () => {
       let hold!: ExecutionHold;

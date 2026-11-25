@@ -6,6 +6,60 @@ import { RpcSession } from "./rpc.js";
 import type { TurnEvent } from "./turn.js";
 
 describe("RpcSession", () => {
+  describe("direct tools", () => {
+    test("returns the original receipt and tool events without a prompt or text readback", async () => {
+      const receipt = {
+        content: [{ type: "text" as const, text: "Saved" }],
+        details: { id: "result" },
+      };
+      const proc = new FakeRuntimeProcess({
+        toolResult: () => receipt,
+        reply: () => {
+          throw new Error("Model must not run");
+        },
+      });
+      const session = new RpcSession("direct", proc);
+      onTestFinished(() => session.kill());
+      const events: TurnEvent[] = [];
+      expect(
+        await session.executeTool("review", {}, { onEvent: (event) => events.push(event) }),
+      ).toEqual(receipt);
+      expect(proc.requests.map((request) => request.type)).toEqual(["execute_tool"]);
+      expect(events).toEqual([
+        { type: "tool_start", tool: "review", toolCallId: "direct" },
+        { type: "tool_end", tool: "review", toolCallId: "direct", isError: false },
+      ]);
+    });
+
+    test("rejects a failed tool result", async () => {
+      const proc = new FakeRuntimeProcess({
+        toolResult: () => ({
+          content: [{ type: "text", text: "Pinned head changed" }],
+          details: {},
+          isError: true,
+        }),
+      });
+      const session = new RpcSession("direct", proc);
+      onTestFinished(() => session.kill());
+      await expect(session.executeTool("review", {})).rejects.toThrow(
+        "Tool review failed: Pinned head changed",
+      );
+      expect(proc.prompts).toEqual([]);
+    });
+
+    test("aborts an expired direct operation", async () => {
+      const proc = new FakeRuntimeProcess({ neverFinish: true });
+      const session = new RpcSession("direct", proc);
+      onTestFinished(() => session.kill());
+      await expect(session.executeTool("review", {}, { timeoutMs: 20 })).rejects.toMatchObject({
+        code: "timeout",
+      });
+      await vi.waitFor(() =>
+        expect(proc.requests.map((request) => request.type)).toEqual(["execute_tool", "abort"]),
+      );
+    });
+  });
+
   describe("execution holds", () => {
     test("handled responses do not settle an agent started by the command", async () => {
       let hold!: ExecutionHold;

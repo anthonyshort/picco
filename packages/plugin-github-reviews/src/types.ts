@@ -12,6 +12,7 @@ export const GithubReviewsSettingsSchema = z
      * Hold accepted saved workflows until the review parent handles their completion.
      */
     holdWorkflows: z.boolean().default(false),
+    entryTool: z.string().trim().min(1).max(200).optional(),
     repositories: z
       .array(
         z
@@ -85,6 +86,10 @@ export type GithubReviewResult = z.infer<typeof GithubReviewResultSchema>;
  */
 export type GithubReviewsOptions = z.input<typeof GithubReviewsSettingsSchema> & {
   prompt?: (selection: ReviewSelection) => string;
+  /**
+   * Prepare selected inputs before either delivery mode opens its worker. Failure stops the run.
+   */
+  prepareReview?: (selection: ReviewSelection, signal: AbortSignal) => void | Promise<void>;
   /**
    * Report an admitted review before worker startup. Waits up to 30 seconds; failure is logged
    * without stopping the review or retrying the callback.

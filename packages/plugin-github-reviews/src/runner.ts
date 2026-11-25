@@ -88,6 +88,15 @@ export function runReview(opts: RunnerOptions) {
       controller.signal.throwIfAborted();
       if (Date.now() >= deadline)
         throw new ExecutionError("timeout", "Review timed out before worker startup");
+      const prepare = opts.options.prepareReview;
+      if (prepare) {
+        await deliverCallback(
+          (selected) => prepare(selected, startupSignal),
+          selection,
+          startupSignal,
+        );
+      }
+      startupSignal.throwIfAborted();
       if (opts.job.delivery === "publish" && opts.options.onRunStart) {
         try {
           await deliverCallback(opts.options.onRunStart, selection, startupSignal);
@@ -101,26 +110,37 @@ export function runReview(opts: RunnerOptions) {
       if (cancellation) throw new Error("Review cancelled before startup");
       if (Date.now() >= deadline)
         throw new ExecutionError("timeout", "Review timed out before worker startup");
-      const prompt =
-        opts.options.prompt?.(selection) ??
-        [
-          `Use the ${opts.job.skill} skill to review ${opts.run.url} at exactly commit ${opts.run.head}, base ${opts.run.base}.`,
-          `Keep artifacts in ${artifactDirectory}. Do not discover or select another PR.`,
-          opts.job.delivery === "local-only"
-            ? "This review is local-only. Do not publish to GitHub or send notifications."
-            : "Complete the configured publication and verify the live PR head before publishing. Stop if it changed.",
-          "When finished call github_review_finish once, with status, summary and the full result as JSON. Failed or partial work must use status failed with its actual error. A successful launch or final prose is not completion.",
-        ].join("\n\n");
-      turn = opts.ctx.sessions.run(opts.run.sessionKey, prompt, {
+      const sessionOptions = {
         timeoutMs: Math.max(1, deadline - Date.now()),
         session: {
           cwd: artifactDirectory,
           env: { REVIEW_RUN_ID: opts.run.id },
           tools: createReviewFinishTools(opts.run.sessionKey, submitOutcome),
         },
-      });
+      };
+      if (opts.options.entryTool) {
+        turn = opts.ctx.sessions.runTool(
+          opts.run.sessionKey,
+          opts.options.entryTool,
+          {},
+          sessionOptions,
+        );
+      } else {
+        const prompt =
+          opts.options.prompt?.(selection) ??
+          [
+            `Use the ${opts.job.skill} skill to review ${opts.run.url} at exactly commit ${opts.run.head}, base ${opts.run.base}.`,
+            `Keep artifacts in ${artifactDirectory}. Do not discover or select another PR.`,
+            opts.job.delivery === "local-only"
+              ? "This review is local-only. Do not publish to GitHub or send notifications."
+              : "Complete the configured publication and verify the live PR head before publishing. Stop if it changed.",
+            "When finished call github_review_finish once, with status, summary and the full result as JSON. Failed or partial work must use status failed with its actual error. A successful launch or final prose is not completion.",
+          ].join("\n\n");
+        turn = opts.ctx.sessions.run(opts.run.sessionKey, prompt, sessionOptions);
+      }
       output = (await turn).text;
     } catch (err) {
+      controller.abort(err);
       const primary = err instanceof ExecutionFailure ? err.primary : err;
       if (primary instanceof ExecutionError && primary.code === "shutdown")
         cancellation ??= "shutdown";

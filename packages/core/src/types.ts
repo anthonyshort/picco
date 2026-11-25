@@ -273,6 +273,11 @@ export interface Session {
   run(prompt: string, opts?: TurnOptions): Turn;
 
   /**
+   * Execute a registered tool through the session without a model turn.
+   */
+  runTool(name: string, args: Record<string, unknown>, opts?: TurnOptions): Turn;
+
+  /**
    * Get session stats for the session, like number of turns, context used, etc.
    */
   stats(): Promise<SessionStats>;
@@ -292,6 +297,16 @@ export interface Sessions {
    * creates the session.
    */
   run(key: string, prompt: string, opts?: TurnOptions & { session?: SessionOptions }): Turn;
+
+  /**
+   * Get-or-create the session, then execute a registered tool in its existing queue.
+   */
+  runTool(
+    key: string,
+    name: string,
+    args: Record<string, unknown>,
+    opts?: TurnOptions & { session?: SessionOptions },
+  ): Turn;
 
   /**
    * Get-or-create without prompting.

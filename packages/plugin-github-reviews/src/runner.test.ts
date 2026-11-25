@@ -13,6 +13,7 @@ import type { GithubReviewsOptions } from "./types.js";
 interface RunnerFixtureOptions {
   options?: GithubReviewsOptions;
   delivery?: ReviewJob["delivery"];
+  toolReply?: (ctx: FakePluginContext) => Promise<string>;
   reply?: (ctx: FakePluginContext) => Promise<string>;
 }
 
@@ -73,6 +74,7 @@ function startRunner(input: RunnerFixtureOptions = {}) {
   const ctx = createFakePluginContext({
     source: "github-reviews",
     reply: () => input.reply?.(ctx) ?? "Done",
+    toolReply: () => input.toolReply?.(ctx) ?? "",
   });
   const worker = runReview({
     ctx,
@@ -102,6 +104,78 @@ function completed(name: string, result?: string) {
 }
 
 describe("review runner", () => {
+  test.each(["publish", "local-only"] as const)(
+    "prepares %s input before direct execution, with no parent prompt",
+    async (delivery) => {
+      let prepared = false;
+      const fixture = startRunner({
+        delivery,
+        options: {
+          entryTool: "run_selected_review",
+          prepareReview: (selection, signal) => {
+            expect(selection.delivery).toBe(delivery);
+            expect(signal.aborted).toBe(false);
+            prepared = true;
+          },
+        },
+        reply: async () => {
+          throw new Error("Parent model must not run");
+        },
+        toolReply: async (ctx) => {
+          expect(prepared).toBe(true);
+          await submit(
+            ctx,
+            "github_review_finish",
+            completed("github_review_finish", '{"markdown":"Report"}'),
+          );
+          return "";
+        },
+      });
+      expect((await fixture.worker.completion).submitted?.status).toBe("completed");
+      expect(fixture.ctx.turns).toEqual([]);
+      expect(fixture.ctx.toolCalls).toEqual([
+        { key: "selected", name: "run_selected_review", args: {} },
+      ]);
+      expect(fixture.records).toHaveLength(1);
+    },
+  );
+
+  test("cancelling preparation stops before worker startup", async () => {
+    const started = Promise.withResolvers<AbortSignal>();
+    const prepared = Promise.withResolvers<void>();
+    const fixture = startRunner({
+      options: {
+        entryTool: "review",
+        prepareReview: (selection, signal) => {
+          expect(selection.delivery).toBe("local-only");
+          started.resolve(signal);
+          return prepared.promise;
+        },
+      },
+    });
+    const signal = await started.promise;
+    fixture.worker.abort();
+    expect((await fixture.worker.completion).cancellation).toBe("cancelled");
+    expect(signal.aborted).toBe(true);
+    expect(fixture.ctx.toolCalls).toEqual([]);
+    expect(fixture.ctx.turns).toEqual([]);
+    prepared.resolve();
+  });
+
+  test("failed preparation stops before creating a worker", async () => {
+    const fixture = startRunner({
+      options: {
+        entryTool: "review",
+        prepareReview: () => {
+          throw new Error("Request cannot be written");
+        },
+      },
+    });
+    expect((await fixture.worker.completion).error).toContain("Request cannot be written");
+    expect(fixture.ctx.turns).toEqual([]);
+    expect(fixture.ctx.toolCalls).toEqual([]);
+  });
+
   test("shutdown does not replace an earlier manual cancellation", async () => {
     const fixture = startRunner();
     fixture.worker.abort();

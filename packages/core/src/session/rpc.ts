@@ -1,7 +1,11 @@
 import { ExecutionError } from "./execution.js";
 import type { ExecutionWork } from "./work.js";
 import * as z from "zod";
-import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  RpcCommand as PiRpcCommand,
+  RpcResponse as PiRpcResponse,
+} from "@earendil-works/pi-coding-agent";
 import { parseJsonl, JsonlWriter, type JsonObject } from "./jsonl.js";
 import { silentLogger } from "../utils/logger.js";
 import type { Logger, RuntimeProcess } from "../types.js";
@@ -37,6 +41,21 @@ const SubagentResultSchema = z.object({
     .max(100)
     .optional(),
 });
+
+/**
+ * Pi's direct tool RPC contract, pending its next published SDK types.
+ */
+type RpcCommand =
+  | PiRpcCommand
+  | { type: "execute_tool"; name: string; args: Record<string, unknown> };
+type RpcResponse =
+  | PiRpcResponse
+  | {
+      type: "response";
+      command: "execute_tool";
+      success: true;
+      data: { result: AgentToolResult<unknown> };
+    };
 
 interface PendingRequest {
   resolve: (msg: JsonObject) => void;
@@ -215,6 +234,37 @@ export class RpcSession {
   }
 
   /**
+   * Execute one registered tool and await its terminal receipt without a model prompt.
+   */
+  async executeTool(
+    name: string,
+    args: Record<string, unknown>,
+    opts: Omit<PromptOptions, "work"> = {},
+  ): Promise<AgentToolResult<unknown>> {
+    if (this.promptInFlight) throw new Error(`Session ${this.key} already has a prompt in flight`);
+    this.promptInFlight = true;
+    this.onEvent = opts.onEvent ?? null;
+    try {
+      const response = await this.request({ type: "execute_tool", name, args }, opts.timeoutMs);
+      if (response.data.result.isError) {
+        const diagnostic = response.data.result.content
+          .filter((block) => block.type === "text")
+          .map((block) => block.text)
+          .join("\n")
+          .slice(0, 4000);
+        throw new Error(`Tool ${name} failed${diagnostic ? `: ${diagnostic}` : ""}`);
+      }
+      return response.data.result;
+    } catch (err) {
+      this.abortTurn();
+      throw err;
+    } finally {
+      this.promptInFlight = false;
+      this.onEvent = null;
+    }
+  }
+
+  /**
    * Execute the bundled reload command only after verifying that it is registered.
    */
   async reload(): Promise<void> {
@@ -280,7 +330,12 @@ export class RpcSession {
     return new Promise<JsonObject>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`${command.type} timed out after ${timeoutMs / 1000}s`));
+        const message = `${command.type} timed out after ${timeoutMs / 1000}s`;
+        reject(
+          command.type === "execute_tool"
+            ? new ExecutionError("timeout", message)
+            : new Error(message),
+        );
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.writer.write({ ...command, id });

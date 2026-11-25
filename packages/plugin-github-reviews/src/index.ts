@@ -12,12 +12,13 @@ import { observeWorkflows } from "./workflows.js";
  * Own GitHub reviews and their execution; polling discovers review requests.
  */
 export function githubReviews(opts: GithubReviewsOptions): Plugin {
-  const { github, prompt, onRunStart, onRunComplete, resultSchema, ...input } = opts;
+  const { github, prompt, prepareReview, onRunStart, onRunComplete, resultSchema, ...input } = opts;
   const settings = GithubReviewsSettingsSchema.parse(input);
   const options = {
     ...settings,
     github,
     prompt,
+    prepareReview,
     onRunStart,
     onRunComplete,
     resultSchema,
@@ -35,7 +36,7 @@ export function githubReviews(opts: GithubReviewsOptions): Plugin {
     name: "github-reviews",
     tools: createReviewTools(ensureReviews, "tool"),
     mcpTools: createReviewTools(ensureReviews, "mcp"),
-    prepareExecution: settings.holdWorkflows ? observeWorkflows : undefined,
+    prepareExecution: settings.holdWorkflows && !settings.entryTool ? observeWorkflows : undefined,
     start(ctx) {
       if (reviews) throw new Error("GitHub reviews plugin is already started");
       const directory = path.resolve(settings.reviewsDirectory ?? ctx.filePath());
